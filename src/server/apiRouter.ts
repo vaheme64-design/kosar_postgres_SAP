@@ -30,7 +30,17 @@ import {
   PROCESS_DEFINITIONS,
   FACTORY_HALLS,
 } from '../types/inventory';
-import { checkDatabaseConnection, getPrismaClient, isDatabaseUrlConfigured } from './db/prisma';
+import {
+  checkDatabaseConnection,
+  getPrismaClient,
+  isDatabaseUrlConfigured,
+  getDualDbPublicStatus,
+  saveDualDbConfig,
+  testSingleDatabaseUrl,
+  readDualDbStoredConfig,
+  recordDualDbSyncResult,
+  DbTargetMode,
+} from './db/prisma';
 import { CreateProductionPlanSchema, CreateSapcoReceiptSchema } from './validation/index';
 import { formatToJalali } from '../utils/jalali';
 import { linkWipManufacturingOrderToRelational } from './wipIdentityBridge';
@@ -228,13 +238,26 @@ import {
   getFallbackCoilInventory,
   getFallbackLotConsumption,
   getFallbackSupplierMatrix,
+  exportFallbackProposalsSnapshot,
+  hydrateFallbackProposalsSnapshot,
+  clearFallbackProposalsStore,
 } from './inMemoryRelationalFallback';
+import {
+  getScenarioSelectors,
+  evaluateIndustrialScenario,
+  executeIndustrialScenario,
+  getIndustrialKpiSnapshot,
+  ScenarioId,
+  SCENARIO_CATALOG,
+} from './industrialScenariosEngine';
 
 // Server-side State Store (in production can be wired to PostgreSQL / Prisma / SQL Server / ERP)
 function uniqueParts(parts: Part[]): Part[] {
   const map = new Map<string, Part>();
   for (const p of parts) {
-    const key = (p.code || '').trim().toUpperCase();
+    const codeKey = (p.code || '').trim().toUpperCase();
+    const idKey = (p.id || '').trim();
+    const key = codeKey || idKey;
     if (key && !map.has(key)) {
       map.set(key, p);
     } else if (key && map.has(key)) {
@@ -854,7 +877,7 @@ function readInventoryDiskSnapshot(): any | null {
 function applyHydratedInventoryPayload(payload: any): void {
   if (!payload || typeof payload !== 'object') return;
   if (Array.isArray(payload.parts) && payload.parts.length > 0) {
-    partsStore = payload.parts;
+    partsStore = uniqueParts(payload.parts);
   }
   if (Array.isArray(payload.units) && payload.units.length > 0) {
     unitsStore = payload.units;
@@ -968,6 +991,9 @@ function applyHydratedInventoryPayload(payload: any): void {
   if (Array.isArray(payload.productStructures)) {
     productStructuresStore = payload.productStructures;
   }
+  if (Array.isArray(payload.fallbackPlanProposals)) {
+    hydrateFallbackProposalsSnapshot(payload.fallbackPlanProposals);
+  }
 }
 
 export async function persistInventoryAppState(): Promise<void> {
@@ -1009,6 +1035,7 @@ export async function persistInventoryAppState(): Promise<void> {
     spareParts: sparePartsStore,
     oeeConsumablesState: exportOeeConsumablesSnapshot(),
     productStructures: productStructuresStore,
+    fallbackPlanProposals: exportFallbackProposalsSnapshot(),
   }));
 
   // Always persist to durable local disk first so zero data is ever lost across restarts
@@ -1104,7 +1131,7 @@ export async function loadInventoryAppState(): Promise<void> {
           isDemo: false,
         } as Part);
       }
-      partsStore = Array.from(existingByCode.values());
+      partsStore = uniqueParts(Array.from(existingByCode.values()));
     }
 
     const [dbPhysicalCoils, dbCoilIssueRecords] = await Promise.all([
@@ -1834,6 +1861,32 @@ apiRouter.post('/parts', async (req: Request, res: Response) => {
     }
   } catch (error) {
     return res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در ثبت قطعه در پایگاه داده' });
+  }
+});
+
+apiRouter.delete('/parts/:id', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const index = partsStore.findIndex(p => p.id === id || p.code.toUpperCase() === id.toUpperCase());
+    if (index < 0) {
+      return res.status(404).json({ success: false, error: 'قطعه مورد نظر در کاتالوگ یافت نشد.' });
+    }
+    const removed = partsStore[index];
+    partsStore.splice(index, 1);
+    if (isDatabaseUrlConfigured()) {
+      try {
+        const prisma = getPrismaClient();
+        await prisma.part.delete({ where: { id: removed.id } }).catch(() => {
+          return prisma.part.update({ where: { id: removed.id }, data: { active: false } });
+        });
+      } catch (dbErr) {
+        console.warn('[KPIMS /api/parts DELETE] DB delete warning:', dbErr);
+      }
+    }
+    await persistInventoryAppState();
+    return res.json({ success: true, message: `قطعه «${removed.name}» با موفقیت از کاتالوگ حذف گردید.` });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در حذف قطعه' });
   }
 });
 
@@ -2842,6 +2895,7 @@ apiRouter.post('/demo-data/clean', async (req: Request, res: Response) => {
   for (const key of Object.keys(serverQcHoldStore)) delete serverQcHoldStore[key];
 
   clearCustomerOrdersAndPlans();
+  clearFallbackProposalsStore();
   clearProductionWipData();
 
   // Also clean PostgreSQL / Prisma database records if connected
@@ -2891,9 +2945,10 @@ apiRouter.post('/demo-data/clean', async (req: Request, res: Response) => {
 /**
  * 13. Database Configuration & Health Status (Prisma / PostgreSQL Diagnostic)
  */
-apiRouter.get('/db/status', async (_req: Request, res: Response) => {
+apiRouter.get('/db/status', async (req: Request, res: Response) => {
   try {
-    const status = await checkDatabaseConnection();
+    const probeLinks = req.query.probe === 'true';
+    const status = await checkDatabaseConnection(probeLinks);
     res.json({
       success: true,
       data: status,
@@ -2920,6 +2975,135 @@ apiRouter.get('/db/status', async (_req: Request, res: Response) => {
     res.status(500).json({
       success: false,
       error: error instanceof Error ? error.message : 'خطا در ارزیابی اتصال پایگاه داده',
+    });
+  }
+});
+
+apiRouter.get('/db/config', async (req: Request, res: Response) => {
+  try {
+    const probeLinks = req.query.probe === 'true';
+    const data = await getDualDbPublicStatus(probeLinks);
+    res.json({ success: true, data });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'خطا در دریافت تنظیمات دو پایگاه داده',
+    });
+  }
+});
+
+apiRouter.put('/db/config', async (req: Request, res: Response) => {
+  try {
+    const { localDbUrl, cloudDbUrl, activeTarget } = req.body || {};
+    const validTargets: DbTargetMode[] = ['AUTO', 'LOCAL', 'CLOUD', 'HYBRID_DISK'];
+    if (activeTarget !== undefined && !validTargets.includes(activeTarget)) {
+      return res.status(400).json({ success: false, error: 'حالت انتخاب‌شده برای پایگاه داده فعال معتبر نیست.' });
+    }
+    const updated = await saveDualDbConfig({
+      localDbUrl: typeof localDbUrl === 'string' ? localDbUrl : undefined,
+      cloudDbUrl: typeof cloudDbUrl === 'string' ? cloudDbUrl : undefined,
+      activeTarget,
+    });
+    const status = await checkDatabaseConnection(false);
+    res.json({
+      success: true,
+      message: status.isConnected
+        ? `تنظیمات دو پایگاه داده ذخیره و اتصال به ${status.dualLinks?.resolvedTarget === 'LOCAL' ? 'پایگاه داده محلی (Local)' : 'پایگاه داده ابری (Cloud)'} برقرار شد.`
+        : 'تنظیمات دو پایگاه داده ذخیره شد؛ اکنون سیستم روی موتور پایدار دیسک محلی (Hybrid Durable) فعال است.',
+      data: updated,
+      status,
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'خطا در ذخیره تنظیمات اتصال دو پایگاه داده',
+    });
+  }
+});
+
+apiRouter.post('/db/test', async (req: Request, res: Response) => {
+  try {
+    const { target, url } = req.body || {};
+    const stored = readDualDbStoredConfig();
+    let urlToTest = typeof url === 'string' ? url.trim() : '';
+    if (!urlToTest || urlToTest.includes(':****@')) {
+      urlToTest = target === 'LOCAL' ? stored.localDbUrl : target === 'CLOUD' ? stored.cloudDbUrl : '';
+    }
+    if (!urlToTest) {
+      return res.status(400).json({
+        success: false,
+        error: 'لینک اتصال پایگاه داده برای تست وارد نشده است.',
+      });
+    }
+    const result = await testSingleDatabaseUrl(urlToTest, 4500);
+    res.status(result.success ? 200 : 400).json(result);
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'خطا در تست اتصال پایگاه داده',
+    });
+  }
+});
+
+apiRouter.post('/db/sync', async (_req: Request, res: Response) => {
+  try {
+    await persistInventoryAppState();
+    await persistProductionWipState();
+    const status = await checkDatabaseConnection(false);
+
+    if (!isDatabaseUrlConfigured()) {
+      const summary = `همگام‌سازی کامل روی دیسک پایدار انجام شد (${partsStore.length} قطعه، ${physicalCoilsStore.length} کلاف، ${manufacturingOrdersStore.length} دستور کار). PostgreSQL در این لحظه متصل نیست.`;
+      recordDualDbSyncResult(summary);
+      return res.json({
+        success: true,
+        target: 'HYBRID_DISK',
+        postgresSynced: false,
+        message: summary,
+        counts: {
+          parts: partsStore.length,
+          contracts: contractsStore.length,
+          coils: physicalCoilsStore.length,
+          orders: customerOrdersStore.length,
+          manufacturingOrders: manufacturingOrdersStore.length,
+          inventoryDocs: inventoryDocsStore.length,
+        },
+        status: await checkDatabaseConnection(false),
+      });
+    }
+
+    const uRes = await syncUnitsToPostgres(unitsStore);
+    const wRes = await syncWarehousesToPostgres(warehousesStore);
+    const cuRes = await syncCustomersToPostgres(customersStore);
+    const pRes = await syncPartsToPostgres(partsStore);
+    const cRes = await syncContractsToPostgres(contractsStore);
+    const coilRes = await syncCoilsToPostgres(physicalCoilsStore);
+    await persistInventoryAppState();
+    await persistProductionWipState();
+
+    const summary = `همگام‌سازی کامل با PostgreSQL (${status.dualLinks?.resolvedTarget || 'PG'}): ${pRes.syncedCount} قطعه، ${cRes.syncedCount} قرارداد، ${coilRes.syncedCount} کلاف و Snapshot تولید/انبار ثبت شد.`;
+    recordDualDbSyncResult(summary);
+
+    res.json({
+      success: true,
+      target: status.dualLinks?.resolvedTarget || 'POSTGRESQL',
+      postgresSynced: true,
+      message: summary,
+      counts: {
+        units: uRes.syncedCount,
+        warehouses: wRes.syncedCount,
+        customers: cuRes.syncedCount,
+        parts: pRes.syncedCount,
+        contracts: cRes.syncedCount,
+        coils: coilRes.syncedCount,
+        orders: customerOrdersStore.length,
+        manufacturingOrders: manufacturingOrdersStore.length,
+      },
+      status: await checkDatabaseConnection(false),
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'خطا در همگام‌سازی داده‌ها',
     });
   }
 });
@@ -9364,17 +9548,30 @@ apiRouter.get('/planning/dashboard-metrics', async (_req: Request, res: Response
         prisma.productionPlanProposal.findMany({ select: { status: true } }),
       ]);
       const requirements = readModel.requirements || [];
-      const totalGrossDemandPieces = requirements.reduce((sum: number, r: any) => sum + Number(r.grossDemandQuantity || 0), 0);
-      const totalNetProductionRequirementsPieces = requirements.reduce((sum: number, r: any) => sum + Number(r.netToProduceQuantity || 0), 0);
+      const totalGrossDemandPieces = requirements.reduce(
+        (sum: number, r: any) => sum + Number(r.grossDemandQty ?? r.grossDemandQuantity ?? 0),
+        0,
+      );
+      const totalNetProductionRequirementsPieces = requirements.reduce(
+        (sum: number, r: any) => sum + Number(r.netProductionRequirement ?? r.netToProduceQuantity ?? 0),
+        0,
+      );
       const totalMaterialShortageKg = requirements.reduce((sum: number, r: any) => sum + Number(r.materialShortageKg || 0), 0);
       const activeSuggestionsCount = proposals.filter((p: any) => p.status === 'DRAFT').length;
       const approvedPlansCount = proposals.filter((p: any) => p.status === 'APPROVED' || p.status === 'RELEASED').length;
+      const activeMachines = machinesStore.filter(m => m.status === 'ACTIVE');
+      const totalAvailableCapHours = Math.max(1, activeMachines.length * 16);
+      const totalWorkloadHours = activeMachines.reduce((s, m) => s + Number(machineWorkloadHoursMap[m.id] || 0), 0);
+      const averageMachineCapacityUtilizationPercent = Math.min(
+        100,
+        Math.round((totalWorkloadHours / totalAvailableCapHours) * 1000) / 10,
+      );
       const criticalPartsRequiringImmediateAction = requirements
-        .filter((r: any) => Number(r.netToProduceQuantity || 0) > 0 || r.hasMaterialShortage)
+        .filter((r: any) => Number(r.netProductionRequirement ?? r.netToProduceQuantity ?? 0) > 0 || r.hasMaterialShortage)
         .map((r: any) => ({
           partCode: r.partCode,
           partName: r.partName,
-          netShortage: Number(r.netToProduceQuantity || 0),
+          netShortage: Number(r.netProductionRequirement ?? r.netToProduceQuantity ?? 0),
           dueDate: r.demandLines?.[0]?.dueDate || new Date().toISOString(),
           hasMaterialShortage: Boolean(r.hasMaterialShortage),
         }));
@@ -9389,8 +9586,8 @@ apiRouter.get('/planning/dashboard-metrics', async (_req: Request, res: Response
           totalMaterialShortageKg,
           activeSuggestionsCount,
           approvedPlansCount,
-          infeasiblePlansCount: 0,
-          averageMachineCapacityUtilizationPercent: 0,
+          infeasiblePlansCount: requirements.filter((r: any) => !r.routeId || r.hasMaterialShortage).length,
+          averageMachineCapacityUtilizationPercent,
           criticalPartsRequiringImmediateAction,
         },
       });
@@ -9539,6 +9736,148 @@ apiRouter.post('/planning/proposals/:id/release', async (req: Request, res: Resp
   } catch (error) {
     const message = error instanceof Error ? error.message : 'خطا در صدور برنامه تولید';
     return res.status(/یافت نشد/i.test(message) ? 404 : 409).json({ success: false, error: message });
+  }
+});
+
+apiRouter.post('/planning/proposals/:id/approve-and-release', async (req: Request, res: Response) => {
+  try {
+    const actor = typeof req.body?.actor === 'string' && req.body.actor.trim()
+      ? req.body.actor.trim()
+      : (typeof req.body?.releasedBy === 'string' && req.body.releasedBy.trim() ? req.body.releasedBy.trim() : 'مدیر برنامه‌ریزی تولید');
+
+    if (isDatabaseUrlConfigured()) {
+      const rel = await getRelationalPlanProposal(req.params.id).catch(() => null);
+      if (rel) {
+        if (rel.status === 'DRAFT') {
+          await approveRelationalPlanProposal(req.params.id, actor);
+        }
+        const data = await releaseRelationalPlanProposal(req.params.id, actor);
+        const moNumbers = (data.manufacturingOrders || []).map((m: any) => m.moNumber);
+        return res.status(data.replayed ? 200 : 201).json({
+          success: true,
+          message: data.replayed
+            ? `این پیشنهاد قبلاً صادر شده است (برنامه ${data.plan?.planNumber}).`
+            : `پیشنهاد تأیید و برنامه «${data.plan?.planNumber}» به همراه ${moNumbers.length} دستور کار [${moNumbers.join('، ')}] صادر شد.`,
+          data,
+        });
+      }
+    }
+
+    const fb = getFallbackProposal(req.params.id);
+    if (!fb) {
+      return res.status(404).json({ success: false, error: 'پیشنهاد برنامه یافت نشد.' });
+    }
+    if (fb.status === 'DRAFT') {
+      approveFallbackProposal(req.params.id, actor);
+    }
+    const data = await releaseFallbackProposal(req.params.id, actor, partsStore, routingsStore);
+    await persistProductionWipState();
+    await persistInventoryAppState();
+    const moNumbers = (data.manufacturingOrders || []).map((m: any) => m.moNumber);
+    return res.status(data.replayed ? 200 : 201).json({
+      success: true,
+      message: data.replayed
+        ? `این پیشنهاد قبلاً صادر شده است (برنامه ${data.plan?.planNumber}).`
+        : `پیشنهاد تأیید و برنامه «${data.plan?.planNumber}» با دستور کارهای [${moNumbers.join('، ')}] به WIP صادر شد.`,
+      data,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'خطا در تأیید و صدور فوری دستور کار';
+    return res.status(/یافت نشد/i.test(message) ? 404 : 409).json({ success: false, error: message });
+  }
+});
+
+/**
+ * 18.2b Live Multi-Scenario Industrial Engine (12 Real Automotive-Stamping Scenarios + Live KPIs)
+ */
+const getScenarioStores = () => ({
+  parts: partsStore,
+  machines: machinesStore,
+  routings: routingsStore,
+  dies: diesStore,
+  contracts: contractsStore,
+  physicalCoils: physicalCoilsStore,
+  inventoryDocs: inventoryDocsStore,
+  reservations: reservationsStore,
+  transactions: transactionsStore,
+  auditLogs: auditLogsStore,
+});
+
+apiRouter.get('/scenarios/catalog', (_req: Request, res: Response) => {
+  try {
+    const data = getScenarioSelectors(getScenarioStores());
+    res.json({ success: true, data });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'خطا در دریافت فهرست سناریوهای صنعتی',
+    });
+  }
+});
+
+apiRouter.get('/scenarios/kpi-snapshot', (_req: Request, res: Response) => {
+  try {
+    const data = getIndustrialKpiSnapshot(getScenarioStores());
+    res.json({ success: true, data });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'خطا در محاسبه شاخص‌های کلیدی تولید و موجودی',
+    });
+  }
+});
+
+apiRouter.post('/scenarios/evaluate', (req: Request, res: Response) => {
+  try {
+    const scenarioId = String(req.body?.scenarioId || 'PROD_ORDER') as ScenarioId;
+    if (!SCENARIO_CATALOG.some(c => c.id === scenarioId)) {
+      return res.status(400).json({ success: false, error: 'شناسه سناریو معتبر نیست.' });
+    }
+    const evaluation = evaluateIndustrialScenario(
+      {
+        scenarioId,
+        partIdOrCode: req.body?.partIdOrCode,
+        coilId: req.body?.coilId,
+        quantity: req.body?.quantity,
+        machineId: req.body?.machineId,
+      },
+      getScenarioStores(),
+    );
+    res.json({ success: true, data: evaluation });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'خطا در ارزیابی سناریو',
+    });
+  }
+});
+
+apiRouter.post('/scenarios/execute', async (req: Request, res: Response) => {
+  try {
+    const scenarioId = String(req.body?.scenarioId || 'PROD_ORDER') as ScenarioId;
+    if (!SCENARIO_CATALOG.some(c => c.id === scenarioId)) {
+      return res.status(400).json({ success: false, error: 'شناسه سناریو معتبر نیست.' });
+    }
+    const result = await executeIndustrialScenario(
+      {
+        scenarioId,
+        partIdOrCode: req.body?.partIdOrCode,
+        coilId: req.body?.coilId,
+        quantity: req.body?.quantity,
+        machineId: req.body?.machineId,
+        userName: req.body?.userName,
+      },
+      getScenarioStores(),
+    );
+    await persistInventoryAppState();
+    await persistProductionWipState();
+    res.status(201).json(result);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : 'خطا در اجرای سناریوی صنعتی';
+    res.status(/یافت نشد|معتبر نیست|ثبت نشده/i.test(msg) ? 409 : 500).json({
+      success: false,
+      error: msg,
+    });
   }
 });
 

@@ -51,6 +51,7 @@ export const SalesContractsModuleView: React.FC<SalesContractsModuleViewProps> =
   initialSubTab = 'CONTRACTS_QUOTAS',
   onNavigateToPlanning,
   onNavigateToInventoryLedger,
+  onGlobalRefresh,
 }) => {
   const { requestConfirm, showUndoToast, recordAudit } = useEnterpriseUx();
   const { route, navigate, traceDocument, clearDocQuery } = useErpRouter();
@@ -90,6 +91,8 @@ export const SalesContractsModuleView: React.FC<SalesContractsModuleViewProps> =
   const [orderQuantity, setOrderQuantity] = useState(2500);
   const [orderNotes, setOrderNotes] = useState('');
   const [orderSuccessMsg, setOrderSuccessMsg] = useState<string | null>(null);
+  const [orderErrorMsg, setOrderErrorMsg] = useState<string | null>(null);
+  const [createOrderError, setCreateOrderError] = useState<string | null>(null);
 
   // Edit Customer Order & Revisions Slide-Over Drawer State
   const [editingOrderId, setEditingOrderId] = useState<string | null>(null);
@@ -202,10 +205,12 @@ export const SalesContractsModuleView: React.FC<SalesContractsModuleViewProps> =
   const handleSaveOrderEdit = () => {
     if (!activeDrawerOrder) return;
     const prevOrders = [...customerOrders];
+    const prevRevsMap = { ...orderRevisionsMap };
     const oldTotalQty = (activeDrawerOrder.lines || []).reduce((s, l) => s + l.orderedQuantity, 0);
     const newTotalQty = editOrderLines.reduce((s, l) => s + (Number(l.orderedQuantity) || 0), 0);
 
     const performSave = async () => {
+      setOrderErrorMsg(null);
       const existingRevs = [
         ...(orderRevisionsMap[activeDrawerOrder.id] || activeDrawerOrder.revisions || []),
       ];
@@ -252,7 +257,7 @@ export const SalesContractsModuleView: React.FC<SalesContractsModuleViewProps> =
       );
 
       try {
-        await fetch(`/api/planning/customer-orders/${activeDrawerOrder.id}`, {
+        const res = await fetch(`/api/planning/customer-orders/${activeDrawerOrder.id}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -268,28 +273,39 @@ export const SalesContractsModuleView: React.FC<SalesContractsModuleViewProps> =
             revisionReasonFa: editOrderRevReason.trim(),
           }),
         });
-      } catch {
-        // local state updated
+        const json = await res.json().catch(() => ({}));
+        if (!res.ok || !json.success) {
+          throw new Error(json.error || 'ذخیره تغییرات سفارش در سرور ناموفق بود.');
+        }
+
+        recordAudit({
+          actionType: 'UPDATE',
+          module: 'سفارشات فروش (CustomerOrders)',
+          entityId: activeDrawerOrder.id,
+          entityCode: activeDrawerOrder.orderNumber,
+          summaryFa: `ویرایش سفارش فروش «${activeDrawerOrder.orderNumber}» — تیراژ: ${formatNumber(newTotalQty)} عدد`,
+          beforeSnapshot: { totalQty: oldTotalQty, status: activeDrawerOrder.status },
+          afterSnapshot: { totalQty: newTotalQty, status: editOrderStatus },
+        });
+
+        showUndoToast({
+          title: `سفارش فروش «${activeDrawerOrder.orderNumber}» ویرایش شد`,
+          description: 'تغییرات تیراژ و وضعیت در تاریخچه سفارش (Revisions) ثبت گردید.',
+          onUndo: () => {
+            setCustomerOrders(prevOrders);
+            setOrderRevisionsMap(prevRevsMap);
+          },
+        });
+
+        setEditOrderRevReason('');
+        setOrderDrawerTab('REVISIONS');
+        await fetchAllData();
+        if (onGlobalRefresh) await onGlobalRefresh();
+      } catch (err) {
+        setCustomerOrders(prevOrders);
+        setOrderRevisionsMap(prevRevsMap);
+        setOrderErrorMsg(err instanceof Error ? err.message : 'خطا در ذخیره تغییرات سفارش مشتری');
       }
-
-      recordAudit({
-        actionType: 'UPDATE',
-        module: 'سفارشات فروش (CustomerOrders)',
-        entityId: activeDrawerOrder.id,
-        entityCode: activeDrawerOrder.orderNumber,
-        summaryFa: `ویرایش سفارش فروش «${activeDrawerOrder.orderNumber}» — تیراژ: ${formatNumber(newTotalQty)} عدد`,
-        beforeSnapshot: { totalQty: oldTotalQty, status: activeDrawerOrder.status },
-        afterSnapshot: { totalQty: newTotalQty, status: editOrderStatus },
-      });
-
-      showUndoToast({
-        title: `سفارش فروش «${activeDrawerOrder.orderNumber}» ویرایش شد`,
-        description: 'تغییرات تیراژ و وضعیت در تاریخچه سفارش (Revisions) ثبت گردید.',
-        onUndo: () => setCustomerOrders(prevOrders),
-      });
-
-      setEditOrderRevReason('');
-      setOrderDrawerTab('REVISIONS');
     };
 
     if (editOrderStatus !== 'ACTIVE' || newTotalQty !== oldTotalQty) {
@@ -311,8 +327,12 @@ export const SalesContractsModuleView: React.FC<SalesContractsModuleViewProps> =
 
   const handleCreateOrder = async (e: React.FormEvent) => {
     e.preventDefault();
+    setCreateOrderError(null);
     const part = parts.find(p => p.id === selectedPartId);
-    if (!part) return;
+    if (!part) {
+      setCreateOrderError('لطفاً یک قطعه معتبر برای ثبت سفارش انتخاب کنید.');
+      return;
+    }
 
     try {
       const res = await fetch('/api/planning/customer-orders', {
@@ -341,17 +361,21 @@ export const SalesContractsModuleView: React.FC<SalesContractsModuleViewProps> =
           ],
         }),
       });
-      const json = await res.json();
-      if (json.success) {
-        setShowOrderModal(false);
-        setOrderNumber('');
-        setOrderNotes('');
-        setOrderSuccessMsg('سفارش مشتری با موفقیت ثبت شد و به موتور برنامه‌ریزی تولید و MRP منتقل گردید.');
-        setTimeout(() => setOrderSuccessMsg(null), 5000);
-        await fetchAllData();
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok || !json.success) {
+        setCreateOrderError(json.error || 'ثبت سفارش مشتری در سرور با خطا مواجه شد.');
+        return;
       }
+      setShowOrderModal(false);
+      setOrderNumber('');
+      setOrderNotes('');
+      setOrderErrorMsg(null);
+      setOrderSuccessMsg('سفارش مشتری با موفقیت ثبت شد و به موتور برنامه‌ریزی تولید و MRP منتقل گردید.');
+      setTimeout(() => setOrderSuccessMsg(null), 5000);
+      await fetchAllData();
+      if (onGlobalRefresh) await onGlobalRefresh();
     } catch (err) {
-      console.error(err);
+      setCreateOrderError(err instanceof Error ? err.message : 'خطای ارتباط با سرور در ثبت سفارش');
     }
   };
 
@@ -410,6 +434,22 @@ export const SalesContractsModuleView: React.FC<SalesContractsModuleViewProps> =
           </button>
         </div>
       </div>
+
+      {orderErrorMsg && (
+        <div className="p-3 rounded bg-[#ffecec] border border-[#f5b7b1] text-[#bb0000] text-xs flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            <span className="font-medium">{orderErrorMsg}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setOrderErrorMsg(null)}
+            className="p-0.5 rounded hover:bg-black/5 cursor-pointer"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
 
       {orderSuccessMsg && (
         <div className="p-3 rounded bg-[#f2f8f4] border border-[#b7dfc7] text-[#107e3e] text-xs flex items-center justify-between">
@@ -930,6 +970,12 @@ export const SalesContractsModuleView: React.FC<SalesContractsModuleViewProps> =
             </div>
 
             <form onSubmit={handleCreateOrder} className="p-5 space-y-3 text-xs">
+              {createOrderError && (
+                <div className="p-2.5 rounded bg-[#ffecec] border border-[#f5b7b1] text-[#bb0000] text-xs flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 shrink-0" />
+                  <span>{createOrderError}</span>
+                </div>
+              )}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block text-[#333333] font-medium mb-1">شماره سفارش فروش</label>

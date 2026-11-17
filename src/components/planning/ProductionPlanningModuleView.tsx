@@ -140,15 +140,18 @@ export const ProductionPlanningModuleView: React.FC<ProductionPlanningModuleView
             };
             const assignments = Array.isArray(line.operationAssignments) ? line.operationAssignments : [];
             const proposedOperations = assignments.map((op: any, opIdx: number) => {
-              const matchedMachine = machines.find(m => m.id === op.machineId || m.code === op.machine?.code);
+              const matchedMachine = machines.find(m => m.id === op.machineId || m.code === op.machine?.code || m.code === op.machineCode);
+              const cycleTimeSec = Number(op.standardCycleTimeSec || 0);
+              const setupMin = Number(op.setupTimeMin || 0);
+              const estRunH = cycleTimeSec > 0 ? Number(((plannedQty * cycleTimeSec) / 3600).toFixed(2)) : 0;
               const eligibleCheck = matchedMachine
                 ? {
                     machineId: matchedMachine.id,
                     machineCode: matchedMachine.code,
                     machineName: matchedMachine.name,
-                    hall: matchedMachine.location || 'سالن پرس‌کاری',
+                    hall: matchedMachine.location || 'سالن تولید',
                     processType: matchedMachine.processType,
-                    tonnage: matchedMachine.tonnage || 250,
+                    tonnage: matchedMachine.tonnage || op.requiredTonnage || 0,
                     isEligible: true,
                     ineligibleReasons: [],
                     processMatch: true,
@@ -159,8 +162,8 @@ export const ProductionPlanningModuleView: React.FC<ProductionPlanningModuleView
                     dailyCapacityHours: 15,
                     currentWorkloadHours: 0,
                     availableHoursRemaining: 15,
-                    estimatedSetupTimeMin: 25,
-                    estimatedRunTimeHours: Number(((plannedQty * 12) / 3600).toFixed(2)),
+                    estimatedSetupTimeMin: setupMin,
+                    estimatedRunTimeHours: estRunH,
                     currentWorkloadPercent: 0,
                     suitabilityScore: 95,
                     recommendationRank: 1,
@@ -172,11 +175,11 @@ export const ProductionPlanningModuleView: React.FC<ProductionPlanningModuleView
                 stepCode: op.stepCode || `OP${(opIdx + 1) * 10}`,
                 stepName: op.stepName || `عملیات ${opIdx + 1}`,
                 processType: matchedMachine?.processType || 'BLANKING',
-                requiredTonnage: matchedMachine?.tonnage || 200,
+                requiredTonnage: Number(op.requiredTonnage ?? matchedMachine?.tonnage ?? 0),
                 plannedQuantity: plannedQty,
-                standardCycleTimeSec: 12,
-                setupTimeMin: 25,
-                estimatedRunHours: Number(((plannedQty * 12) / 3600).toFixed(2)),
+                standardCycleTimeSec: cycleTimeSec,
+                setupTimeMin: setupMin,
+                estimatedRunHours: estRunH,
                 dieMoldId: op.dieId || undefined,
                 dieMoldCode: op.die?.code || undefined,
                 dieMoldName: op.die?.name || undefined,
@@ -188,7 +191,7 @@ export const ProductionPlanningModuleView: React.FC<ProductionPlanningModuleView
             });
 
             return {
-              id: `${prop.id}-${line.id || lineIdx}`,
+              id: prop.id,
               planNumber: prop.proposalNumber,
               planVersion: `V${prop.version || 1}.0`,
               partId: line.partId,
@@ -203,7 +206,7 @@ export const ProductionPlanningModuleView: React.FC<ProductionPlanningModuleView
               netRequiredQuantity: netMatch?.netProductionRequirement ?? plannedQty,
               proposedQuantity: plannedQty,
               materialStatus: {
-                requiredGrade: netMatch?.requiredMaterialGrade || 'DC01A',
+                requiredGrade: line.materialGrade || netMatch?.requiredMaterialGrade || 'نامشخص',
                 requiredWeightKg: netMatch?.requiredMaterialKg ?? 0,
                 availableWeightKg: netMatch?.availableRawMaterialKg ?? 0,
                 shortageKg: netMatch?.materialShortageKg ?? 0,
@@ -390,7 +393,7 @@ export const ProductionPlanningModuleView: React.FC<ProductionPlanningModuleView
 
   const handleApprovePlan = async (id: string, approvedBy: string) => {
     try {
-      const res = await fetch(`/api/planning/suggestions/${id}/approve`, {
+      const res = await fetch(`/api/planning/proposals/${id}/approve`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ approvedBy }),
@@ -400,6 +403,7 @@ export const ProductionPlanningModuleView: React.FC<ProductionPlanningModuleView
         return { success: false, error: data.error || 'خطا در تصویب برنامه' };
       }
       await loadPlanningData();
+      if (onGlobalRefresh) await onGlobalRefresh();
       return { success: true, message: data.message };
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : 'خطای ارتباط' };
@@ -408,10 +412,10 @@ export const ProductionPlanningModuleView: React.FC<ProductionPlanningModuleView
 
   const handleReleaseMo = async (id: string, releasedBy: string) => {
     try {
-      const res = await fetch(`/api/planning/suggestions/${id}/release-mo`, {
+      const res = await fetch(`/api/planning/proposals/${id}/approve-and-release`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ releasedBy }),
+        body: JSON.stringify({ actor: releasedBy }),
       });
       const data = await res.json();
       if (!res.ok || !data.success) {
@@ -419,7 +423,11 @@ export const ProductionPlanningModuleView: React.FC<ProductionPlanningModuleView
       }
       await loadPlanningData();
       if (onGlobalRefresh) await onGlobalRefresh();
-      return { success: true, message: data.message, moId: data.data?.manufacturingOrder?.id };
+      return {
+        success: true,
+        message: data.message,
+        moId: data.data?.manufacturingOrders?.[0]?.id,
+      };
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : 'خطای ارتباط' };
     }
@@ -427,17 +435,18 @@ export const ProductionPlanningModuleView: React.FC<ProductionPlanningModuleView
 
   const handleRevisePlan = async (id: string, changeReason: string) => {
     try {
-      const res = await fetch(`/api/planning/suggestions/${id}/revise`, {
+      const res = await fetch(`/api/planning/proposals/${id}/revise`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ changeReason }),
+        body: JSON.stringify({ changes: [], note: changeReason }),
       });
       const data = await res.json();
       if (!res.ok || !data.success) {
         return { success: false, error: data.error || 'خطا در ایجاد بازنگری' };
       }
       await loadPlanningData();
-      return { success: true, message: data.message, newPlanId: data.data?.newPlan?.id };
+      if (onGlobalRefresh) await onGlobalRefresh();
+      return { success: true, message: data.message, newPlanId: data.data?.id || data.data?.newPlan?.id };
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : 'خطای ارتباط' };
     }
@@ -882,7 +891,7 @@ export const ProductionPlanningModuleView: React.FC<ProductionPlanningModuleView
                       type="button"
                       onClick={() => {
                         setSelectedSuggestionId(plan.id);
-                        setActiveSubTab('recommendations');
+                        handleSelectSubTab('recommendations');
                       }}
                       className="text-xs text-[#007cc0] hover:underline font-semibold cursor-pointer"
                     >

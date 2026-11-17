@@ -21,8 +21,10 @@ import {
   ExternalLink,
 } from 'lucide-react';
 import { exportToCsv } from '../../utils/csvExport';
+import { useErpRouter, RouteNavigateParams } from '../../context/RouterContext';
 
 export const ProductionWorkflowDocumentationView: React.FC = () => {
+  const { navigate } = useErpRouter();
   const [selectedPhaseId, setSelectedPhaseId] = useState<string>('PHASE-BOM');
   const [activeStandardTab, setActiveStandardTab] = useState<'WORKFLOW' | 'SAP_PP_COMPARISON' | 'DOCUMENTATION_SPEC'>('WORKFLOW');
 
@@ -43,6 +45,8 @@ export const ProductionWorkflowDocumentationView: React.FC = () => {
       outputs: 'سفارش مشتری تاییدشده (Customer Order / Demand Schedule)',
       kpi: 'دقت پیش‌بینی تقاضا (Forecast Accuracy > 95%)، درصد سفارشات ثبت‌شده به موقع',
       color: 'blue',
+      navLabel: 'باز کردن سفارشات و قراردادهای ساپکو',
+      navParams: { tab: 'contracts' } as RouteNavigateParams,
     },
     {
       id: 'PHASE-BOM',
@@ -57,6 +61,8 @@ export const ProductionWorkflowDocumentationView: React.FC = () => {
       outputs: 'پیشنهادات برنامه تولید (Planned Orders) و درخواست خرید/تخصیص ورق (Purchase Requisition)',
       kpi: 'نرخ پرتی مجاز مهندسی (Scrap Allowance < 2%)، تراز دقیق متریال بدون کسری خط',
       color: 'indigo',
+      navLabel: 'اجرای MRP و بررسی BOM',
+      navParams: { tab: 'planning', planningSubTab: 'mrp' } as RouteNavigateParams,
     },
     {
       id: 'PHASE-ROUTING',
@@ -71,6 +77,8 @@ export const ProductionWorkflowDocumentationView: React.FC = () => {
       outputs: 'دستور کار کارگاهی مصوب (Manufacturing Order - MO) و برگه توزیع کار روزانه خط (Dispatch Sheet)',
       kpi: 'نرخ بهره‌برداری ظرفیت (Capacity Utilization > 85%)، انطباق با برنامه (Adherence)',
       color: 'amber',
+      navLabel: 'تایید پیشنهاد برنامه و گانت ظرفیت',
+      navParams: { tab: 'planning', planningSubTab: 'recommendations' } as RouteNavigateParams,
     },
     {
       id: 'PHASE-DISPATCH',
@@ -85,6 +93,8 @@ export const ProductionWorkflowDocumentationView: React.FC = () => {
       outputs: 'نوارها و شیت‌های برش‌خورده اولیه آماده ورود به ایستگاه بلنک‌زنی',
       kpi: 'زمان تحویل کلاف به خط (Lead Time < 15 min)، مغایرت صفر در وزن تحویلی',
       color: 'orange',
+      navLabel: 'ثبت حواله رول ورق و کلاف‌ها',
+      navParams: { tab: 'inventory', inventorySubTab: 'COILS' } as RouteNavigateParams,
     },
     {
       id: 'PHASE-WIP',
@@ -99,6 +109,8 @@ export const ProductionWorkflowDocumentationView: React.FC = () => {
       outputs: 'کارت‌های ردیابی نیمه‌ساخته (WIP Cards)، داده‌های محاسبه OEE و لاگ تعمیرات اضطراری PM',
       kpi: 'شاخص OEE بالای ۷۰٪، نرخ ضایعات زیر ۱.۸٪، میانگین زمان توقف تعویض قالب زیر ۳۵ دقیقه',
       color: 'rose',
+      navLabel: 'کارتابل دستور کار و رهگیری WIP',
+      navParams: { tab: 'wip', wipSubTab: 'ORDERS' } as RouteNavigateParams,
     },
     {
       id: 'PHASE-FINAL',
@@ -113,6 +125,8 @@ export const ProductionWorkflowDocumentationView: React.FC = () => {
       outputs: 'محصول نهایی آماده تحویل، پالت لیبل‌خورده ساپکو و سند قطعی رسید انبار',
       kpi: 'تحویل به موقع به خودروساز (OTIF > 98%)، رسید ۱۰۰٪ اتوماتیک بدون نیاز به ثبت دستی مجدد',
       color: 'emerald',
+      navLabel: 'کارتابل کنترل کیفیت و رسید محصول',
+      navParams: { tab: 'inventory', inventorySubTab: 'QUALITY_QM' } as RouteNavigateParams,
     },
   ];
 
@@ -346,13 +360,23 @@ export const ProductionWorkflowDocumentationView: React.FC = () => {
               <p className="text-[#333333] leading-relaxed text-sm">{selectedPhase.processDescription}</p>
             </div>
 
-            {/* KPIs */}
+            {/* KPIs & Direct Deep-Link */}
             <div className="p-3 rounded-sm border border-[#f9d6a7] bg-[#fff4e5] flex items-center justify-between text-xs text-[#333333] flex-wrap gap-2">
-              <span className="font-bold text-[#e9730c] flex items-center gap-1.5">
-                <ShieldCheck className="w-4 h-4 text-[#e9730c]" />
-                <span>شاخص‌های کلیدی عملکرد این گام (KPIs):</span>
-              </span>
-              <span className="font-mono font-bold text-[#333333]">{selectedPhase.kpi}</span>
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="font-bold text-[#e9730c] flex items-center gap-1.5">
+                  <ShieldCheck className="w-4 h-4 text-[#e9730c]" />
+                  <span>شاخص‌های کلیدی عملکرد این گام (KPIs):</span>
+                </span>
+                <span className="font-mono font-bold text-[#333333]">{selectedPhase.kpi}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => navigate(selectedPhase.navParams)}
+                className="sap-btn-emphasized px-3 py-1.5 text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
+              >
+                <span>{selectedPhase.navLabel}</span>
+                <ExternalLink className="w-3.5 h-3.5" />
+              </button>
             </div>
           </div>
         </div>
@@ -374,13 +398,14 @@ export const ProductionWorkflowDocumentationView: React.FC = () => {
 
           <div className="overflow-x-auto border border-[#d9d9d9] rounded-sm">
             <table className="sap-table-compact w-full text-right text-xs">
-              <thead>
+              <thead className="bg-[#f5f5f5]">
                 <tr>
                   <th>گام فرآیند</th>
                   <th>عنوان عملیات در صنعت</th>
                   <th className="font-mono">کد ترانزکشن در SAP PP</th>
                   <th>عملکرد معادل در سیستم کوثر</th>
                   <th>اسناد و کدهای پایگاه داده</th>
+                  <th className="text-center">لینک مستقیم</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[#e8e8e8]">
@@ -390,6 +415,7 @@ export const ProductionWorkflowDocumentationView: React.FC = () => {
                   <td className="font-mono text-[#007cc0] font-bold">VA01 / MD61 (PIR)</td>
                   <td className="text-[#333333]">ماژول ثبت سفارش مشتری و پیش‌بینی تقاضای ساپکو بر اساس کد قرارداد</td>
                   <td className="font-mono text-[11px] text-[#666666]">CustomerOrder (SO-1404-...)</td>
+                  <td className="text-center"><button type="button" onClick={() => navigate({ tab: 'contracts' })} className="sap-doc-link text-[11px] cursor-pointer">قراردادها ←</button></td>
                 </tr>
                 <tr className="hover:bg-[#f5f5f5]">
                   <td className="font-mono font-bold">۰۲</td>
@@ -397,6 +423,7 @@ export const ProductionWorkflowDocumentationView: React.FC = () => {
                   <td className="font-mono text-[#007cc0] font-bold">CS01 / CS03 (BOM Explosion)</td>
                   <td className="text-[#333333]">ساختار سلسله‌مراتبی بازگشتی (Recursive Tree) قطعات اصلی و زیرمجموعه‌ها</td>
                   <td className="font-mono text-[11px] text-[#666666]">ProductStructure / BOM Nodes</td>
+                  <td className="text-center"><button type="button" onClick={() => navigate({ tab: 'master_data', masterSubSection: 'BOM' })} className="sap-doc-link text-[11px] cursor-pointer">درخت BOM ←</button></td>
                 </tr>
                 <tr className="hover:bg-[#f5f5f5]">
                   <td className="font-mono font-bold">۰۳</td>
@@ -404,6 +431,7 @@ export const ProductionWorkflowDocumentationView: React.FC = () => {
                   <td className="font-mono text-[#007cc0] font-bold">MD01N / MD04 (Stock/Req)</td>
                   <td className="text-[#333333]">موازنه موجودی فیزیکی و امانی رول ورق و پیش‌بینی کسری بر حسب کیلوگرم</td>
                   <td className="font-mono text-[11px] text-[#666666]">NetRequirements / PlannedOrder</td>
+                  <td className="text-center"><button type="button" onClick={() => navigate({ tab: 'planning', planningSubTab: 'mrp' })} className="sap-doc-link text-[11px] cursor-pointer">موتور MRP ←</button></td>
                 </tr>
                 <tr className="hover:bg-[#f5f5f5]">
                   <td className="font-mono font-bold">۰۴</td>
@@ -411,6 +439,7 @@ export const ProductionWorkflowDocumentationView: React.FC = () => {
                   <td className="font-mono text-[#007cc0] font-bold">CA01 / CM01 (Capacity CRP)</td>
                   <td className="text-[#333333]">ماتریس زمان‌بندی روزهای مختلف هر OP (برش، بلنک، خم، جوش) و قالب‌های مشترک</td>
                   <td className="font-mono text-[11px] text-[#666666]">ScheduledOpStep (OP10..OP50)</td>
+                  <td className="text-center"><button type="button" onClick={() => navigate({ tab: 'planning', planningSubTab: 'capacity_planning' })} className="sap-doc-link text-[11px] cursor-pointer">گانت ظرفیت ←</button></td>
                 </tr>
                 <tr className="hover:bg-[#f5f5f5]">
                   <td className="font-mono font-bold">۰۵</td>
@@ -418,6 +447,7 @@ export const ProductionWorkflowDocumentationView: React.FC = () => {
                   <td className="font-mono text-[#007cc0] font-bold">MIGO 261 (Goods Issue)</td>
                   <td className="text-[#333333]">تخصیص کلاف ورق از انبار به مرحله اول (OP10) همراه با ثبت وزن و لات‌نامبر</td>
                   <td className="font-mono text-[11px] text-[#666666]">ISSUE_RAW_MATERIAL</td>
+                  <td className="text-center"><button type="button" onClick={() => navigate({ tab: 'inventory', inventorySubTab: 'COILS' })} className="sap-doc-link text-[11px] cursor-pointer">انبار رول ←</button></td>
                 </tr>
                 <tr className="hover:bg-[#f5f5f5]">
                   <td className="font-mono font-bold">۰۶</td>
@@ -425,6 +455,7 @@ export const ProductionWorkflowDocumentationView: React.FC = () => {
                   <td className="font-mono text-[#007cc0] font-bold">CO11N (Order Confirmation)</td>
                   <td className="text-[#333333]">محاسبه برخط بافر بین مراحل، انتقال مانده کار روزانه به روز بعد (Roll-Forward)</td>
                   <td className="font-mono text-[11px] text-[#666666]">wipBufferAfterOp / ROLLED_FORWARD</td>
+                  <td className="text-center"><button type="button" onClick={() => navigate({ tab: 'wip', wipSubTab: 'ORDERS' })} className="sap-doc-link text-[11px] cursor-pointer">رهگیری WIP ←</button></td>
                 </tr>
                 <tr className="hover:bg-[#f5f5f5]">
                   <td className="font-mono font-bold">۰۷</td>
@@ -432,6 +463,7 @@ export const ProductionWorkflowDocumentationView: React.FC = () => {
                   <td className="font-mono text-[#007cc0] font-bold">MIGO 101 (Auto Goods Receipt)</td>
                   <td className="text-[#333333]">با تکمیل آخرین مرحله (Final OP)، سند رسید انبار به صورت اتوماتیک صادر می‌شود</td>
                   <td className="font-mono text-[11px] text-[#666666]">RECEIPT_FINISHED_GOODS (RCV-FG-...)</td>
+                  <td className="text-center"><button type="button" onClick={() => navigate({ tab: 'inventory', inventorySubTab: 'MOVEMENT' })} className="sap-doc-link text-[11px] cursor-pointer">اسناد انبار ←</button></td>
                 </tr>
               </tbody>
             </table>

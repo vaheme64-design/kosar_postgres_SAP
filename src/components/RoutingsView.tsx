@@ -70,7 +70,7 @@ export const RoutingsView: React.FC<RoutingsViewProps> = ({
   onSaveMachine,
   onSaveDie,
 }) => {
-  const { traceDocument } = useErpRouter();
+  const { traceDocument, route, clearDocQuery } = useErpRouter();
   const { requestConfirm } = useEnterpriseUx();
   const [selectedRoutingId, setSelectedRoutingId] = useState<string>(routings[0]?.id || '');
   const [expandedSteps, setExpandedSteps] = useState<Record<number, boolean>>({});
@@ -92,7 +92,21 @@ export const RoutingsView: React.FC<RoutingsViewProps> = ({
   }, []);
 
   // Search & Filtering State
-  const [searchQuery, setSearchQuery] = useState('');
+  const [searchQuery, setSearchQuery] = useState(route.docQuery || '');
+
+  useEffect(() => {
+    if (!route.docQuery) return;
+    const q = route.docQuery.trim().toLowerCase();
+    setSearchQuery(route.docQuery);
+    setSelectedCarModel('ALL');
+    const matched = routings.find(
+      r => r.partCode.toLowerCase().includes(q) || r.partName.toLowerCase().includes(q),
+    );
+    if (matched) {
+      setSelectedRoutingId(matched.id);
+      setViewMode('STEPPER');
+    }
+  }, [route.docQuery, routings]);
 
   // Modals
   const [isNewRoutingModalOpen, setIsNewRoutingModalOpen] = useState(false);
@@ -694,7 +708,20 @@ export const RoutingsView: React.FC<RoutingsViewProps> = ({
           </div>
 
           {/* Quick Routing Selector Dropdown */}
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
+            {route.docQuery && (
+              <button
+                type="button"
+                onClick={() => {
+                  clearDocQuery();
+                  setSearchQuery('');
+                }}
+                className="px-2 py-1 rounded-sm bg-[#e5f3fa] text-[#007cc0] border border-[#b3ddf2] flex items-center gap-1 cursor-pointer text-[11px]"
+              >
+                <span>فیلتر لینک: {route.docQuery}</span>
+                <X className="w-3 h-3" />
+              </button>
+            )}
             <span className="text-[#666666] text-[11px]">انتخاب مسیر جاری:</span>
             <select
               value={activeRouting?.id || ''}
@@ -713,6 +740,57 @@ export const RoutingsView: React.FC<RoutingsViewProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Missing Routing CTA for searched/linked part */}
+      {searchQuery.trim() && filteredRoutings.length === 0 && (
+        <div className="sap-card p-4 bg-[#fff4e5] border border-[#f9d6a7] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-start sm:items-center gap-2.5 text-xs text-[#333333]">
+            <AlertCircle className="w-5 h-5 text-[#e9730c] shrink-0" />
+            <div>
+              <div className="font-bold text-[#e9730c]">
+                مسیر عملیات تولید (Routing) برای «{searchQuery.trim()}» یافت نشد
+              </div>
+              <div className="text-[11px] text-[#666666] mt-0.5">
+                برای زمان‌بندی ماشین‌آلات و صدور دستور کار (MO) ابتدا باید مسیر عملیات قطعه را تعریف کنید.
+              </div>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => {
+                const q = searchQuery.trim().toLowerCase();
+                const matchedPart = parts.find(
+                  p =>
+                    p.code.toLowerCase() === q ||
+                    p.name.toLowerCase() === q ||
+                    p.code.toLowerCase().includes(q) ||
+                    p.name.toLowerCase().includes(q),
+                );
+                setNewRoutingPartId(matchedPart?.id || '');
+                setNewRoutingVersion('V1.0');
+                setNewRoutingNotes('');
+                setFormError(null);
+                setIsNewRoutingModalOpen(true);
+              }}
+              className="sap-btn-emphasized flex items-center gap-1.5 px-3.5 py-1.5 text-xs cursor-pointer whitespace-nowrap"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>تعریف مسیر عملیات برای این قطعه</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                clearDocQuery();
+                setSearchQuery('');
+              }}
+              className="sap-btn-standard px-3 py-1.5 text-xs cursor-pointer"
+            >
+              نمایش همه مسیرها
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* VIEW MODE 1: ALL PARTS DIRECTORY */}
       {viewMode === 'DIRECTORY' && (

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { RefreshCw, Wand2, CheckCircle2, Send, AlertTriangle, Save } from 'lucide-react';
+import { RefreshCw, Wand2, CheckCircle2, Send, AlertTriangle, Save, ExternalLink } from 'lucide-react';
 import { formatNumber, toPersianDigits } from '../../utils/formatters';
 import { formatToJalali } from '../../utils/jalali';
 import { useErpRouter } from '../../context/RouterContext';
@@ -33,13 +33,17 @@ async function api<T = any>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const RelationalPlanProposalView: React.FC<{ onReleased?: () => Promise<void> }> = ({ onReleased }) => {
-  const { traceDocument } = useErpRouter();
+  const { route, navigate, traceDocument } = useErpRouter();
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [message, setMessage] = useState<{
+    type: 'success' | 'error';
+    text: string;
+    mos?: Array<{ id?: string; moNumber: string; partName?: string }>;
+  } | null>(null);
   const [machineChoices, setMachineChoices] = useState<Record<string, string>>({});
   const [revisionNote, setRevisionNote] = useState('اصلاح تخصیص ماشین‌آلات');
 
@@ -48,7 +52,10 @@ export const RelationalPlanProposalView: React.FC<{ onReleased?: () => Promise<v
     try {
       const rows = await api<Proposal[]>('/api/planning/proposals');
       setProposals(rows || []);
-      const nextId = preferredId || selectedId || rows?.[0]?.id || null;
+      const queryMatch = route.docQuery
+        ? rows?.find(r => r.proposalNumber === route.docQuery || r.id === route.docQuery)
+        : undefined;
+      const nextId = preferredId || queryMatch?.id || selectedId || rows?.[0]?.id || null;
       setSelectedId(nextId);
       if (nextId) {
         const selected = await api<any>(`/api/planning/proposals/${nextId}`);
@@ -68,9 +75,9 @@ export const RelationalPlanProposalView: React.FC<{ onReleased?: () => Promise<v
     } finally {
       setLoading(false);
     }
-  }, [selectedId]);
+  }, [selectedId, route.docQuery]);
 
-  useEffect(() => { void load(null); }, []);
+  useEffect(() => { void load(null); }, [route.docQuery]);
 
   const machines = useMemo(() => {
     const list = detail?.inputSnapshot?.masterData?.machines || [];
@@ -102,7 +109,10 @@ export const RelationalPlanProposalView: React.FC<{ onReleased?: () => Promise<v
       const result = await action();
       const preferredId = result?.id || result?.proposal?.id || selectedId;
       await load(preferredId);
-      setMessage({ type: 'success', text: successText });
+      const releasedMos = Array.isArray(result?.manufacturingOrders)
+        ? result.manufacturingOrders.map((m: any) => ({ id: m.id, moNumber: m.moNumber, partName: m.partName }))
+        : undefined;
+      setMessage({ type: 'success', text: successText, mos: releasedMos });
       if (released && onReleased) await onReleased();
     } catch (error) {
       setMessage({ type: 'error', text: error instanceof Error ? error.message : 'عملیات ناموفق بود' });
@@ -148,6 +158,14 @@ export const RelationalPlanProposalView: React.FC<{ onReleased?: () => Promise<v
     true,
   );
 
+  const approveAndRelease = () => detail && runAction(
+    () => api(`/api/planning/proposals/${detail.id}/approve-and-release`, {
+      method: 'POST', body: JSON.stringify({ actor: 'مدیر برنامه‌ریزی تولید' }),
+    }),
+    'پیشنهاد تأیید و دستورهای کار (MO) بلافاصله به کارتابل WIP صادر شدند.',
+    true,
+  );
+
   return (
     <div className="space-y-4" dir="rtl">
       <section className="sap-card p-4 space-y-3">
@@ -167,7 +185,27 @@ export const RelationalPlanProposalView: React.FC<{ onReleased?: () => Promise<v
             </button>
           </div>
         </div>
-        {message && <div className={`rounded border p-3 text-xs ${message.type === 'error' ? 'border-[#f5b8b8] bg-[#fde8e8] text-[#bb0000]' : 'border-[#b7dfc5] bg-[#eef8f2] text-[#107e3e]'}`}>{message.text}</div>}
+        {message && (
+          <div className={`rounded border p-3 text-xs space-y-2 ${message.type === 'error' ? 'border-[#f5b8b8] bg-[#fde8e8] text-[#bb0000]' : 'border-[#b7dfc5] bg-[#eef8f2] text-[#107e3e]'}`}>
+            <div>{message.text}</div>
+            {message.mos && message.mos.length > 0 && (
+              <div className="flex flex-wrap items-center gap-2 pt-1">
+                <span className="font-semibold">دستور کارهای صادرشده:</span>
+                {message.mos.map(m => (
+                  <button
+                    key={m.moNumber}
+                    type="button"
+                    onClick={() => navigate({ tab: 'wip', wipSubTab: 'ORDERS', docQuery: m.moNumber, moId: m.id || null })}
+                    className="px-2.5 py-1 rounded bg-white border border-[#b7dfc5] text-[#007cc0] font-mono font-bold hover:bg-[#e5f3fa] cursor-pointer inline-flex items-center gap-1"
+                  >
+                    <span>{m.moNumber}</span>
+                    <ExternalLink className="w-3 h-3" />
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </section>
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[300px_minmax(0,1fr)]">
@@ -287,12 +325,31 @@ export const RelationalPlanProposalView: React.FC<{ onReleased?: () => Promise<v
                 </section>
               ))}
 
-              <section className="flex flex-wrap items-center justify-between gap-3 sap-card p-4">
+              <section className="flex flex-wrap items-center justify-between gap-2 sap-card p-4">
                 {detail.status === 'DRAFT' ? <>
-                  <input value={revisionNote} onChange={event => setRevisionNote(event.target.value)} className="min-w-[220px] flex-1 rounded border border-[#bfbfbf] bg-white px-3 py-1.5 text-xs text-[#333333] focus:outline-none focus:border-[#007cc0]" aria-label="توضیح بازنگری" />
+                  <input value={revisionNote} onChange={event => setRevisionNote(event.target.value)} className="min-w-[200px] flex-1 rounded border border-[#bfbfbf] bg-white px-3 py-1.5 text-xs text-[#333333] focus:outline-none focus:border-[#007cc0]" aria-label="توضیح بازنگری" />
                   <button type="button" onClick={revise} disabled={busy} className="sap-btn-standard px-3 py-1.5 text-xs font-semibold disabled:opacity-50 cursor-pointer"><Save className="ml-1 inline h-3.5 w-3.5" />ذخیره به‌عنوان نسخه جدید</button>
-                  <button type="button" onClick={approve} disabled={busy} className="rounded bg-[#107e3e] hover:bg-[#0c6631] px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50 cursor-pointer"><CheckCircle2 className="ml-1 inline h-3.5 w-3.5" />تأیید پیشنهاد</button>
-                </> : detail.status === 'APPROVED' ? <button type="button" onClick={release} disabled={busy} className="sap-btn-emphasized px-4 py-1.5 text-xs font-semibold disabled:opacity-50 cursor-pointer"><Send className="ml-1 inline h-3.5 w-3.5" />صدور دستورهای تولید</button> : <p className="text-xs text-[#666666]">برای این پیشنهاد اقدام دیگری در دسترس نیست.</p>}
+                  <button type="button" onClick={approve} disabled={busy} className="sap-btn-standard px-3 py-1.5 text-xs font-semibold text-[#107e3e] border-[#107e3e] disabled:opacity-50 cursor-pointer"><CheckCircle2 className="ml-1 inline h-3.5 w-3.5" />فقط تأیید پیشنهاد</button>
+                  <button type="button" onClick={approveAndRelease} disabled={busy} className="rounded bg-[#107e3e] hover:bg-[#0c6631] px-4 py-1.5 text-xs font-semibold text-white disabled:opacity-50 cursor-pointer"><Send className="ml-1 inline h-3.5 w-3.5" />تأیید پیشنهاد و صدور فوری دستور کار (MO)</button>
+                </> : detail.status === 'APPROVED' ? <button type="button" onClick={release} disabled={busy} className="sap-btn-emphasized px-4 py-1.5 text-xs font-semibold disabled:opacity-50 cursor-pointer"><Send className="ml-1 inline h-3.5 w-3.5" />صدور دستورهای تولید (MO)</button> : (
+                  <div className="flex items-center justify-between w-full gap-2 flex-wrap">
+                    <p className="text-xs text-[#666666]">
+                      {detail.status === 'RELEASED'
+                        ? 'این پیشنهاد تأیید و به برنامه تولید و دستور کار (MO) تبدیل شده است.'
+                        : 'برای این پیشنهاد اقدام دیگری در دسترس نیست.'}
+                    </p>
+                    {detail.productionPlan && (
+                      <button
+                        type="button"
+                        onClick={() => navigate({ tab: 'wip', wipSubTab: 'ORDERS', docQuery: detail.productionPlan.planNumber })}
+                        className="sap-btn-standard px-3 py-1.5 text-xs font-semibold text-[#007cc0] cursor-pointer flex items-center gap-1"
+                      >
+                        <span>مشاهده دستور کارها در WIP</span>
+                        <ExternalLink className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                )}
               </section>
             </>
           )}

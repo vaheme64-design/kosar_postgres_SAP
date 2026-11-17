@@ -433,6 +433,42 @@ const EMBEDDED_MODEL_MAP: Record<string, keyof EmbeddedSapPpStore> = {
   productionLog: 'productionLogs',
 };
 
+const DUAL_DB_CONFIG_PATH = path.resolve(process.cwd(), 'data', 'kpims-db-connections.json');
+
+export type DbTargetMode = 'AUTO' | 'LOCAL' | 'CLOUD' | 'HYBRID_DISK';
+
+export interface DualDbStoredConfig {
+  localDbUrl: string;
+  cloudDbUrl: string;
+  activeTarget: DbTargetMode;
+  lastSyncAt?: string;
+  lastSyncSummary?: string;
+  updatedAt?: string;
+}
+
+export interface SingleDbLinkStatus {
+  isConfigured: boolean;
+  isConnected: boolean;
+  maskedUrl: string;
+  databaseType: 'PostgreSQL';
+  lastError?: string;
+  latencyMs?: number;
+}
+
+export interface DualDbPublicStatus {
+  localDbUrlMasked: string;
+  cloudDbUrlMasked: string;
+  hasLocalDbUrl: boolean;
+  hasCloudDbUrl: boolean;
+  activeTarget: DbTargetMode;
+  resolvedTarget: 'LOCAL' | 'CLOUD' | 'HYBRID_DISK';
+  lastSyncAt?: string;
+  lastSyncSummary?: string;
+  updatedAt?: string;
+  localStatus: SingleDbLinkStatus;
+  cloudStatus: SingleDbLinkStatus;
+}
+
 const normalizePgUrl = (raw?: string): string => {
   if (!raw) return '';
   let val = raw.trim();
@@ -443,6 +479,40 @@ const normalizePgUrl = (raw?: string): string => {
     val = val.slice(1, -1).trim();
   }
   return val;
+};
+
+export const maskDatabaseUrl = (rawUrl?: string): string => {
+  const val = normalizePgUrl(rawUrl);
+  if (!val) return '';
+  return val.replace(/:([^:@/]+)@/, ':****@');
+};
+
+export const isValidPostgresUrlSyntax = (rawUrl?: string): boolean => {
+  const normalized = normalizePgUrl(rawUrl);
+  if (!normalized || normalized === DEFAULT_FALLBACK_PG_URL) return false;
+  try {
+    const parsed = new URL(normalized);
+    return (
+      (parsed.protocol === 'postgresql:' || parsed.protocol === 'postgres:') &&
+      Boolean(parsed.hostname) &&
+      parsed.pathname.length > 1 &&
+      parsed.hostname.toLowerCase() !== 'your_host' &&
+      parsed.username.toLowerCase() !== 'your_user' &&
+      parsed.pathname.slice(1).toLowerCase() !== 'your_database'
+    );
+  } catch {
+    return false;
+  }
+};
+
+const isLocalhostUrl = (rawUrl: string): boolean => {
+  try {
+    const parsed = new URL(rawUrl);
+    const h = parsed.hostname.toLowerCase();
+    return h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === 'db' || h === 'postgres';
+  } catch {
+    return false;
+  }
 };
 
 const readDatabaseUrlFromDotEnv = (): string => {
@@ -488,7 +558,108 @@ const enrichPoolerParameters = (rawUrl: string): string => {
   return rawUrl;
 };
 
+export const readDualDbStoredConfig = (): DualDbStoredConfig => {
+  const envUrl = readDatabaseUrlFromDotEnv() || normalizePgUrl(process.env.DATABASE_URL);
+  const envIsValid = isValidPostgresUrlSyntax(envUrl);
+  const defaultLocal = envIsValid && isLocalhostUrl(envUrl) ? envUrl : '';
+  const defaultCloud = envIsValid && !isLocalhostUrl(envUrl) ? envUrl : '';
+
+  try {
+    if (fs.existsSync(DUAL_DB_CONFIG_PATH)) {
+      const parsed = JSON.parse(fs.readFileSync(DUAL_DB_CONFIG_PATH, 'utf-8'));
+      const activeTarget: DbTargetMode =
+        parsed?.activeTarget === 'LOCAL' ||
+        parsed?.activeTarget === 'CLOUD' ||
+        parsed?.activeTarget === 'HYBRID_DISK' ||
+        parsed?.activeTarget === 'AUTO'
+          ? parsed.activeTarget
+          : 'AUTO';
+      return {
+        localDbUrl: normalizePgUrl(parsed?.localDbUrl) || defaultLocal,
+        cloudDbUrl: normalizePgUrl(parsed?.cloudDbUrl) || defaultCloud,
+        activeTarget,
+        lastSyncAt: typeof parsed?.lastSyncAt === 'string' ? parsed.lastSyncAt : undefined,
+        lastSyncSummary: typeof parsed?.lastSyncSummary === 'string' ? parsed.lastSyncSummary : undefined,
+        updatedAt: typeof parsed?.updatedAt === 'string' ? parsed.updatedAt : undefined,
+      };
+    }
+  } catch {
+    // fall back to env defaults
+  }
+
+  return {
+    localDbUrl: defaultLocal,
+    cloudDbUrl: defaultCloud,
+    activeTarget: 'AUTO',
+  };
+};
+
+const writeDualDbStoredConfig = (cfg: DualDbStoredConfig): void => {
+  try {
+    const dir = path.dirname(DUAL_DB_CONFIG_PATH);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(DUAL_DB_CONFIG_PATH, JSON.stringify(cfg, null, 2), 'utf-8');
+  } catch {
+    // ignore write failures
+  }
+};
+
+export const resetPrismaConnectionPool = (): void => {
+  global.__kpimsDbReachable = undefined;
+  global.__kpimsLastDbError = undefined;
+  global.__kpimsLastProbeFailedAt = undefined;
+  const existing = global.__prismaClient;
+  global.__prismaClient = undefined;
+  if (existing) {
+    try {
+      existing.$disconnect().catch(() => {});
+    } catch {
+      // ignore
+    }
+  }
+};
+
+export const recordDualDbSyncResult = (summary: string): void => {
+  const cfg = readDualDbStoredConfig();
+  cfg.lastSyncAt = new Date().toISOString();
+  cfg.lastSyncSummary = summary;
+  writeDualDbStoredConfig(cfg);
+};
+
 const getEffectiveRawDatabaseUrl = (): string => {
+  const cfg = readDualDbStoredConfig();
+  if (cfg.activeTarget === 'HYBRID_DISK') {
+    return '';
+  }
+  if (cfg.activeTarget === 'LOCAL') {
+    if (isValidPostgresUrlSyntax(cfg.localDbUrl)) {
+      const enriched = enrichPoolerParameters(cfg.localDbUrl);
+      process.env.DATABASE_URL = enriched;
+      return enriched;
+    }
+    return '';
+  }
+  if (cfg.activeTarget === 'CLOUD') {
+    if (isValidPostgresUrlSyntax(cfg.cloudDbUrl)) {
+      const enriched = enrichPoolerParameters(cfg.cloudDbUrl);
+      process.env.DATABASE_URL = enriched;
+      return enriched;
+    }
+    return '';
+  }
+
+  // AUTO: prefer configured Local DB first if present, then Cloud DB, then .env / env
+  if (isValidPostgresUrlSyntax(cfg.localDbUrl)) {
+    const enriched = enrichPoolerParameters(cfg.localDbUrl);
+    process.env.DATABASE_URL = enriched;
+    return enriched;
+  }
+  if (isValidPostgresUrlSyntax(cfg.cloudDbUrl)) {
+    const enriched = enrichPoolerParameters(cfg.cloudDbUrl);
+    process.env.DATABASE_URL = enriched;
+    return enriched;
+  }
+
   const fromFile = readDatabaseUrlFromDotEnv();
   if (fromFile && fromFile !== DEFAULT_FALLBACK_PG_URL) {
     const enriched = enrichPoolerParameters(fromFile);
@@ -509,20 +680,7 @@ const getEffectiveRawDatabaseUrl = (): string => {
 
 export const isDatabaseUrlSyntaxValid = (): boolean => {
   const rawUrl = getEffectiveRawDatabaseUrl();
-  if (!rawUrl || rawUrl === DEFAULT_FALLBACK_PG_URL) return false;
-  try {
-    const parsed = new URL(rawUrl);
-    return (
-      (parsed.protocol === 'postgresql:' || parsed.protocol === 'postgres:') &&
-      Boolean(parsed.hostname) &&
-      parsed.pathname.length > 1 &&
-      parsed.hostname.toLowerCase() !== 'your_host' &&
-      parsed.username.toLowerCase() !== 'your_user' &&
-      parsed.pathname.slice(1).toLowerCase() !== 'your_database'
-    );
-  } catch {
-    return false;
-  }
+  return isValidPostgresUrlSyntax(rawUrl);
 };
 
 export const markDatabaseUnreachable = (reason?: unknown): void => {
@@ -659,6 +817,194 @@ async function probePostgresWireProtocol(rawUrl: string, timeoutMs: number): Pro
   } catch {
     return false;
   }
+}
+
+export async function testSingleDatabaseUrl(rawUrl: string, timeoutMs = 4500): Promise<{
+  success: boolean;
+  isValidSyntax: boolean;
+  isConnected: boolean;
+  latencyMs: number;
+  maskedUrl: string;
+  message: string;
+  error?: string;
+}> {
+  const normalized = normalizePgUrl(rawUrl);
+  const maskedUrl = maskDatabaseUrl(normalized);
+  if (!isValidPostgresUrlSyntax(normalized)) {
+    return {
+      success: false,
+      isValidSyntax: false,
+      isConnected: false,
+      latencyMs: 0,
+      maskedUrl,
+      message: 'فرمت رشته اتصال PostgreSQL معتبر نیست (نمونه: postgresql://user:pass@host:5432/db).',
+      error: 'INVALID_URL_SYNTAX',
+    };
+  }
+
+  const start = Date.now();
+  const enriched = enrichPoolerParameters(normalized);
+  try {
+    const wireOk = await probePostgresWireProtocol(enriched, timeoutMs);
+    if (!wireOk) {
+      return {
+        success: false,
+        isValidSyntax: true,
+        isConnected: false,
+        latencyMs: Date.now() - start,
+        maskedUrl,
+        message: 'سرور PostgreSQL روی این آدرس در دسترس نیست یا پاسخ Wire-Protocol را رد کرد.',
+        error: 'WIRE_PROTOCOL_UNREACHABLE',
+      };
+    }
+
+    const tempClient = new PrismaClient({
+      datasources: { db: { url: enriched } },
+      log: [],
+    });
+    try {
+      await Promise.race([
+        tempClient.$queryRaw`SELECT 1 as ok`,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('DB connection test timeout')), timeoutMs)),
+      ]);
+      const latencyMs = Date.now() - start;
+      return {
+        success: true,
+        isValidSyntax: true,
+        isConnected: true,
+        latencyMs,
+        maskedUrl,
+        message: `اتصال به پایگاه داده با موفقیت برقرار شد (${latencyMs} ms).`,
+      };
+    } finally {
+      await tempClient.$disconnect().catch(() => {});
+    }
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    return {
+      success: false,
+      isValidSyntax: true,
+      isConnected: false,
+      latencyMs: Date.now() - start,
+      maskedUrl,
+      message: `خطا در احراز هویت یا کوئری آزمایشی پایگاه داده: ${errMsg.slice(0, 140)}`,
+      error: errMsg,
+    };
+  }
+}
+
+export async function saveDualDbConfig(input: {
+  localDbUrl?: string;
+  cloudDbUrl?: string;
+  activeTarget?: DbTargetMode;
+}): Promise<DualDbPublicStatus> {
+  const existing = readDualDbStoredConfig();
+  const resolveUrlUpdate = (incoming: string | undefined, prev: string): string => {
+    if (incoming === undefined) return prev;
+    const trimmed = normalizePgUrl(incoming);
+    if (!trimmed) return '';
+    // Keep stored secret if user submitted the masked placeholder unchanged
+    if (trimmed.includes(':****@') && prev && maskDatabaseUrl(prev) === trimmed) {
+      return prev;
+    }
+    return trimmed;
+  };
+
+  const nextConfig: DualDbStoredConfig = {
+    localDbUrl: resolveUrlUpdate(input.localDbUrl, existing.localDbUrl),
+    cloudDbUrl: resolveUrlUpdate(input.cloudDbUrl, existing.cloudDbUrl),
+    activeTarget:
+      input.activeTarget && ['AUTO', 'LOCAL', 'CLOUD', 'HYBRID_DISK'].includes(input.activeTarget)
+        ? input.activeTarget
+        : existing.activeTarget,
+    lastSyncAt: existing.lastSyncAt,
+    lastSyncSummary: existing.lastSyncSummary,
+    updatedAt: new Date().toISOString(),
+  };
+
+  writeDualDbStoredConfig(nextConfig);
+  resetPrismaConnectionPool();
+  await probeDatabaseConnectivity(4000, true);
+  return getDualDbPublicStatus(false);
+}
+
+export async function getDualDbPublicStatus(probeLinks = false): Promise<DualDbPublicStatus> {
+  const cfg = readDualDbStoredConfig();
+  const localValid = isValidPostgresUrlSyntax(cfg.localDbUrl);
+  const cloudValid = isValidPostgresUrlSyntax(cfg.cloudDbUrl);
+
+  let localStatus: SingleDbLinkStatus = {
+    isConfigured: localValid,
+    isConnected: false,
+    maskedUrl: maskDatabaseUrl(cfg.localDbUrl),
+    databaseType: 'PostgreSQL',
+  };
+  let cloudStatus: SingleDbLinkStatus = {
+    isConfigured: cloudValid,
+    isConnected: false,
+    maskedUrl: maskDatabaseUrl(cfg.cloudDbUrl),
+    databaseType: 'PostgreSQL',
+  };
+
+  if (probeLinks) {
+    const [localProbe, cloudProbe] = await Promise.all([
+      localValid ? testSingleDatabaseUrl(cfg.localDbUrl, 2500) : Promise.resolve(null),
+      cloudValid ? testSingleDatabaseUrl(cfg.cloudDbUrl, 2500) : Promise.resolve(null),
+    ]);
+    if (localProbe) {
+      localStatus = {
+        isConfigured: localValid,
+        isConnected: localProbe.isConnected,
+        maskedUrl: localProbe.maskedUrl,
+        databaseType: 'PostgreSQL',
+        lastError: localProbe.isConnected ? undefined : localProbe.message,
+        latencyMs: localProbe.latencyMs,
+      };
+    }
+    if (cloudProbe) {
+      cloudStatus = {
+        isConfigured: cloudValid,
+        isConnected: cloudProbe.isConnected,
+        maskedUrl: cloudProbe.maskedUrl,
+        databaseType: 'PostgreSQL',
+        lastError: cloudProbe.isConnected ? undefined : cloudProbe.message,
+        latencyMs: cloudProbe.latencyMs,
+      };
+    }
+  } else {
+    const eff = getEffectiveRawDatabaseUrl();
+    const effConnected = global.__kpimsDbReachable === true;
+    if (eff && cfg.localDbUrl && eff.startsWith(cfg.localDbUrl.split('?')[0])) {
+      localStatus.isConnected = effConnected;
+    }
+    if (eff && cfg.cloudDbUrl && eff.startsWith(cfg.cloudDbUrl.split('?')[0])) {
+      cloudStatus.isConnected = effConnected;
+    }
+  }
+
+  let resolvedTarget: 'LOCAL' | 'CLOUD' | 'HYBRID_DISK' = 'HYBRID_DISK';
+  if (cfg.activeTarget !== 'HYBRID_DISK' && global.__kpimsDbReachable === true) {
+    const eff = getEffectiveRawDatabaseUrl();
+    if (cfg.activeTarget === 'LOCAL' || (eff && cfg.localDbUrl && eff.startsWith(cfg.localDbUrl.split('?')[0]))) {
+      resolvedTarget = 'LOCAL';
+    } else if (cfg.activeTarget === 'CLOUD' || (eff && cfg.cloudDbUrl && eff.startsWith(cfg.cloudDbUrl.split('?')[0]))) {
+      resolvedTarget = 'CLOUD';
+    }
+  }
+
+  return {
+    localDbUrlMasked: maskDatabaseUrl(cfg.localDbUrl),
+    cloudDbUrlMasked: maskDatabaseUrl(cfg.cloudDbUrl),
+    hasLocalDbUrl: Boolean(cfg.localDbUrl),
+    hasCloudDbUrl: Boolean(cfg.cloudDbUrl),
+    activeTarget: cfg.activeTarget,
+    resolvedTarget,
+    lastSyncAt: cfg.lastSyncAt,
+    lastSyncSummary: cfg.lastSyncSummary,
+    updatedAt: cfg.updatedAt,
+    localStatus,
+    cloudStatus,
+  };
 }
 
 export async function probeDatabaseConnectivity(timeoutMs = 4500, force = false): Promise<boolean> {
@@ -814,14 +1160,21 @@ export interface DatabaseStatus {
   storageMode?: 'POSTGRESQL_LIVE' | 'HYBRID_DURABLE_DISK';
   errorMessage?: string;
   lastChecked: string;
+  dualLinks?: DualDbPublicStatus;
 }
 
-export async function checkDatabaseConnection(): Promise<DatabaseStatus> {
+export async function checkDatabaseConnection(probeAllLinks = false): Promise<DatabaseStatus> {
   const rawUrl = resolveDatabaseUrl();
-  const maskedUrl = rawUrl.replace(/:([^@]+)@/, ':****@');
+  const maskedUrl = maskDatabaseUrl(rawUrl);
   const dbType: 'SQLite' | 'PostgreSQL' =
     rawUrl.startsWith('postgresql://') || rawUrl.startsWith('postgres://') ? 'PostgreSQL' : 'SQLite';
   const hasConfiguredUrl = isDatabaseUrlSyntaxValid();
+
+  if (global.__kpimsDbReachable !== true) {
+    await probeDatabaseConnectivity(3500, false);
+  }
+
+  const dualLinks = await getDualDbPublicStatus(probeAllLinks);
 
   if (global.__kpimsDbReachable === true) {
     return {
@@ -832,25 +1185,13 @@ export async function checkDatabaseConnection(): Promise<DatabaseStatus> {
       databaseUrlMasked: maskedUrl,
       storageMode: 'POSTGRESQL_LIVE',
       lastChecked: new Date().toISOString(),
-    };
-  }
-
-  const reachable = await probeDatabaseConnectivity(3500, false);
-  if (reachable) {
-    return {
-      isConfigured: true,
-      isConnected: true,
-      isDurableStorageActive: false,
-      databaseType: dbType,
-      databaseUrlMasked: maskedUrl,
-      storageMode: 'POSTGRESQL_LIVE',
-      lastChecked: new Date().toISOString(),
+      dualLinks,
     };
   }
 
   const reasonSummary = global.__kpimsLastDbError
-    ? `اتصال به پایگاه داده ابری PostgreSQL برقرار نشد (${global.__kpimsLastDbError.slice(0, 120)}). موتور پایدار دیسک محلی (HYBRID_DURABLE_DISK) با ذخیره خودکار فعال است.`
-    : 'آدرس PostgreSQL معتبر تنظیم نشده یا در دسترس نیست؛ موتور پایدار دیسک محلی (HYBRID_DURABLE_DISK) با ذخیره خودکار فعال است.';
+    ? `اتصال به پایگاه داده PostgreSQL برقرار نشد (${global.__kpimsLastDbError.slice(0, 120)}). موتور پایدار دیسک محلی (HYBRID_DURABLE_DISK) با ذخیره خودکار فعال است.`
+    : 'آدرس PostgreSQL معتبر برای لینک فعال تنظیم نشده یا در دسترس نیست؛ موتور پایدار دیسک محلی (HYBRID_DURABLE_DISK) با ذخیره خودکار فعال است.';
 
   return {
     isConfigured: hasConfiguredUrl,
@@ -861,5 +1202,7 @@ export async function checkDatabaseConnection(): Promise<DatabaseStatus> {
     storageMode: 'HYBRID_DURABLE_DISK',
     errorMessage: reasonSummary,
     lastChecked: new Date().toISOString(),
+    dualLinks,
   };
 }
+

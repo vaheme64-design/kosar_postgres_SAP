@@ -49,10 +49,11 @@ export const AdvancedBomModuleView: React.FC<AdvancedBomModuleViewProps> = ({
   onOpenTraceabilityModal,
   onNavigateToParallelFlow,
 }) => {
-  const { traceDocument } = useErpRouter();
+  const { traceDocument, route, clearDocQuery } = useErpRouter();
   const { requestConfirm, showUndoToast } = useEnterpriseUx();
   const [boms, setBoms] = useState<AdvancedBomDefinition[]>([]);
   const [selectedBomId, setSelectedBomId] = useState<string>('');
+  const [bomSearchQuery, setBomSearchQuery] = useState<string>(route.docQuery || '');
   const [loading, setLoading] = useState(false);
   const [isGuideOpen, setIsGuideOpen] = useState(false);
 
@@ -100,9 +101,27 @@ export const AdvancedBomModuleView: React.FC<AdvancedBomModuleViewProps> = ({
       const res = await fetch('/api/production/boms');
       const data = await res.json();
       if (data.success && data.data) {
-        setBoms(data.data);
-        if (!selectedBomId && data.data.length > 0) {
-          setSelectedBomId(data.data[0].id);
+        const list: AdvancedBomDefinition[] = data.data;
+        setBoms(list);
+        const query = (route.docQuery || '').trim().toLowerCase();
+        if (query) {
+          const matched = list.find(
+            b =>
+              b.assemblyPartCode.toLowerCase().includes(query) ||
+              b.assemblyPartName.toLowerCase().includes(query) ||
+              b.components.some(
+                c =>
+                  c.componentPartCode.toLowerCase().includes(query) ||
+                  c.componentPartName.toLowerCase().includes(query),
+              ),
+          );
+          if (matched) {
+            setSelectedBomId(matched.id);
+            return;
+          }
+        }
+        if (!selectedBomId && list.length > 0) {
+          setSelectedBomId(list[0].id);
         }
       }
     } catch (err) {
@@ -116,7 +135,42 @@ export const AdvancedBomModuleView: React.FC<AdvancedBomModuleViewProps> = ({
     loadBoms();
   }, []);
 
-  const activeBom = boms.find(b => b.id === selectedBomId) || boms[0];
+  useEffect(() => {
+    if (!route.docQuery) return;
+    setBomSearchQuery(route.docQuery);
+    const q = route.docQuery.trim().toLowerCase();
+    const matched = boms.find(
+      b =>
+        b.assemblyPartCode.toLowerCase().includes(q) ||
+        b.assemblyPartName.toLowerCase().includes(q) ||
+        b.components.some(
+          c =>
+            c.componentPartCode.toLowerCase().includes(q) ||
+            c.componentPartName.toLowerCase().includes(q),
+        ),
+    );
+    if (matched) {
+      setSelectedBomId(matched.id);
+    }
+  }, [route.docQuery, boms]);
+
+  const filteredBoms = bomSearchQuery.trim()
+    ? boms.filter(b => {
+        const q = bomSearchQuery.trim().toLowerCase();
+        return (
+          b.assemblyPartCode.toLowerCase().includes(q) ||
+          b.assemblyPartName.toLowerCase().includes(q) ||
+          b.carModel.toLowerCase().includes(q) ||
+          b.components.some(
+            c =>
+              c.componentPartCode.toLowerCase().includes(q) ||
+              c.componentPartName.toLowerCase().includes(q),
+          )
+        );
+      })
+    : boms;
+
+  const activeBom = filteredBoms.find(b => b.id === selectedBomId) || filteredBoms[0] || (bomSearchQuery.trim() ? undefined : boms[0]);
 
   // Create New BOM
   const handleCreateNewBom = async (e: React.FormEvent) => {
@@ -471,14 +525,24 @@ export const AdvancedBomModuleView: React.FC<AdvancedBomModuleViewProps> = ({
 
         {/* BOM Selector Bar */}
         <div className="flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-[#e8e8e8] text-xs">
-          <div className="flex items-center gap-2 flex-wrap">
+          <div className="flex items-center gap-2 flex-wrap flex-1">
+            <div className="relative min-w-[200px]">
+              <Search className="w-3.5 h-3.5 text-[#666666] absolute right-2.5 top-2" />
+              <input
+                type="text"
+                value={bomSearchQuery}
+                onChange={e => setBomSearchQuery(e.target.value)}
+                placeholder="جستجوی کد یا نام قطعه در BOM..."
+                className="bg-[#ffffff] border border-[#bfbfbf] rounded-sm pr-8 pl-2.5 py-1 text-xs text-[#333333] focus:outline-none focus:border-[#007cc0]"
+              />
+            </div>
             <span className="text-[#666666] font-medium">انتخاب درخت محصول جاری:</span>
             <select
-              value={selectedBomId}
+              value={activeBom?.id || ''}
               onChange={e => setSelectedBomId(e.target.value)}
               className="bg-[#ffffff] border border-[#bfbfbf] rounded-sm px-3 py-1.5 text-xs text-[#333333] font-bold focus:outline-none focus:border-[#007cc0] cursor-pointer"
             >
-              {boms.map(b => (
+              {filteredBoms.map(b => (
                 <option key={b.id} value={b.id}>
                   [{b.assemblyPartCode}] {b.assemblyPartName} — نسخه {b.version} ({b.carModel})
                 </option>
@@ -486,11 +550,77 @@ export const AdvancedBomModuleView: React.FC<AdvancedBomModuleViewProps> = ({
             </select>
           </div>
 
-          <div className="text-[11px] text-[#666666]">
-            تعداد BOMهای فعال: <strong>{toPersianDigits(boms.length)}</strong>
+          <div className="flex items-center gap-2 text-[11px] text-[#666666]">
+            {route.docQuery && (
+              <button
+                type="button"
+                onClick={() => {
+                  clearDocQuery();
+                  setBomSearchQuery('');
+                }}
+                className="px-2 py-0.5 rounded-sm bg-[#e5f3fa] text-[#007cc0] border border-[#b3ddf2] flex items-center gap-1 cursor-pointer"
+              >
+                <span>فیلتر لینک: {route.docQuery}</span>
+                <X className="w-3 h-3" />
+              </button>
+            )}
+            <span>
+              تعداد BOMهای فعال: <strong>{toPersianDigits(filteredBoms.length)}</strong>
+            </span>
           </div>
         </div>
       </div>
+
+      {/* Missing BOM CTA for queried part */}
+      {bomSearchQuery.trim() && filteredBoms.length === 0 && (
+        <div className="sap-card p-4 bg-[#fff4e5] border border-[#f9d6a7] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-start sm:items-center gap-2.5 text-xs text-[#333333]">
+            <AlertTriangle className="w-5 h-5 text-[#e9730c] shrink-0" />
+            <div>
+              <div className="font-bold text-[#e9730c]">
+                درخت ساختار محصول (BOM) برای «{bomSearchQuery.trim()}» ثبت نشده است
+              </div>
+              <div className="text-[11px] text-[#666666] mt-0.5">
+                می‌توانید بلافاصله ساختار ورق، زیرقطعات و پیچ/مهره جوشی این محصول را ایجاد کنید.
+              </div>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => {
+                const q = bomSearchQuery.trim().toLowerCase();
+                const matchedPart = parts.find(
+                  p =>
+                    p.code.toLowerCase() === q ||
+                    p.name.toLowerCase() === q ||
+                    p.code.toLowerCase().includes(q) ||
+                    p.name.toLowerCase().includes(q),
+                );
+                if (matchedPart) {
+                  setNewBomPartId(matchedPart.id);
+                  setNewBomCarModel(matchedPart.carModel || '');
+                }
+                setIsNewBomModalOpen(true);
+              }}
+              className="sap-btn-emphasized flex items-center gap-1.5 px-3.5 py-1.5 text-xs cursor-pointer whitespace-nowrap"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>ایجاد درخت BOM برای قطعه مرتبط</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                clearDocQuery();
+                setBomSearchQuery('');
+              }}
+              className="sap-btn-standard px-3 py-1.5 text-xs cursor-pointer"
+            >
+              نمایش همه BOMها
+            </button>
+          </div>
+        </div>
+      )}
 
       {activeBom && (
         <div className="sap-card p-4 space-y-4">

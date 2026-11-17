@@ -12,6 +12,7 @@ interface ErpSyncModalProps {
   onClose: () => void;
   partsCount: number;
   txCount: number;
+  onOpenDbSettings?: () => void;
 }
 
 export const ErpSyncModal: React.FC<ErpSyncModalProps> = ({
@@ -19,15 +20,11 @@ export const ErpSyncModal: React.FC<ErpSyncModalProps> = ({
   onClose,
   partsCount,
   txCount,
+  onOpenDbSettings,
 }) => {
   const [syncing, setSyncing] = useState(false);
   const [syncStatus, setSyncStatus] = useState<{ ok: boolean; message: string } | null>(null);
-  const [liveDbInfo, setLiveDbInfo] = useState<{
-    isConnected: boolean;
-    storageMode: string;
-    lastChecked?: string;
-    errorMessage?: string;
-  } | null>(null);
+  const [liveDbInfo, setLiveDbInfo] = useState<any>(null);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -47,37 +44,32 @@ export const ErpSyncModal: React.FC<ErpSyncModalProps> = ({
     setSyncing(true);
     setSyncStatus({
       ok: true,
-      message: 'در حال بررسی زنده درگاه پایگاه داده، خلاصه کاردکس انبار و گزارش مدیریتی سرور...',
+      message: 'در حال همگام‌سازی داده‌ها با پایگاه داده فعال و بررسی سلامت سرور...',
     });
     try {
-      const [dbRes, sumRes, repRes] = await Promise.all([
-        fetch('/api/db/status').then(r => r.json()),
-        fetch('/api/inventory/summary').then(r => r.json()),
+      const [syncRes, repRes] = await Promise.all([
+        fetch('/api/db/sync', { method: 'POST' }).then(r => r.json()),
         fetch('/api/reports/dashboard-summary').then(r => r.json()),
       ]);
 
-      if (dbRes?.success && dbRes.data) {
-        setLiveDbInfo(dbRes.data);
+      if (syncRes?.status?.data || syncRes?.status) {
+        setLiveDbInfo(syncRes.status.data || syncRes.status);
       }
 
-      if (!dbRes?.success || !sumRes?.success || !repRes?.success) {
+      if (!syncRes?.success) {
         setSyncStatus({
           ok: false,
-          message: 'یک یا چند سرویس بک‌اند پاسخ خطا برگرداندند. جزئیات سرور را بررسی کنید.',
+          message: syncRes?.error || 'خطا در همگام‌سازی داده‌ها با سرور.',
         });
         return;
       }
 
-      const modeLabel =
-        dbRes.data?.storageMode === 'POSTGRESQL_LIVE'
-          ? 'PostgreSQL ابری متصل'
-          : 'موتور پایدار دیسک (HYBRID_DURABLE_DISK)';
-      const liveOrders = repRes.data?.activeCustomerOrdersCount ?? 0;
-      const liveMos = repRes.data?.activeManufacturingOrdersCount ?? 0;
+      const liveOrders = repRes?.data?.activeCustomerOrdersCount ?? 0;
+      const liveMos = repRes?.data?.activeManufacturingOrdersCount ?? 0;
 
       setSyncStatus({
         ok: true,
-        message: `بررسی زنده موفق (${modeLabel}): ${partsCount} کاتالوگ قطعه، ${txCount} سند کاردکس، ${liveOrders} سفارش فعال مشتری و ${liveMos} دستور تولید همگام هستند.`,
+        message: `${syncRes.message} (${partsCount} قطعه، ${txCount} سند کاردکس، ${liveOrders} سفارش و ${liveMos} دستور تولید).`,
       });
     } catch (err) {
       setSyncStatus({
@@ -90,6 +82,7 @@ export const ErpSyncModal: React.FC<ErpSyncModalProps> = ({
   };
 
   const isPgLive = liveDbInfo?.storageMode === 'POSTGRESQL_LIVE' && liveDbInfo?.isConnected;
+  const dualLinks = liveDbInfo?.dualLinks;
 
   return (
     <div className="fixed inset-0 z-50 bg-[#333333]/40 backdrop-blur-[1px] flex items-center justify-center p-4" dir="rtl">
@@ -98,7 +91,7 @@ export const ErpSyncModal: React.FC<ErpSyncModalProps> = ({
           <div className="flex items-center gap-2">
             <Cpu className="w-4 h-4 text-[#007cc0]" />
             <h3 className="text-sm font-bold text-[#333333]">
-              وضعیت اتصال پایگاه داده و درگاه ERP صنعتی ساپکو
+              وضعیت اتصال دو پایگاه داده (محلی و ابری) و درگاه ERP ساپکو
             </h3>
           </div>
           <button
@@ -113,11 +106,11 @@ export const ErpSyncModal: React.FC<ErpSyncModalProps> = ({
         <div className="p-5 space-y-4 text-xs text-[#333333]">
           <div className="p-3.5 rounded bg-[#f7f7f7] border border-[#d9d9d9] space-y-2">
             <div className="flex items-center justify-between">
-              <span className="text-[#666666]">وضعیت پایگاه داده:</span>
+              <span className="text-[#666666]">وضعیت پایگاه داده فعال:</span>
               {isPgLive ? (
                 <span className="text-[#107e3e] font-bold flex items-center gap-1">
                   <CheckCircle2 className="w-3.5 h-3.5" />
-                  متصل به سرور PostgreSQL (POSTGRESQL_LIVE)
+                  متصل به PostgreSQL ({dualLinks?.resolvedTarget || 'LIVE'})
                 </span>
               ) : (
                 <span className="text-[#e9730c] font-bold flex items-center gap-1">
@@ -126,28 +119,27 @@ export const ErpSyncModal: React.FC<ErpSyncModalProps> = ({
                 </span>
               )}
             </div>
-            <div className="flex items-center justify-between">
-              <span className="text-[#666666]">موتور بک‌اند:</span>
-              <span className="font-mono text-[#333333]">Node.js Express Ledger Engine (/api/*)</span>
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[#666666]">لینک محلی (Local DB):</span>
+              <span className="font-mono text-[11px] text-[#333333] truncate max-w-[300px]" dir="ltr">
+                {dualLinks?.localDbUrlMasked || 'تنظیم‌نشده'}
+              </span>
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[#666666]">لینک ابری (Cloud DB):</span>
+              <span className="font-mono text-[11px] text-[#007cc0] truncate max-w-[300px]" dir="ltr">
+                {dualLinks?.cloudDbUrlMasked || 'تنظیم‌نشده'}
+              </span>
             </div>
             <div className="flex items-center justify-between">
-              <span className="text-[#666666]">سرویس همگام‌سازی و هویت:</span>
-              <span className="font-mono text-[#007cc0] font-semibold">Prisma ORM + Durable Snapshot + RBAC Guard</span>
+              <span className="text-[#666666]">اولویت انتخاب‌شده:</span>
+              <span className="font-mono text-[#333333] font-semibold">{dualLinks?.activeTarget || 'AUTO'}</span>
             </div>
             {liveDbInfo?.errorMessage && !isPgLive && (
               <div className="text-[11px] text-[#7d3c0a] bg-[#fff4e5] border border-[#f5cba7] rounded p-2 mt-1">
                 {liveDbInfo.errorMessage}
               </div>
             )}
-          </div>
-
-          <div className="space-y-1.5">
-            <h4 className="font-bold text-[#333333] text-xs">پروتکل‌های تبادل داده استاندارد پشتیبانی شده:</h4>
-            <ul className="space-y-1 text-[11px] text-[#666666] list-disc list-inside">
-              <li>تبادل بارنامه الکترونیک و رسید محموله کویل ساپکو (EDI ASN 856)</li>
-              <li>ثبت و ممیزی کاردکس انبار، محاسبات MRP و گزارش‌های تولید OEE سمت سرور</li>
-              <li>پشتیبانی کامل از ورود/خروج Excel و حفظ داده‌ها در دیسک سرور</li>
-            </ul>
           </div>
 
           {syncStatus && (
@@ -167,10 +159,20 @@ export const ErpSyncModal: React.FC<ErpSyncModalProps> = ({
             </div>
           )}
 
-          <div className="flex items-center justify-between pt-3.5 border-t border-[#e8e8e8]">
-            <div className="text-[11px] text-[#666666] font-mono">
-              GET /api/db/status ({isPgLive ? 'PG_LIVE' : 'DURABLE_DISK'})
-            </div>
+          <div className="flex flex-wrap items-center justify-between gap-2 pt-3.5 border-t border-[#e8e8e8]">
+            {onOpenDbSettings ? (
+              <button
+                type="button"
+                onClick={onOpenDbSettings}
+                className="text-[11px] text-[#007cc0] hover:underline font-bold cursor-pointer"
+              >
+                ویرایش و تست لینک هر دو پایگاه داده (محلی و ابری) ←
+              </button>
+            ) : (
+              <div className="text-[11px] text-[#666666] font-mono">
+                GET /api/db/status ({isPgLive ? 'PG_LIVE' : 'DURABLE_DISK'})
+              </div>
+            )}
             <div className="flex items-center gap-2">
               <button
                 type="button"
@@ -186,7 +188,7 @@ export const ErpSyncModal: React.FC<ErpSyncModalProps> = ({
                 className="sap-btn-emphasized text-xs flex items-center gap-1.5 disabled:opacity-60 cursor-pointer"
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`} />
-                <span>{syncing ? 'در حال بررسی زنده سرور...' : 'تست زنده اتصال و همگام‌سازی سرور'}</span>
+                <span>{syncing ? 'در حال همگام‌سازی...' : 'همگام‌سازی و تست زنده سرور'}</span>
               </button>
             </div>
           </div>

@@ -101,15 +101,16 @@ export const PlanningDashboardView: React.FC<PlanningDashboardViewProps> = ({
 
       const assignedTasks: MachineWorkloadTask[] = [];
 
-      // 1. Collect operations explicitly recommended for this machine across suggestions
+      // Collect operations explicitly assigned to this machine across active proposals
       suggestions.forEach(plan => {
+        if (plan.approvalStatus === 'REJECTED') return;
         plan.proposedOperations.forEach(op => {
           const recCode = op.recommendedMachine?.machineCode;
           if (recCode === m.code) {
             const runH = Number(
               (op.estimatedRunHours || (op.plannedQuantity * (op.standardCycleTimeSec || 10)) / 3600).toFixed(1)
             );
-            const setupH = 0.5; // 30 min standard SMED setup
+            const setupH = Number(((op.setupTimeMin || 0) / 60).toFixed(2));
             assignedTasks.push({
               planNumber: plan.planNumber,
               partId: plan.partId,
@@ -117,9 +118,9 @@ export const PlanningDashboardView: React.FC<PlanningDashboardViewProps> = ({
               partName: plan.partName,
               opCode: op.stepCode,
               opName: op.stepName,
-              dieCode: op.dieMoldCode || `DIE-${op.stepCode}`,
+              dieCode: op.dieMoldCode || 'بدون قالب',
               plannedQty: op.plannedQuantity,
-              cycleTimeSec: op.standardCycleTimeSec || 10,
+              cycleTimeSec: op.standardCycleTimeSec || 0,
               runHours: runH,
               setupHours: setupH,
               totalHours: Number((runH + setupH).toFixed(1)),
@@ -128,43 +129,11 @@ export const PlanningDashboardView: React.FC<PlanningDashboardViewProps> = ({
         });
       });
 
-      // 2. If no suggestion directly picked this machine as #1, derive realistic active shop-floor task from netRequirements so every active press has transparent calculation data
-      if (assignedTasks.length === 0 && netRequirements.length > 0) {
-        const reqItem = netRequirements[idx % netRequirements.length];
-        const qty = Math.max(800, Math.min(2500, reqItem.netProductionRequirement || 1200));
-        const cycleSec = m.tonnage && m.tonnage >= 400 ? 14 : 9;
-        const runH = Number(((qty * cycleSec) / 3600).toFixed(1));
-        const setupH = 0.6;
-        assignedTasks.push({
-          planNumber: `PLN-1404-0${(idx % 5) + 1}`,
-          partId: reqItem.partId,
-          partCode: reqItem.partCode,
-          partName: reqItem.partName,
-          opCode: m.processType === 'SHEARING' ? 'OP10' : m.processType === 'BLANKING' ? 'OP20' : 'OP30',
-          opName:
-            m.processType === 'SHEARING'
-              ? 'برش ورق و نواربری استاندارد'
-              : m.processType === 'BLANKING'
-              ? 'بلنک‌زنی و برش محیطی قالب'
-              : 'فرم‌دهی و خم‌کاری نهایی',
-          dieCode: `DIE-${reqItem.partCode.slice(-6)}-${(idx + 1) * 10}`,
-          plannedQty: qty,
-          cycleTimeSec: cycleSec,
-          runHours: runH,
-          setupHours: setupH,
-          totalHours: Number((runH + setupH).toFixed(1)),
-        });
-      }
-
-      const rawRunHours = assignedTasks.reduce((sum, t) => sum + t.runHours, 0);
-      const rawSetupHours = assignedTasks.reduce((sum, t) => sum + t.setupHours, 0);
-      const basePmHours = 0.5; // 30m daily TPM & lubrication check
-
-      // Normalize to daily 2-shift window (15h) if multi-day batch
-      const dailyRunHours = Number(Math.min(12.8, rawRunHours > 13 ? 9.5 + (idx % 4) * 0.8 : rawRunHours).toFixed(1));
-      const dailySetupHours = Number(Math.min(2.0, rawSetupHours).toFixed(1));
-      const totalOccupiedHours = Number(Math.min(14.5, dailyRunHours + dailySetupHours + basePmHours).toFixed(1));
-      const workloadPct = Math.min(97, Math.round((totalOccupiedHours / DAILY_CAPACITY) * 100));
+      const dailyRunHours = Number(assignedTasks.reduce((sum, t) => sum + t.runHours, 0).toFixed(1));
+      const dailySetupHours = Number(assignedTasks.reduce((sum, t) => sum + t.setupHours, 0).toFixed(1));
+      const basePmHours = assignedTasks.length > 0 ? 0.5 : 0;
+      const totalOccupiedHours = Number((dailyRunHours + dailySetupHours + basePmHours).toFixed(1));
+      const workloadPct = Math.min(100, Math.round((totalOccupiedHours / DAILY_CAPACITY) * 100));
       const freeHours = Number(Math.max(0, DAILY_CAPACITY - totalOccupiedHours).toFixed(1));
 
       return {
@@ -179,7 +148,7 @@ export const PlanningDashboardView: React.FC<PlanningDashboardViewProps> = ({
         workloadPct,
       };
     });
-  }, [machines, suggestions, netRequirements]);
+  }, [machines, suggestions]);
 
   const bottleneckCount = useMemo(
     () => machineLoads.filter(m => m.workloadPct >= 80).length,

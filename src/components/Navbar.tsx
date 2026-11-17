@@ -62,6 +62,7 @@ interface NavbarProps {
   onSeedDemo: () => Promise<void>;
   onCleanDemo: () => Promise<void>;
   onOpenErpModal: () => void;
+  onOpenHelpModal?: () => void;
   loading: boolean;
 }
 
@@ -104,6 +105,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onSeedDemo,
   onCleanDemo,
   onOpenErpModal,
+  onOpenHelpModal,
   loading,
 }) => {
   const [showConfirmClean, setShowConfirmClean] = useState(false);
@@ -359,6 +361,18 @@ export const Navbar: React.FC<NavbarProps> = ({
         </button>
 
         <PWAInstallButton />
+
+        {onOpenHelpModal && (
+          <button
+            type="button"
+            onClick={onOpenHelpModal}
+            className="sap-btn-standard px-2.5 py-1 text-xs flex items-center gap-1.5 cursor-pointer text-[#007cc0] bg-[#e5f3fa] hover:bg-[#b3ddf2] border border-[#b3ddf2]"
+            title="راهنمای تعاملی سناریوها و نقشه ماژول‌ها"
+          >
+            <Compass className="w-3.5 h-3.5 text-[#007cc0]" />
+            <span className="hidden md:inline">راهنمای سیستم و سناریوها</span>
+          </button>
+        )}
 
         {reorderAlertsCount > 0 && (
           <button

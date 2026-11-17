@@ -21,6 +21,7 @@ import {
   CalendarDays,
   MoreHorizontal,
   Truck,
+  ShieldCheck,
 } from 'lucide-react';
 import {
   Part,
@@ -54,6 +55,8 @@ import { ReturnFromProductionModal } from './ReturnFromProductionModal';
 import { MaterialIssueModal } from './MaterialIssueModal';
 import { InventoryModuleSkeleton } from '../ui/Skeleton';
 import { FioriAnalyticalListPage, AlpVisualKpiItem } from '../fiori/FioriAnalyticalListPage';
+import { QualityUsageDecisionView } from '../quality/QualityUsageDecisionView';
+import { useErpRouter } from '../../context/RouterContext';
 
 export type InventorySubTab =
   | 'DASHBOARD'
@@ -65,7 +68,8 @@ export type InventorySubTab =
   | 'CUSTOM_REPORTS'
   | 'IMPORT_EXPORT'
   | 'SAPCO'
-  | 'STAGES';
+  | 'STAGES'
+  | 'QUALITY_QM';
 
 interface InventoryModuleViewProps {
   parts: Part[];
@@ -110,6 +114,7 @@ export const InventoryModuleView: React.FC<InventoryModuleViewProps> = ({
   onNavigateToPlanning,
   onSubTabChange,
 }) => {
+  const { route, clearDocQuery } = useErpRouter();
   const [activeSubTab, setActiveSubTab] = useState<InventorySubTab>(initialSubTab || 'DASHBOARD');
 
   const handleSelectSubTab = (tab: InventorySubTab) => {
@@ -124,7 +129,7 @@ export const InventoryModuleView: React.FC<InventoryModuleViewProps> = ({
   // Dedicated Reorder Alerts Page Filters
   const [alertCategoryFilter, setAlertCategoryFilter] = useState<'ALL' | PartCategory>('ALL');
   const [alertSeverityFilter, setAlertSeverityFilter] = useState<'ALL' | 'CRITICAL' | 'WARNING'>('ALL');
-  const [alertSearchQuery, setAlertSearchQuery] = useState('');
+  const [alertSearchQuery, setAlertSearchQuery] = useState(initialSearchQuery || route.docQuery || '');
 
   // Sync when parent deep-links to a specific inventory sub-tab
   useEffect(() => {
@@ -132,6 +137,13 @@ export const InventoryModuleView: React.FC<InventoryModuleViewProps> = ({
       setActiveSubTab(initialSubTab);
     }
   }, [initialSubTab]);
+
+  useEffect(() => {
+    const q = initialSearchQuery || route.docQuery;
+    if (q) {
+      setAlertSearchQuery(q);
+    }
+  }, [initialSearchQuery, route.docQuery]);
 
   // Core Inventory Data
   const [metrics, setMetrics] = useState<InventoryDashboardMetrics | null>(null);
@@ -419,6 +431,7 @@ export const InventoryModuleView: React.FC<InventoryModuleViewProps> = ({
   ];
 
   const secondaryTabs: { id: InventorySubTab; label: string; icon: any; badge?: number }[] = [
+    { id: 'QUALITY_QM', label: 'کنترل کیفیت و تصمیم‌گیری (QM-UD)', icon: ShieldCheck },
     { id: 'CONTRACTS', label: 'قراردادها و سهمیه مواد', icon: FileSignature },
     { id: 'IMPORT_EXPORT', label: 'ورود و خروج اکسل (CSV)', icon: Upload },
     { id: 'SAPCO', label: 'صورتحساب امانی ساپکو', icon: ScrollText },
@@ -638,6 +651,7 @@ export const InventoryModuleView: React.FC<InventoryModuleViewProps> = ({
             setAlertCategoryFilter('ALL');
             setAlertSeverityFilter('ALL');
             setAlertSearchQuery('');
+            if (route.docQuery) clearDocQuery();
           }}
           headerActions={
             onNavigateToPlanning ? (
@@ -921,6 +935,15 @@ export const InventoryModuleView: React.FC<InventoryModuleViewProps> = ({
           balances={stageBalances}
           onRefresh={onGlobalRefresh || (() => loadInventoryData(true))}
           loading={loading}
+        />
+      )}
+
+      {/* QM Usage Decision & Routing & OEE View */}
+      {activeSubTab === 'QUALITY_QM' && (
+        <QualityUsageDecisionView
+          parts={parts}
+          stageBalances={stageBalances}
+          onGlobalRefresh={onGlobalRefresh}
         />
       )}
 

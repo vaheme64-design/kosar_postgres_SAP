@@ -17,7 +17,10 @@ export interface RouteState {
   planningSubTab: PlanningSubTabKey;
   machineSubTab: MachineSubTabKey;
   wipSubTab?: WipSubTabKey;
+  contractsSubTab?: 'CONTRACTS_QUOTAS' | 'CUSTOMER_ORDERS';
   masterSubSection?: MasterSubSection;
+  settingsSubTab?: 'rbac' | 'db_architecture';
+  reportSubTab?: string;
   moId: string | null;
   drawerTab: DrawerTabKey | null;
   timelineMoId: string | null;
@@ -35,7 +38,10 @@ export interface RouteNavigateParams {
   planningSubTab?: PlanningSubTabKey;
   machineSubTab?: MachineSubTabKey;
   wipSubTab?: WipSubTabKey;
+  contractsSubTab?: 'CONTRACTS_QUOTAS' | 'CUSTOMER_ORDERS';
   masterSubSection?: MasterSubSection;
+  settingsSubTab?: 'rbac' | 'db_architecture';
+  reportSubTab?: string;
   moId?: string | null;
   drawerTab?: DrawerTabKey | null;
   timelineMoId?: string | null;
@@ -69,7 +75,10 @@ const DEFAULT_ROUTE: RouteState = {
   planningSubTab: 'erp_workbench',
   machineSubTab: 'machines',
   wipSubTab: 'UNIFIED_DIRECTORY',
+  contractsSubTab: 'CONTRACTS_QUOTAS',
   masterSubSection: 'PARTS',
+  settingsSubTab: 'rbac',
+  reportSubTab: 'plan_vs_actual',
   moId: null,
   drawerTab: null,
   timelineMoId: null,
@@ -123,6 +132,8 @@ const INV_SLUG_TO_SUBTAB: Record<string, InventorySubTab> = {
   custom_reports: 'CUSTOM_REPORTS',
   import_export: 'IMPORT_EXPORT',
   stages: 'STAGES',
+  quality_qm: 'QUALITY_QM',
+  qm: 'QUALITY_QM',
 };
 
 const INV_SUBTAB_TO_SLUG: Record<InventorySubTab, string> = {
@@ -136,6 +147,7 @@ const INV_SUBTAB_TO_SLUG: Record<InventorySubTab, string> = {
   IMPORT_EXPORT: 'import_export',
   SAPCO: 'sapco',
   STAGES: 'stages',
+  QUALITY_QM: 'quality_qm',
 };
 
 // Planning SubTab slug mapping
@@ -277,6 +289,12 @@ function parseUrlToRoute(): RouteState {
   const docQuery = searchParams.get('doc') || searchParams.get('q') || null;
   const rawWipSubTab = searchParams.get('wipTab') as WipSubTabKey | null;
   const wipSubTab: WipSubTabKey = rawWipSubTab || 'UNIFIED_DIRECTORY';
+  const rawContractsSubTab = searchParams.get('contractsTab');
+  const contractsSubTab: 'CONTRACTS_QUOTAS' | 'CUSTOMER_ORDERS' =
+    rawContractsSubTab === 'CUSTOMER_ORDERS' ? 'CUSTOMER_ORDERS' : 'CONTRACTS_QUOTAS';
+  const rawSettingsSubTab = searchParams.get('settingsTab');
+  const settingsSubTab: 'rbac' | 'db_architecture' = rawSettingsSubTab === 'db_architecture' ? 'db_architecture' : 'rbac';
+  const reportSubTab = searchParams.get('reportTab') || 'plan_vs_actual';
 
   return {
     tab,
@@ -286,7 +304,10 @@ function parseUrlToRoute(): RouteState {
     planningSubTab,
     machineSubTab,
     wipSubTab,
+    contractsSubTab,
     masterSubSection,
+    settingsSubTab,
+    reportSubTab,
     moId,
     drawerTab,
     timelineMoId,
@@ -348,6 +369,18 @@ function serializeRouteToHash(state: RouteState): string {
 
   if (state.tab === 'wip' && state.wipSubTab && state.wipSubTab !== 'UNIFIED_DIRECTORY') {
     params.set('wipTab', state.wipSubTab);
+  }
+
+  if (state.tab === 'contracts' && state.contractsSubTab && state.contractsSubTab !== 'CONTRACTS_QUOTAS') {
+    params.set('contractsTab', state.contractsSubTab);
+  }
+
+  if (state.tab === 'settings' && state.settingsSubTab && state.settingsSubTab !== 'rbac') {
+    params.set('settingsTab', state.settingsSubTab);
+  }
+
+  if (state.tab === 'reports' && state.reportSubTab && state.reportSubTab !== 'plan_vs_actual') {
+    params.set('reportTab', state.reportSubTab);
   }
 
   const queryString = params.toString();

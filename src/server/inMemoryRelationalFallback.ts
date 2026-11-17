@@ -56,11 +56,28 @@ const fallbackWipProductionIdempotency = new Map<string, { mo: any; log: any; ba
 const fallbackPlanProposalsStore: any[] = [];
 const fallbackSavedReportConfigsStore: SavedReportConfig[] = [];
 
-const getGrossWeightKgForPart = (partCode: string, fallbackWeight = 0.98): number => {
-  if (partCode === 'WIP-ECU-MAIN-BRK') return 0.98;
-  if (partCode === 'WIP-ECU-COMP-BRK') return 0.47;
-  if (partCode === 'SAPCO-ASY-ECU-BRK-01') return 1.45;
-  return fallbackWeight;
+export function exportFallbackProposalsSnapshot(): any[] {
+  return JSON.parse(JSON.stringify(fallbackPlanProposalsStore));
+}
+
+export function hydrateFallbackProposalsSnapshot(proposals: any[]): void {
+  if (!Array.isArray(proposals)) return;
+  fallbackPlanProposalsStore.splice(0, fallbackPlanProposalsStore.length, ...proposals);
+}
+
+export function clearFallbackProposalsStore(): void {
+  fallbackPlanProposalsStore.length = 0;
+}
+
+const getGrossWeightKgForPart = (partCode: string, parts: Part[] = [], fallbackWeight?: number): number => {
+  const part = parts.find(p => p.code === partCode || p.id === partCode);
+  const bom = getAllBoms().find(b => b.assemblyPartCode === partCode || b.assemblyPartId === part?.id);
+  const bomSheetWeight = bom?.components
+    ?.filter(c => c.componentType === 'RAW_SHEET' || c.grossWeightKg)
+    ?.reduce((s, c) => s + Number(c.grossWeightKg || 0) * Number(c.quantityPerAssembly || 1), 0);
+  if (bomSheetWeight && bomSheetWeight > 0) return Number(bomSheetWeight.toFixed(3));
+  if (part?.weightPerUnitKg && part.weightPerUnitKg > 0) return part.weightPerUnitKg;
+  return fallbackWeight && fallbackWeight > 0 ? fallbackWeight : 0;
 };
 
 export function getFallbackPlanningReadModel(
@@ -110,6 +127,11 @@ export function getFallbackPlanningReadModel(
         stepNumber: op.stepNumber,
         stepCode: op.stepCode,
         stepName: op.stepName,
+        processType: op.processType,
+        requiredTonnage: op.requiredTonnage || 0,
+        standardCycleTimeSec: op.standardCycleTimeSec || 0,
+        setupTimeMin: op.setupTimeMin || 0,
+        scrapNormPercent: op.scrapNormPercent || 0,
         dieId: op.dieMoldId || null,
         assignedMachine: assigned ? { id: assigned.id, code: assigned.code, name: assigned.name } : null,
         eligibleMachines: fallbackByCap.map(m => ({
@@ -127,9 +149,11 @@ export function getFallbackPlanningReadModel(
       .filter(o => o.status === 'OPEN' || o.status === 'PARTIALLY_FULFILLED')
       .flatMap(o =>
         o.lines
-          .filter(l => (l.partCode === req.partCode || l.partId === req.partId) && l.remainingQuantity > 0)
-          .map(l => ({
+          .map((l, lIdx) => ({ l, lIdx }))
+          .filter(({ l }) => (l.partCode === req.partCode || l.partId === req.partId) && l.remainingQuantity > 0)
+          .map(({ l, lIdx }) => ({
             customerOrderLineId: l.id,
+            lineNumber: lIdx + 1,
             customerOrderNumber: o.orderNumber,
             dueDate: l.dueDate || o.dueDate,
             remainingQty: l.remainingQuantity,
@@ -150,6 +174,7 @@ export function getFallbackPlanningReadModel(
       partId: part?.id || req.partId,
       partCode: req.partCode,
       partName: req.partName,
+      materialGrade: part?.materialGrade || null,
       routeId: routing?.id || null,
       route,
       demandLines: orderLine,
@@ -242,9 +267,13 @@ export function createFallbackProposal(
         customerOrderLineId: dl.customerOrderLineId,
         partId: requirement.partId,
         routeId: requirement.routeId,
-        part: { partNumber: requirement.partCode, name: requirement.partName },
+        part: {
+          partNumber: requirement.partCode,
+          name: requirement.partName,
+          materialGrade: requirement.materialGrade || null,
+        },
         customerOrderLine: {
-          lineNumber: 1,
+          lineNumber: dl.lineNumber || 1,
           order: { orderNumber: dl.customerOrderNumber, priority: dl.priority },
         },
         requestedQty: dl.remainingQty,
@@ -259,7 +288,13 @@ export function createFallbackProposal(
           stepNumber: step.stepNumber,
           stepCode: step.stepCode,
           stepName: step.stepName,
+          processType: step.processType,
+          requiredTonnage: step.requiredTonnage || 0,
+          standardCycleTimeSec: step.standardCycleTimeSec || 0,
+          setupTimeMin: step.setupTimeMin || 0,
           machineId: step.assignedMachine?.id || step.eligibleMachines[0]?.id || null,
+          machineCode: step.assignedMachine?.code || step.eligibleMachines[0]?.code || null,
+          machineName: step.assignedMachine?.name || step.eligibleMachines[0]?.name || null,
           dieId: step.dieId || null,
           eligibleMachineIds: step.eligibleMachines.map((m: any) => m.id),
         })),
@@ -412,14 +447,13 @@ export function getFallbackMaterialIssueOptions(
   operators: Operator[],
 ) {
   const { balances } = calculateDetailedStockBalances(inventoryDocs, reservations, parts, serverQcHoldStore);
-  const coilPartCodes = new Set(['RM-COIL-DC01A-2.0-1140', 'RM-SHT-DC01A-2.0-1000']);
-
   const stockBalances = balances
     .filter(b => {
       const part = parts.find(p => p.id === b.partId || p.code === b.partCode);
       if (!part) return false;
       if (part.category !== 'RAW_MATERIAL') return false;
-      if (coilPartCodes.has(part.code) || b.unit === 'KG') return false;
+      // Non-coil materials only (e.g. fasteners, nuts, bolts measured in PCS, excluding KG coils/sheets)
+      if (b.unit === 'KG' || part.unit === 'KG') return false;
       return b.availableQty > 0 && b.qualityBlockedQty === 0;
     })
     .map(b => {
@@ -662,8 +696,8 @@ export function getFallbackCoilIssueOptions(parts: Part[]) {
         moNumber: mo.moNumber,
         partCode: mo.partCode,
         partName: mo.partName,
-        weightNetKg: part?.weightPerUnitKg || 0.75,
-        weightGrossKg: getGrossWeightKgForPart(mo.partCode, part?.weightPerUnitKg || 0.98),
+        weightNetKg: part?.weightPerUnitKg || 0,
+        weightGrossKg: getGrossWeightKgForPart(mo.partCode, parts, part?.weightPerUnitKg),
         wipManufacturingOrderId: mo.id,
         status: mo.status,
         operations: eligibleOps.map(op => ({
@@ -1092,12 +1126,12 @@ export function getFallbackWipPostingContext(
       moNumber: o.moNumber,
       part: { partNumber: o.partCode, name: o.partName },
       operations: o.operations.map(op => {
-        const machine = machines.find(m => m.id === op.machineId);
+        const machine = machines.find(m => m.id === op.machineId) || machines.find(m => m.status === 'ACTIVE' && m.capabilities.includes(op.processType));
         return {
           id: op.id,
           stepNumber: op.stepNumber,
-          plannedMachineId: op.machineId || machine?.id || 'MCH-001',
-          plannedMachine: machine ? { id: machine.id, code: machine.code, name: machine.name } : { id: 'MCH-001', code: 'PRS', name: op.machineName || 'ماشین خط' },
+          plannedMachineId: op.machineId || machine?.id || null,
+          plannedMachine: machine ? { id: machine.id, code: machine.code, name: machine.name } : null,
           operation: { processType: op.processType, name: op.stepName },
         };
       }),

@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   Boxes,
   Search,
@@ -12,6 +12,7 @@ import {
   Clock,
   AlertTriangle,
   Building2,
+  X,
 } from 'lucide-react';
 import { StageInventorySummary, FACTORY_STAGES, PartCategory } from '../types/inventory';
 import {
@@ -35,17 +36,26 @@ export const InventoryReportView: React.FC<InventoryReportViewProps> = ({
   onRefresh,
   loading,
 }) => {
-  const { traceDocument } = useErpRouter();
-  const [searchTerm, setSearchTerm] = useState('');
+  const { traceDocument, route, clearDocQuery } = useErpRouter();
+  const [searchTerm, setSearchTerm] = useState(route.docQuery || '');
   const [selectedStageFilter, setSelectedStageFilter] = useState('ALL');
   const [categoryFilter, setCategoryFilter] = useState<string>('ALL');
-  const [onlyNonZero, setOnlyNonZero] = useState(true);
+  const [onlyNonZero, setOnlyNonZero] = useState(!route.docQuery);
   const [sortField, setSortField] = useState<keyof StageInventorySummary>('totalQty');
   const [sortAsc, setSortAsc] = useState(false);
 
   // Pagination
   const [currentPage, setCurrentPage] = useState(1);
   const pageSize = 15;
+
+  useEffect(() => {
+    if (route.docQuery) {
+      setSearchTerm(route.docQuery);
+      setOnlyNonZero(false);
+      setSelectedStageFilter('ALL');
+      setCurrentPage(1);
+    }
+  }, [route.docQuery]);
 
   const filteredBalances = useMemo(() => {
     return balances.filter(item => {
@@ -201,7 +211,10 @@ export const InventoryReportView: React.FC<InventoryReportViewProps> = ({
             <input
               type="text"
               value={searchTerm}
-              onChange={e => setSearchTerm(e.target.value)}
+              onChange={e => {
+                setSearchTerm(e.target.value);
+                setCurrentPage(1);
+              }}
               placeholder="جستجوی نام قطعه، کد کاتالوگ یا ایستگاه..."
               className="w-full bg-[#ffffff] border border-[#bfbfbf] rounded-sm pr-9 pl-3 py-1.5 text-xs text-[#333333] focus:outline-none focus:border-[#007cc0]"
             />
@@ -210,7 +223,10 @@ export const InventoryReportView: React.FC<InventoryReportViewProps> = ({
           {/* Stage Filter */}
           <select
             value={selectedStageFilter}
-            onChange={e => setSelectedStageFilter(e.target.value)}
+            onChange={e => {
+              setSelectedStageFilter(e.target.value);
+              setCurrentPage(1);
+            }}
             className="bg-[#ffffff] border border-[#bfbfbf] rounded-sm px-3 py-1.5 text-xs text-[#333333] focus:outline-none focus:border-[#007cc0]"
           >
             <option value="ALL">همه ایستگاه‌ها و انبارها</option>
@@ -226,15 +242,35 @@ export const InventoryReportView: React.FC<InventoryReportViewProps> = ({
             <input
               type="checkbox"
               checked={onlyNonZero}
-              onChange={e => setOnlyNonZero(e.target.checked)}
+              onChange={e => {
+                setOnlyNonZero(e.target.checked);
+                setCurrentPage(1);
+              }}
               className="rounded-sm bg-[#ffffff] border-[#bfbfbf] text-[#007cc0] focus:ring-0"
             />
             <span>فقط ردیف‌های دارای موجودی یا گردش</span>
           </label>
         </div>
 
-        <div className="text-xs text-[#666666]">
-          تعداد ردیف‌ها: <span className="font-bold text-[#333333] tabular-nums">{formatNumber(filteredBalances.length)}</span>
+        <div className="flex items-center gap-2 text-xs text-[#666666]">
+          {route.docQuery && (
+            <button
+              type="button"
+              onClick={() => {
+                clearDocQuery();
+                setSearchTerm('');
+                setOnlyNonZero(true);
+                setCurrentPage(1);
+              }}
+              className="px-2 py-1 rounded bg-[#e5f3fa] text-[#007cc0] border border-[#b3ddf2] flex items-center gap-1 cursor-pointer"
+            >
+              <span>فیلتر قطعه: {route.docQuery}</span>
+              <X className="w-3 h-3" />
+            </button>
+          )}
+          <span>
+            تعداد ردیف‌ها: <span className="font-bold text-[#333333] tabular-nums">{formatNumber(filteredBalances.length)}</span>
+          </span>
         </div>
       </div>
 

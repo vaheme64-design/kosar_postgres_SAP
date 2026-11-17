@@ -89,20 +89,40 @@ interface ManagementReportsModuleViewProps {
   parts: Part[];
   machines: Machine[];
   initialReportType?: ReportTypeKey;
+  onReportTypeChange?: (report: ReportTypeKey) => void;
 }
 
 export const ManagementReportsModuleView: React.FC<ManagementReportsModuleViewProps> = ({
   parts,
   machines,
   initialReportType = 'plan_vs_actual',
+  onReportTypeChange,
 }) => {
-  const { traceDocument } = useErpRouter();
+  const { traceDocument, route } = useErpRouter();
   const [activeReport, setActiveReport] = useState<ReportTypeKey>(initialReportType);
   const [filters, setFilters] = useState<ReportFilterParams>({});
   const [loading, setLoading] = useState(false);
   const [reportMeta, setReportMeta] = useState<ReportMeta | null>(null);
   const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
-  const [tableSearchQuery, setTableSearchQuery] = useState<string>('');
+  const [tableSearchQuery, setTableSearchQuery] = useState<string>(route.docQuery || '');
+
+  useEffect(() => {
+    if (initialReportType && initialReportType !== activeReport) {
+      setActiveReport(initialReportType);
+    }
+  }, [initialReportType]);
+
+  useEffect(() => {
+    if (route.docQuery !== undefined && route.docQuery !== null) {
+      setTableSearchQuery(route.docQuery);
+    }
+  }, [route.docQuery]);
+
+  const handleSelectReport = (rep: ReportTypeKey) => {
+    setActiveReport(rep);
+    onReportTypeChange?.(rep);
+  };
+  void handleSelectReport;
 
   // Report Data Stores
   const [planVsActualData, setPlanVsActualData] = useState<PlanVsActualItem[]>([]);

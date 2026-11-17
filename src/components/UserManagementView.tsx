@@ -27,31 +27,133 @@ interface UserManagementViewProps {
   currentUser: UserRoleProfile;
   onRoleChange: (role: UserRoleProfile['role']) => void;
   firebaseUser: any;
+  initialSubTab?: 'rbac' | 'db_architecture';
+  onSubTabChange?: (sub: 'rbac' | 'db_architecture') => void;
 }
 
 export const UserManagementView: React.FC<UserManagementViewProps> = ({
   currentUser,
   onRoleChange,
   firebaseUser,
+  initialSubTab = 'rbac',
+  onSubTabChange,
 }) => {
-  const [activeSubTab, setActiveSubTab] = useState<'rbac' | 'db_architecture'>('rbac');
+  const [activeSubTab, setActiveSubTab] = useState<'rbac' | 'db_architecture'>(initialSubTab);
   const [dbStatus, setDbStatus] = useState<any>(null);
   const [loadingDb, setLoadingDb] = useState<boolean>(true);
   const [copiedCmd, setCopiedCmd] = useState<string | null>(null);
   const [authErrorMsg, setAuthErrorMsg] = useState<string | null>(null);
 
+  // Dual DB Connection State
+  const [localDbUrl, setLocalDbUrl] = useState('');
+  const [cloudDbUrl, setCloudDbUrl] = useState('');
+  const [activeTarget, setActiveTarget] = useState<'AUTO' | 'LOCAL' | 'CLOUD' | 'HYBRID_DISK'>('AUTO');
+  const [savingDbCfg, setSavingDbCfg] = useState(false);
+  const [testingTarget, setTestingTarget] = useState<'LOCAL' | 'CLOUD' | null>(null);
+  const [syncingDb, setSyncingDb] = useState(false);
+  const [dbFeedback, setDbFeedback] = useState<{ ok: boolean; text: string } | null>(null);
+  const [localTestResult, setLocalTestResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [cloudTestResult, setCloudTestResult] = useState<{ ok: boolean; message: string } | null>(null);
+
   useEffect(() => {
+    setActiveSubTab(initialSubTab);
+  }, [initialSubTab]);
+
+  const selectSubTab = (sub: 'rbac' | 'db_architecture') => {
+    setActiveSubTab(sub);
+    onSubTabChange?.(sub);
+  };
+
+  const fetchDbStatus = async (probe = false) => {
     setLoadingDb(true);
-    fetch('/api/db/status')
-      .then(res => res.json())
-      .then(data => {
-        if (data.success) {
-          setDbStatus(data);
+    try {
+      const res = await fetch(`/api/db/status${probe ? '?probe=true' : ''}`);
+      const data = await res.json();
+      if (data.success) {
+        setDbStatus(data);
+        const dual = data.data?.dualLinks;
+        if (dual) {
+          setLocalDbUrl(dual.localDbUrlMasked || '');
+          setCloudDbUrl(dual.cloudDbUrlMasked || '');
+          setActiveTarget(dual.activeTarget || 'AUTO');
         }
-      })
-      .catch(() => {})
-      .finally(() => setLoadingDb(false));
+      }
+    } catch {
+      // ignore fetch error on mount
+    } finally {
+      setLoadingDb(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchDbStatus(false);
   }, []);
+
+  const handleSaveDualDbConfig = async () => {
+    setSavingDbCfg(true);
+    setDbFeedback(null);
+    try {
+      const res = await fetch('/api/db/config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ localDbUrl, cloudDbUrl, activeTarget }),
+      });
+      const json = await res.json();
+      if (!res.ok || !json.success) {
+        throw new Error(json.error || 'خطا در ذخیره تنظیمات دو پایگاه داده');
+      }
+      setDbFeedback({ ok: true, text: json.message || 'تنظیمات دو پایگاه داده با موفقیت ذخیره شد.' });
+      await fetchDbStatus(false);
+    } catch (err) {
+      setDbFeedback({
+        ok: false,
+        text: err instanceof Error ? err.message : 'خطا در ذخیره تنظیمات پایگاه داده',
+      });
+    } finally {
+      setSavingDbCfg(false);
+    }
+  };
+
+  const handleTestSingleDb = async (target: 'LOCAL' | 'CLOUD') => {
+    setTestingTarget(target);
+    const url = target === 'LOCAL' ? localDbUrl : cloudDbUrl;
+    try {
+      const res = await fetch('/api/db/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target, url }),
+      });
+      const json = await res.json();
+      const result = { ok: Boolean(json.success), message: json.message || json.error || 'نتیجه نامشخص' };
+      if (target === 'LOCAL') setLocalTestResult(result);
+      else setCloudTestResult(result);
+    } catch (err) {
+      const result = { ok: false, message: err instanceof Error ? err.message : 'خطا در تست اتصال' };
+      if (target === 'LOCAL') setLocalTestResult(result);
+      else setCloudTestResult(result);
+    } finally {
+      setTestingTarget(null);
+    }
+  };
+
+  const handleSyncToActiveDb = async () => {
+    setSyncingDb(true);
+    setDbFeedback(null);
+    try {
+      const res = await fetch('/api/db/sync', { method: 'POST' });
+      const json = await res.json();
+      if (!res.ok || !json.success) throw new Error(json.error || 'خطا در همگام‌سازی داده‌ها');
+      setDbFeedback({ ok: true, text: json.message });
+      await fetchDbStatus(false);
+    } catch (err) {
+      setDbFeedback({
+        ok: false,
+        text: err instanceof Error ? err.message : 'خطا در همگام‌سازی داده‌ها',
+      });
+    } finally {
+      setSyncingDb(false);
+    }
+  };
 
   if (loadingDb && !dbStatus) {
     return <KpiCardsSkeleton count={6} columns={6} theme="light" />;
@@ -163,17 +265,17 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
               </span>
               <select
                 value={activeSubTab}
-                onChange={e => setActiveSubTab(e.target.value as 'rbac' | 'db_architecture')}
+                onChange={e => selectSubTab(e.target.value as 'rbac' | 'db_architecture')}
                 className="bg-transparent text-xs font-bold text-[#333333] focus:outline-none cursor-pointer pr-1 pl-4 py-0.5"
               >
                 <option value="rbac">۱. کاربران و سطوح دسترسی کارخانه (RBAC)</option>
-                <option value="db_architecture">۲. معماری پایگاه داده PostgreSQL & Prisma</option>
+                <option value="db_architecture">۲. تنظیمات اتصال دو پایگاه داده (محلی + ابری) & Prisma</option>
               </select>
             </div>
 
             <div className="flex items-center gap-1.5">
               <button
-                onClick={() => setActiveSubTab('rbac')}
+                onClick={() => selectSubTab('rbac')}
                 className={`px-2.5 py-1 rounded-sm text-[11px] font-semibold transition cursor-pointer ${
                   activeSubTab === 'rbac'
                     ? 'bg-[#e5f3fa] text-[#007cc0] border border-[#007cc0]'
@@ -183,14 +285,14 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
                 کاربران و دسترسی‌ها
               </button>
               <button
-                onClick={() => setActiveSubTab('db_architecture')}
+                onClick={() => selectSubTab('db_architecture')}
                 className={`px-2.5 py-1 rounded-sm text-[11px] font-semibold transition cursor-pointer ${
                   activeSubTab === 'db_architecture'
                     ? 'bg-[#e5f3fa] text-[#007cc0] border border-[#007cc0]'
                     : 'bg-[#ffffff] text-[#333333] border border-[#d9d9d9] hover:bg-[#f5f5f5]'
                 }`}
               >
-                معماری PostgreSQL & Prisma
+                لینک دو پایگاه داده (محلی و ابری) & Prisma
               </button>
             </div>
           </div>
@@ -302,12 +404,19 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
       ) : (
         /* Database & Prisma Architecture Documentation */
         <div className="space-y-4">
-          {/* Connection Status Card */}
-          <div className="sap-card p-4">
-            <div className="flex items-center justify-between mb-3">
+          {/* Dual Database Links Configuration (Local PostgreSQL + Cloud PostgreSQL) */}
+          <div className="sap-card p-4 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-2">
                 <Database className="w-5 h-5 text-[#007cc0]" />
-                <h3 className="text-sm font-bold text-[#333333]">وضعیت اتصال پایگاه داده PostgreSQL</h3>
+                <div>
+                  <h3 className="text-sm font-bold text-[#333333]">
+                    مدیریت لینک دو پایگاه داده (Local PostgreSQL + Cloud PostgreSQL)
+                  </h3>
+                  <p className="text-[11px] text-[#666666]">
+                    در سیستم‌ها و سرورهای مختلف، می‌توانید هم لینک پایگاه داده محلی (Local) و هم لینک پایگاه داده ابری (Cloud/Supabase) را تنظیم، تست و سوییچ کنید.
+                  </p>
+                </div>
               </div>
               <span
                 className={`text-xs px-2.5 py-0.5 rounded-sm font-semibold flex items-center gap-1.5 ${
@@ -319,7 +428,7 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
                 {dbStatus?.data?.isConnected ? (
                   <>
                     <CheckCircle2 className="w-3.5 h-3.5" />
-                    متصل به سرور PostgreSQL
+                    متصل ({dbStatus?.data?.dualLinks?.resolvedTarget || 'PostgreSQL'})
                   </>
                 ) : (
                   <>
@@ -330,27 +439,168 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
               </span>
             </div>
 
-            <p className="text-xs text-[#666666] leading-relaxed mb-3">
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-3.5">
+              {/* Local Database Link */}
+              <div className="p-3.5 bg-[#f7f9fb] border border-[#d9e2ec] rounded-sm space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-[#333333] flex items-center gap-1.5">
+                    <Server className="w-4 h-4 text-[#007cc0]" />
+                    ۱. لینک پایگاه داده محلی (Local Server / LAN DB)
+                  </span>
+                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded-sm border ${
+                    dbStatus?.data?.dualLinks?.localStatus?.isConnected
+                      ? 'bg-[#ebf7ef] text-[#107e3e] border-[#a9dfbf]'
+                      : 'bg-[#f5f5f5] text-[#666666] border-[#d9d9d9]'
+                  }`}>
+                    {dbStatus?.data?.dualLinks?.localStatus?.isConnected ? 'متصل' : dbStatus?.data?.dualLinks?.hasLocalDbUrl ? 'تنظیم‌شده' : 'تنظیم‌نشده'}
+                  </span>
+                </div>
+                <input
+                  type="text"
+                  dir="ltr"
+                  value={localDbUrl}
+                  onChange={e => setLocalDbUrl(e.target.value)}
+                  placeholder="postgresql://postgres:password@localhost:5432/kpims_db?schema=public"
+                  className="w-full px-3 py-2 text-xs font-mono bg-white border border-[#bfbfbf] rounded-sm focus:outline-none focus:border-[#007cc0]"
+                />
+                <div className="flex items-center justify-between gap-2">
+                  <button
+                    type="button"
+                    onClick={() => handleTestSingleDb('LOCAL')}
+                    disabled={testingTarget === 'LOCAL' || !localDbUrl.trim()}
+                    className="sap-btn-standard text-[11px] px-3 py-1 disabled:opacity-50 cursor-pointer"
+                  >
+                    {testingTarget === 'LOCAL' ? 'در حال تست محلی...' : 'تست اتصال محلی'}
+                  </button>
+                  <span className="text-[10px] text-[#666666]">مناسب شبکه داخلی کارخانه یا Docker</span>
+                </div>
+                {localTestResult && (
+                  <div className={`text-[11px] p-2 rounded-sm border ${
+                    localTestResult.ok ? 'bg-[#ebf7ef] border-[#a9dfbf] text-[#107e3e]' : 'bg-[#ffecec] border-[#f5b7b1] text-[#bb0000]'
+                  }`}>
+                    {localTestResult.message}
+                  </div>
+                )}
+              </div>
+
+              {/* Cloud Database Link */}
+              <div className="p-3.5 bg-[#f7f9fb] border border-[#d9e2ec] rounded-sm space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-[#333333] flex items-center gap-1.5">
+                    <Database className="w-4 h-4 text-[#107e3e]" />
+                    ۲. لینک پایگاه داده ابری (Cloud / Supabase Pooler)
+                  </span>
+                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded-sm border ${
+                    dbStatus?.data?.dualLinks?.cloudStatus?.isConnected
+                      ? 'bg-[#ebf7ef] text-[#107e3e] border-[#a9dfbf]'
+                      : 'bg-[#f5f5f5] text-[#666666] border-[#d9d9d9]'
+                  }`}>
+                    {dbStatus?.data?.dualLinks?.cloudStatus?.isConnected ? 'متصل' : dbStatus?.data?.dualLinks?.hasCloudDbUrl ? 'تنظیم‌شده' : 'تنظیم‌نشده'}
+                  </span>
+                </div>
+                <input
+                  type="text"
+                  dir="ltr"
+                  value={cloudDbUrl}
+                  onChange={e => setCloudDbUrl(e.target.value)}
+                  placeholder="postgresql://postgres.xxxx:password@aws-0-region.pooler.supabase.com:6543/postgres"
+                  className="w-full px-3 py-2 text-xs font-mono bg-white border border-[#bfbfbf] rounded-sm focus:outline-none focus:border-[#007cc0]"
+                />
+                <div className="flex items-center justify-between gap-2">
+                  <button
+                    type="button"
+                    onClick={() => handleTestSingleDb('CLOUD')}
+                    disabled={testingTarget === 'CLOUD' || !cloudDbUrl.trim()}
+                    className="sap-btn-standard text-[11px] px-3 py-1 disabled:opacity-50 cursor-pointer"
+                  >
+                    {testingTarget === 'CLOUD' ? 'در حال تست ابری...' : 'تست اتصال ابری'}
+                  </button>
+                  <span className="text-[10px] text-[#666666]">مناسب دسترسی از راه دور و Supabase</span>
+                </div>
+                {cloudTestResult && (
+                  <div className={`text-[11px] p-2 rounded-sm border ${
+                    cloudTestResult.ok ? 'bg-[#ebf7ef] border-[#a9dfbf] text-[#107e3e]' : 'bg-[#ffecec] border-[#f5b7b1] text-[#bb0000]'
+                  }`}>
+                    {cloudTestResult.message}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Active Target Switcher + Save & Sync Controls */}
+            <div className="p-3 bg-[#f7f7f7] border border-[#d9d9d9] rounded-sm flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-xs font-bold text-[#333333]">اولویت اتصال فعال:</span>
+                <select
+                  value={activeTarget}
+                  onChange={e => setActiveTarget(e.target.value as any)}
+                  className="px-2.5 py-1.5 text-xs font-semibold bg-white border border-[#bfbfbf] rounded-sm focus:outline-none focus:border-[#007cc0]"
+                >
+                  <option value="AUTO">خودکار (ابتدا محلی، سپس ابری، در صورت قطعی دیسک پایدار)</option>
+                  <option value="LOCAL">فقط پایگاه داده محلی (Local DB)</option>
+                  <option value="CLOUD">فقط پایگاه داده ابری (Cloud / Supabase DB)</option>
+                  <option value="HYBRID_DISK">فقط ذخیره‌سازی دیسک محلی سرور (Hybrid Durable Disk)</option>
+                </select>
+              </div>
+
+              <div className="flex items-center gap-2 flex-wrap">
+                <button
+                  type="button"
+                  onClick={handleSaveDualDbConfig}
+                  disabled={savingDbCfg}
+                  className="sap-btn-emphasized text-xs px-4 py-1.5 cursor-pointer disabled:opacity-50"
+                >
+                  {savingDbCfg ? 'در حال ذخیره...' : 'ذخیره لینک‌ها و اعمال اتصال'}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSyncToActiveDb}
+                  disabled={syncingDb}
+                  className="sap-btn-standard text-xs px-3.5 py-1.5 cursor-pointer disabled:opacity-50"
+                >
+                  {syncingDb ? 'در حال همگام‌سازی...' : 'همگام‌سازی داده‌ها با پایگاه داده فعال'}
+                </button>
+              </div>
+            </div>
+
+            {dbFeedback && (
+              <div className={`text-xs p-3 rounded-sm border flex items-center gap-2 ${
+                dbFeedback.ok ? 'bg-[#ebf7ef] border-[#a9dfbf] text-[#107e3e]' : 'bg-[#ffecec] border-[#f5b7b1] text-[#bb0000]'
+              }`}>
+                {dbFeedback.ok ? <CheckCircle2 className="w-4 h-4 shrink-0" /> : <AlertCircle className="w-4 h-4 shrink-0" />}
+                <span>{dbFeedback.text}</span>
+              </div>
+            )}
+
+            {dbStatus?.data?.dualLinks?.lastSyncAt && (
+              <div className="text-[11px] text-[#107e3e] bg-[#f4fbf6] border border-[#c8e6cf] rounded-sm px-3 py-2">
+                آخرین همگام‌سازی: {dbStatus.data.dualLinks.lastSyncSummary} ({new Date(dbStatus.data.dualLinks.lastSyncAt).toLocaleString('fa-IR')})
+              </div>
+            )}
+
+            <p className="text-xs text-[#666666] leading-relaxed">
               {dbStatus?.data?.errorMessage ||
                 'سامانه آماده اتصال به PostgreSQL با ORM پریسما است. تمام تراکنش‌ها و اعتبارسنجی‌ها سمت سرور با موتور Zod و کنترل موجودی انجام می‌شوند.'}
             </p>
 
             <div className="bg-[#f7f7f7] p-3 rounded-sm border border-[#d9d9d9] text-xs font-mono text-[#666666] space-y-1.5">
               <div>
-                <span className="text-[#666666]">پایگاه داده: </span>
-                <span className="text-[#007cc0] font-bold">PostgreSQL 15+</span>
+                <span className="text-[#666666]">پایگاه داده فعال فعلی: </span>
+                <span className="text-[#007cc0] font-bold" dir="ltr">
+                  {dbStatus?.data?.databaseUrlMasked || 'HYBRID_DURABLE_DISK'}
+                </span>
               </div>
               <div>
-                <span className="text-[#666666]">ابزار ORM: </span>
-                <span className="text-[#333333] font-bold">Prisma Client v6.19 (Type-safe)</span>
+                <span className="text-[#666666]">لینک محلی ذخیره‌شده: </span>
+                <span className="text-[#333333] font-bold" dir="ltr">
+                  {dbStatus?.data?.dualLinks?.localDbUrlMasked || 'تعریف‌نشده'}
+                </span>
               </div>
               <div>
-                <span className="text-[#666666]">اعتبارسنجی: </span>
-                <span className="text-[#107e3e] font-bold">Zod 4.x Runtime Validation</span>
-              </div>
-              <div>
-                <span className="text-[#666666]">وضعیت رشته اتصال: </span>
-                <span className="text-[#e9730c] font-bold">{dbStatus?.data?.databaseUrlMasked || 'تنظیم در متغیرهای محیطی'}</span>
+                <span className="text-[#666666]">لینک ابری ذخیره‌شده: </span>
+                <span className="text-[#107e3e] font-bold" dir="ltr">
+                  {dbStatus?.data?.dualLinks?.cloudDbUrlMasked || 'تعریف‌نشده'}
+                </span>
               </div>
             </div>
           </div>

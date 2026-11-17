@@ -15,6 +15,7 @@ import {
   Copy,
   Edit3,
   Upload,
+  Trash2,
 } from 'lucide-react';
 import { Part, PartCategory, UnitOfMeasure, CarModel } from '../types/inventory';
 import { formatNumber, formatWeightKg, exportToCsv, toPersianDigits } from '../utils/formatters';
@@ -31,10 +32,10 @@ interface PartsViewProps {
 }
 
 export const PartsView: React.FC<PartsViewProps> = ({ parts, onSavePart, onRefreshParts }) => {
-  const { showUndoToast, recordAudit } = useEnterpriseUx();
-  const { traceDocument } = useErpRouter();
+  const { showUndoToast, recordAudit, requestConfirm } = useEnterpriseUx();
+  const { traceDocument, route, clearDocQuery } = useErpRouter();
   const [vipMap, setVipMap] = useState<Record<string, boolean>>(() => loadVipPartsMap());
-  const [searchTerm, setSearchTerm] = useState('');
+  const [searchTerm, setSearchTerm] = useState(route.docQuery || '');
   const [categoryFilter, setCategoryFilter] = useState<string>('ALL');
   const [carModelFilter, setCarModelFilter] = useState<string>('ALL');
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -57,6 +58,7 @@ export const PartsView: React.FC<PartsViewProps> = ({ parts, onSavePart, onRefre
   });
   const [formError, setFormError] = useState<string | null>(null);
   const [formLoading, setFormLoading] = useState(false);
+  const [actionBanner, setActionBanner] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [carModelsList, setCarModelsList] = useState<CarModel[]>([]);
 
   useEffect(() => {
@@ -83,6 +85,14 @@ export const PartsView: React.FC<PartsViewProps> = ({ parts, onSavePart, onRefre
     window.addEventListener('kpims-vip-parts-changed', handler);
     return () => window.removeEventListener('kpims-vip-parts-changed', handler);
   }, []);
+
+  useEffect(() => {
+    if (route.docQuery) {
+      setSearchTerm(route.docQuery);
+      setCategoryFilter('ALL');
+      setCarModelFilter('ALL');
+    }
+  }, [route.docQuery]);
 
   const handleToggleVip = async (part: Part) => {
     const currentVip = isPartVip(part, vipMap);
@@ -139,11 +149,16 @@ export const PartsView: React.FC<PartsViewProps> = ({ parts, onSavePart, onRefre
   );
 
   const filteredParts = useMemo(() => {
-    return parts
-      .map(p => {
-        const vip = isPartVip(p, vipMap);
-        return { ...p, isVIP: vip, isPinned: vip };
-      })
+    const uniqueMap = new Map<string, Part & { isVIP: boolean; isPinned: boolean }>();
+    parts.forEach(p => {
+      const key = (p.code || p.id || '').trim().toUpperCase();
+      const vip = isPartVip(p, vipMap);
+      if (key && !uniqueMap.has(key)) {
+        uniqueMap.set(key, { ...p, isVIP: vip, isPinned: vip });
+      }
+    });
+
+    return Array.from(uniqueMap.values())
       .filter(p => {
         if (categoryFilter === 'PINNED' && !p.isVIP) return false;
         if (categoryFilter !== 'ALL' && categoryFilter !== 'PINNED' && p.category !== categoryFilter) return false;
@@ -163,12 +178,27 @@ export const PartsView: React.FC<PartsViewProps> = ({ parts, onSavePart, onRefre
       });
   }, [parts, searchTerm, categoryFilter, carModelFilter, vipMap]);
 
-  const handleOpenNewModal = () => {
+  const buildSuggestedPartCode = (rawQuery: string) => {
+    const cleanAscii = rawQuery
+      .replace(/[^A-Za-z0-9-_]/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '')
+      .toUpperCase();
+    if (cleanAscii && cleanAscii.length >= 2) {
+      return cleanAscii.startsWith('PART') || cleanAscii.startsWith('SAPCO')
+        ? cleanAscii
+        : `PART-${cleanAscii}`;
+    }
+    return `PART-${Date.now().toString().slice(-4)}`;
+  };
+
+  const handleOpenNewModal = (prefillQuery?: string) => {
     setEditingPart(null);
+    const trimmed = (prefillQuery || '').trim();
     setFormData({
-      code: '',
-      name: '',
-      category: 'WIP_PART',
+      code: trimmed ? buildSuggestedPartCode(trimmed) : '',
+      name: trimmed || '',
+      category: trimmed ? 'FINISHED_GOOD' : 'WIP_PART',
       unit: 'PCS',
       weightPerUnitKg: 1,
       sapcoCode: '',
@@ -209,6 +239,43 @@ export const PartsView: React.FC<PartsViewProps> = ({ parts, onSavePart, onRefre
       entityId: p.id,
       entityCode: clonedCode,
       summaryFa: `آماده‌سازی کپی‌گیری (Duplicate) از رکورد «${p.name}» با کد پیشنهادی ${clonedCode}`,
+    });
+  };
+
+  const handleDeletePart = async (p: Part) => {
+    requestConfirm({
+      title: `حذف قطعه «${p.name}» (${p.code})`,
+      message: 'آیا از حذف این قطعه از کاتالوگ مرکزی اطمینان دارید؟ در صورت وجود اسناد وابسته، قطعه غیرفعال خواهد شد.',
+      confirmLabel: 'حذف قطعه',
+      cancelLabel: 'انصراف',
+      variant: 'danger',
+      onConfirm: async () => {
+        setActionBanner(null);
+        try {
+          const res = await fetch(`/api/parts/${p.id}`, { method: 'DELETE' });
+          const data = await res.json();
+          if (!res.ok || !data.success) {
+            throw new Error(data.error || 'خطا در حذف قطعه');
+          }
+          setActionBanner({
+            type: 'success',
+            text: `قطعه «${p.name}» (${p.code}) با موفقیت حذف شد.`,
+          });
+          showUndoToast({
+            title: `قطعه «${p.name}» حذف شد`,
+            description: 'رکورد با موفقیت از کاتالوگ مرکزی پاک گردید.',
+            onUndo: () => {},
+          });
+          if (onRefreshParts) {
+            await onRefreshParts();
+          }
+        } catch (err) {
+          setActionBanner({
+            type: 'error',
+            text: err instanceof Error ? err.message : 'خطا در حذف قطعه',
+          });
+        }
+      },
     });
   };
 
@@ -307,7 +374,7 @@ export const PartsView: React.FC<PartsViewProps> = ({ parts, onSavePart, onRefre
             <span>خروجی اکسل (CSV)</span>
           </button>
           <button
-            onClick={handleOpenNewModal}
+            onClick={() => handleOpenNewModal()}
             className="sap-btn-emphasized flex items-center gap-1.5 px-3.5 py-1.5 text-xs"
           >
             <Plus className="w-4 h-4" />
@@ -315,6 +382,25 @@ export const PartsView: React.FC<PartsViewProps> = ({ parts, onSavePart, onRefre
           </button>
         </div>
       </div>
+
+      {actionBanner && (
+        <div
+          className={`sap-card px-4 py-2.5 text-xs flex items-center justify-between gap-2 border ${
+            actionBanner.type === 'success'
+              ? 'bg-[#ebf5ec] border-[#b7dfbf] text-[#107e3e]'
+              : 'bg-[#ffecec] border-[#f5b7b1] text-[#bb0000]'
+          }`}
+        >
+          <span>{actionBanner.text}</span>
+          <button
+            type="button"
+            onClick={() => setActionBanner(null)}
+            className="p-0.5 rounded hover:bg-black/5 cursor-pointer"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
 
       {/* Filter and Search Bar */}
       <div className="sap-card p-3 flex flex-wrap items-center justify-between gap-3">
@@ -371,10 +457,62 @@ export const PartsView: React.FC<PartsViewProps> = ({ parts, onSavePart, onRefre
           </button>
         </div>
 
-        <div className="text-xs text-[#666666]">
-          تعداد نمایش: <span className="font-bold text-[#333333]">{formatNumber(filteredParts.length)}</span> قطعه
+        <div className="flex items-center gap-2 text-xs text-[#666666]">
+          {route.docQuery && (
+            <button
+              type="button"
+              onClick={() => {
+                clearDocQuery();
+                setSearchTerm('');
+              }}
+              className="px-2 py-1 rounded bg-[#e5f3fa] text-[#007cc0] border border-[#b3ddf2] flex items-center gap-1 cursor-pointer"
+            >
+              <span>فیلتر لینک: {route.docQuery}</span>
+              <X className="w-3 h-3" />
+            </button>
+          )}
+          <span>
+            تعداد نمایش: <span className="font-bold text-[#333333] tabular-nums">{formatNumber(filteredParts.length)}</span> قطعه
+          </span>
         </div>
       </div>
+
+      {/* Missing Part Prompt + Quick Create CTA */}
+      {searchTerm.trim() && filteredParts.length === 0 && (
+        <div className="sap-card p-4 bg-[#fff4e5] border border-[#f9d6a7] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-start sm:items-center gap-2.5 text-xs text-[#333333]">
+            <ShieldAlert className="w-5 h-5 text-[#e9730c] shrink-0" />
+            <div>
+              <div className="font-bold text-[#e9730c]">
+                قطعه «{searchTerm.trim()}» در کاتالوگ نرم‌افزار وجود ندارد
+              </div>
+              <div className="text-[11px] text-[#666666] mt-0.5">
+                برای ادامه فرآیند برنامه‌ریزی تولید، مسیر عملیات (Routing) و BOM، ابتدا این قطعه را با یک کلیک در کاتالوگ تعریف کنید.
+              </div>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => handleOpenNewModal(searchTerm.trim())}
+              className="sap-btn-emphasized flex items-center gap-1.5 px-3.5 py-1.5 text-xs cursor-pointer whitespace-nowrap"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>تعریف فوری قطعه «{searchTerm.trim()}»</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                clearDocQuery();
+                setSearchTerm('');
+              }}
+              className="sap-btn-standard px-3 py-1.5 text-xs cursor-pointer"
+            >
+              نمایش همه قطعات
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Table */}
       <div className="sap-card overflow-hidden">
@@ -485,6 +623,15 @@ export const PartsView: React.FC<PartsViewProps> = ({ parts, onSavePart, onRefre
                         >
                           <Copy className="w-3 h-3" />
                           <span>کپی‌گیری</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleDeletePart(p)}
+                          className="px-2 py-0.5 rounded-sm text-[11px] font-medium text-[#bb0000] bg-[#ffecec] hover:bg-[#f5b7b1] border border-[#f5b7b1] inline-flex items-center gap-1 transition-colors cursor-pointer"
+                          title="حذف قطعه از کاتالوگ مرکزی"
+                        >
+                          <Trash2 className="w-3 h-3 text-[#bb0000]" />
+                          <span>حذف</span>
                         </button>
                       </div>
                     </td>

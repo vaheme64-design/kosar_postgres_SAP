@@ -16,6 +16,8 @@ import { SalesContractsModuleView } from './components/contracts/SalesContractsM
 import { ErpSyncModal } from './components/ErpSyncModal';
 import { TemplateSwitcherModal } from './components/TemplateSwitcherModal';
 import { AiAssistantModal } from './components/AiAssistantModal';
+import { SystemHelpWalkthroughModal, HelpWizardLaunchParams } from './components/common/SystemHelpWalkthroughModal';
+import { AdvancedIndustrialScenarioWizardModal } from './components/common/AdvancedIndustrialScenarioWizardModal';
 import { ContextualActionMenu } from './components/common/ContextualActionMenu';
 import { OfflineIndicator } from './components/pwa/PWAInstallButton';
 import { AiActionPayload } from './types/ai';
@@ -64,6 +66,12 @@ function AppContent() {
   const [activeMasterSubSection, setActiveMasterSubSection] = useState<MasterSubSection>(
     router.route.masterSubSection || 'PARTS'
   );
+  const [activeSettingsSubTab, setActiveSettingsSubTab] = useState<'rbac' | 'db_architecture'>(
+    router.route.settingsSubTab || 'rbac'
+  );
+  const [activeReportSubTab, setActiveReportSubTab] = useState<string>(
+    router.route.reportSubTab || 'plan_vs_actual'
+  );
 
   // Synchronize state when URL changes (Browser Back / Forward buttons or deep links)
   useEffect(() => {
@@ -75,6 +83,12 @@ function AppContent() {
     setActiveMachineSubTab(router.route.machineSubTab);
     if (router.route.masterSubSection) {
       setActiveMasterSubSection(router.route.masterSubSection);
+    }
+    if (router.route.settingsSubTab) {
+      setActiveSettingsSubTab(router.route.settingsSubTab);
+    }
+    if (router.route.reportSubTab) {
+      setActiveReportSubTab(router.route.reportSubTab);
     }
   }, [router.route]);
 
@@ -110,6 +124,9 @@ function AppContent() {
   const [initialPartId, setInitialPartId] = useState<string | undefined>(undefined);
   const [initialStageId, setInitialStageId] = useState<string | undefined>(undefined);
   const [isErpModalOpen, setIsErpModalOpen] = useState(false);
+  const [isHelpModalOpen, setIsHelpModalOpen] = useState(false);
+  const [isAdvancedWizardOpen, setIsAdvancedWizardOpen] = useState(false);
+  const [wizardLaunchParams, setWizardLaunchParams] = useState<HelpWizardLaunchParams | undefined>(undefined);
   const [loading, setLoading] = useState(false);
 
   // Core Data
@@ -523,32 +540,150 @@ function AppContent() {
 
   const handleDeepNavigate = (
     tab: any,
-    subTab?: InventorySubTab,
-    actionModal?: 'RECEIPT' | 'ISSUE' | 'RETURN' | 'TRANSFER'
+    subTab?: any,
+    actionModal?: 'RECEIPT' | 'ISSUE' | 'RETURN' | 'TRANSFER',
+    docQuery?: string | null,
+    moId?: string | null,
   ) => {
+    const rawSub = typeof subTab === 'string' ? subTab : undefined;
     let resolvedTab: TabKey = 'dashboard';
+
     if (tab === 'vouchers') {
       resolvedTab = 'production';
+      setActiveTab('production');
       setProductionViewMode('VOUCHERS');
-      router.navigate({ tab: 'production', productionViewMode: 'VOUCHERS', moId: null });
+      router.navigate({ tab: 'production', productionViewMode: 'VOUCHERS', docQuery: docQuery ?? null, moId: null });
     } else if (tab === 'parts') {
       resolvedTab = 'master_data';
-      router.navigate({ tab: 'master_data', moId: null });
+      setActiveTab('master_data');
+      setActiveMasterSubSection('PARTS');
+      router.navigate({ tab: 'master_data', masterSubSection: 'PARTS', docQuery: docQuery ?? null, moId: null });
+    } else if (tab === 'bom') {
+      resolvedTab = 'master_data';
+      setActiveTab('master_data');
+      setActiveMasterSubSection('BOM');
+      router.navigate({ tab: 'master_data', masterSubSection: 'BOM', docQuery: docQuery ?? null, moId: null });
     } else if (tab === 'audit') {
       resolvedTab = 'reports';
-      router.navigate({ tab: 'reports', moId: null });
-    } else if (tab === 'users') {
+      setActiveTab('reports');
+      router.navigate({ tab: 'reports', docQuery: docQuery ?? null, moId: null });
+    } else if (tab === 'mrp') {
+      resolvedTab = 'planning';
+      setActiveTab('planning');
+      setActivePlanningSubTab('mrp');
+      router.navigate({ tab: 'planning', planningSubTab: 'mrp', docQuery: docQuery ?? null, moId: null });
+    } else if (tab === 'users' || tab === 'settings') {
       resolvedTab = 'settings';
-      router.navigate({ tab: 'settings', moId: null });
+      const settingsTarget: 'rbac' | 'db_architecture' =
+        rawSub === 'db_architecture' || rawSub === 'db' ? 'db_architecture' : 'rbac';
+      setActiveTab('settings');
+      setActiveSettingsSubTab(settingsTarget);
+      router.navigate({ tab: 'settings', settingsSubTab: settingsTarget, moId: null });
+    } else if (tab === 'master_data') {
+      resolvedTab = 'master_data';
+      const masterTarget = (rawSub || 'PARTS') as MasterSubSection;
+      setActiveTab('master_data');
+      setActiveMasterSubSection(masterTarget);
+      router.navigate({ tab: 'master_data', masterSubSection: masterTarget, docQuery: docQuery ?? null, moId: null });
+    } else if (tab === 'planning') {
+      resolvedTab = 'planning';
+      const planMap: Record<string, PlanningSubTabKey> = {
+        mrp: 'mrp',
+        MRP: 'mrp',
+        capacity_planning: 'capacity_planning',
+        CAPACITY: 'capacity_planning',
+        approved_plans: 'approved_plans',
+        PROPOSALS: 'recommendations',
+        recommendations: 'recommendations',
+        RECOMMENDATIONS: 'recommendations',
+        daily_schedule: 'daily_schedule',
+        orders: 'orders',
+        consumables: 'consumables',
+        dashboard: 'dashboard',
+        workflow_doc: 'workflow_doc',
+        WORKFLOW_DOC: 'workflow_doc',
+        erp_workbench: 'erp_workbench',
+      };
+      const planTarget = (rawSub && planMap[rawSub]) || 'erp_workbench';
+      setActiveTab('planning');
+      setActivePlanningSubTab(planTarget);
+      router.navigate({ tab: 'planning', planningSubTab: planTarget, docQuery: docQuery ?? null, moId: null });
+    } else if (tab === 'contracts') {
+      resolvedTab = 'contracts';
+      const contractsTarget: 'CONTRACTS_QUOTAS' | 'CUSTOMER_ORDERS' =
+        rawSub === 'CUSTOMER_ORDERS' ? 'CUSTOMER_ORDERS' : 'CONTRACTS_QUOTAS';
+      setActiveTab('contracts');
+      router.navigate({ tab: 'contracts', contractsSubTab: contractsTarget, docQuery: docQuery ?? null, moId: null });
+    } else if (tab === 'machines') {
+      resolvedTab = 'machines';
+      const mchTarget = (rawSub || 'machines') as MachineSubTabKey;
+      setActiveTab('machines');
+      setActiveMachineSubTab(mchTarget);
+      router.navigate({ tab: 'machines', machineSubTab: mchTarget, docQuery: docQuery ?? null, moId: null });
+    } else if (tab === 'production') {
+      resolvedTab = 'production';
+      setActiveTab('production');
+      if (rawSub === 'VOUCHERS') {
+        setProductionViewMode('VOUCHERS');
+        router.navigate({ tab: 'production', productionViewMode: 'VOUCHERS', docQuery: docQuery ?? null, moId: null });
+      } else {
+        const prodTarget = (rawSub || 'MULTI_PART_SCHEDULER') as ProductionWorkbenchSubTab;
+        setProductionViewMode('ERP_WORKBENCH');
+        setActiveProductionModuleTab(prodTarget);
+        router.navigate({
+          tab: 'production',
+          productionViewMode: 'ERP_WORKBENCH',
+          productionModuleTab: prodTarget,
+          docQuery: docQuery ?? null,
+          moId: moId ?? null,
+        });
+      }
+    } else if (tab === 'wip') {
+      resolvedTab = 'wip';
+      const wipMap: Record<string, any> = {
+        ORDERS: 'ORDERS',
+        TRACEABILITY: 'TRACEABILITY',
+        DASHBOARD: 'DASHBOARD',
+        TRANSFERS: 'TRANSFERS',
+        STAGES: 'STAGES',
+        UNIFIED_DIRECTORY: 'UNIFIED_DIRECTORY',
+      };
+      const wipTarget = (rawSub && wipMap[rawSub]) || 'ORDERS';
+      setActiveTab('wip');
+      router.navigate({ tab: 'wip', wipSubTab: wipTarget, docQuery: docQuery ?? null, moId: moId ?? null });
+    } else if (tab === 'reports') {
+      resolvedTab = 'reports';
+      const reportTarget = rawSub ? rawSub.toLowerCase() : 'plan_vs_actual';
+      setActiveTab('reports');
+      setActiveReportSubTab(reportTarget);
+      router.navigate({ tab: 'reports', reportSubTab: reportTarget, docQuery: docQuery ?? null, moId: null });
+    } else if (tab === 'inventory') {
+      resolvedTab = 'inventory';
+      const invMap: Record<string, InventorySubTab> = {
+        DASHBOARD: 'DASHBOARD',
+        INQUIRY: 'INQUIRY',
+        STOCK: 'INQUIRY',
+        MOVEMENT: 'MOVEMENT',
+        COILS: 'COILS',
+        ALERTS: 'ALERTS',
+        CONTRACTS: 'CONTRACTS',
+        CUSTOM_REPORTS: 'CUSTOM_REPORTS',
+        IMPORT_EXPORT: 'IMPORT_EXPORT',
+        SAPCO: 'SAPCO',
+        STAGES: 'STAGES',
+        QUALITY: 'QUALITY_QM',
+        QUALITY_QM: 'QUALITY_QM',
+      };
+      const invTarget = (rawSub && invMap[rawSub]) || 'DASHBOARD';
+      setActiveTab('inventory');
+      setActiveInventorySubTab(invTarget);
+      router.navigate({ tab: 'inventory', inventorySubTab: invTarget, docQuery: docQuery ?? null, moId: null });
     } else {
       resolvedTab = tab;
-      router.navigate({ tab, inventorySubTab: subTab, moId: null });
+      setActiveTab(resolvedTab);
+      router.navigate({ tab: resolvedTab, docQuery: docQuery ?? null, moId: moId ?? null });
     }
-    setActiveTab(resolvedTab);
 
-    if (subTab) {
-      setActiveInventorySubTab(subTab);
-    }
     if (actionModal) {
       setPendingInventoryModal(actionModal);
     }
@@ -680,6 +815,7 @@ function AppContent() {
       onSeedDemo={handleSeedDemo}
       onCleanDemo={handleCleanDemo}
       onOpenErpModal={() => setIsErpModalOpen(true)}
+      onOpenHelpModal={() => setIsHelpModalOpen(true)}
       loading={loading}
     />
   );
@@ -755,6 +891,7 @@ function AppContent() {
         <SalesContractsModuleView
           parts={parts}
           currentUser={currentUser}
+          initialSubTab={router.route.contractsSubTab || 'CONTRACTS_QUOTAS'}
           onNavigateToPlanning={() => handleSubModuleNavigate('planning', { planningSubTab: 'mrp' })}
           onNavigateToInventoryLedger={contractCode => router.traceDocument(contractCode, 'INVENTORY_LEDGER')}
           onNavigateToTab={handleDeepNavigate}
@@ -921,6 +1058,11 @@ function AppContent() {
             <ManagementReportsModuleView
               parts={parts}
               machines={machines}
+              initialReportType={activeReportSubTab as any}
+              onReportTypeChange={rep => {
+                setActiveReportSubTab(rep);
+                router.navigate({ reportSubTab: rep });
+              }}
             />
           )}
 
@@ -930,6 +1072,11 @@ function AppContent() {
               currentUser={currentUser}
               onRoleChange={role => setCurrentUser(prev => ({ ...prev, role }))}
               firebaseUser={firebaseUser}
+              initialSubTab={activeSettingsSubTab}
+              onSubTabChange={sub => {
+                setActiveSettingsSubTab(sub);
+                router.navigate({ settingsSubTab: sub });
+              }}
             />
           )}
     </main>
@@ -962,6 +1109,10 @@ function AppContent() {
         onClose={() => setIsErpModalOpen(false)}
         partsCount={parts.length}
         txCount={transactions.length}
+        onOpenDbSettings={() => {
+          setIsErpModalOpen(false);
+          handleDeepNavigate('settings', 'db_architecture');
+        }}
       />
 
       {/* AI Assistant Modal (Context-Aware Voice & Text with Ctrl+Space) */}
@@ -973,6 +1124,33 @@ function AppContent() {
         coils={coils}
         summary={summary}
         onExecuteAction={handleExecuteAiAction}
+      />
+
+      {/* Interactive Scenario Walkthrough & Module Directory Modal */}
+      <SystemHelpWalkthroughModal
+        isOpen={isHelpModalOpen}
+        onClose={() => setIsHelpModalOpen(false)}
+        onNavigate={handleDeepNavigate}
+        onOpenAdvancedWizard={params => {
+          setWizardLaunchParams(params);
+          setIsAdvancedWizardOpen(true);
+        }}
+      />
+
+      {/* Advanced Industrial Scenario Wizard (12 scenarios + Part Lifecycle feasibility & MRP) */}
+      <AdvancedIndustrialScenarioWizardModal
+        isOpen={isAdvancedWizardOpen}
+        onClose={() => {
+          setIsAdvancedWizardOpen(false);
+          setWizardLaunchParams(undefined);
+        }}
+        parts={parts}
+        onNavigate={handleDeepNavigate}
+        onGlobalRefresh={loadAllData}
+        initialScenarioId={wizardLaunchParams?.scenarioId}
+        initialPartQuery={wizardLaunchParams?.partQuery}
+        initialQty={wizardLaunchParams?.quantity}
+        autoEvaluate={wizardLaunchParams?.autoEvaluate}
       />
     </div>
   );
