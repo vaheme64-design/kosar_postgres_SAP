@@ -231,7 +231,21 @@ import {
 } from './inMemoryRelationalFallback';
 
 // Server-side State Store (in production can be wired to PostgreSQL / Prisma / SQL Server / ERP)
-let partsStore: Part[] = [...INITIAL_PARTS];
+function uniqueParts(parts: Part[]): Part[] {
+  const map = new Map<string, Part>();
+  for (const p of parts) {
+    const key = (p.code || '').trim().toUpperCase();
+    if (key && !map.has(key)) {
+      map.set(key, p);
+    } else if (key && map.has(key)) {
+      const existing = map.get(key)!;
+      map.set(key, { ...existing, ...p });
+    }
+  }
+  return Array.from(map.values());
+}
+
+let partsStore: Part[] = uniqueParts([...INITIAL_PARTS]);
 let machinesStore: Machine[] = [...INITIAL_MACHINES];
 let routingsStore: Routing[] = [...INITIAL_ROUTINGS];
 let transactionsStore: InventoryTransaction[] = [...INITIAL_TRANSACTIONS];
@@ -1689,14 +1703,14 @@ apiRouter.get('/parts', async (req: Request, res: Response) => {
             };
             existingByCode.set(codeKey, merged);
           }
-          partsStore = Array.from(existingByCode.values());
+          partsStore = uniqueParts(Array.from(existingByCode.values()));
         }
       } catch (dbErr) {
         console.warn('[KPIMS /api/parts] DB read warning:', dbErr instanceof Error ? dbErr.message : dbErr);
       }
     }
 
-    let result = partsStore.map(p => {
+    let result = uniqueParts(partsStore).map(p => {
       const vip = Boolean(p.isVIP ?? p.isPinned ?? serverVipPartsStore[p.id] ?? serverVipPartsStore[p.code]);
       return { ...p, isVIP: vip, isPinned: vip };
     });
@@ -2770,7 +2784,7 @@ apiRouter.post('/demo-data/seed', async (req: Request, res: Response) => {
   const realDies = diesStore.filter(d => !d.isDemo);
   const realOps = operatorsStore.filter(o => !o.isDemo);
 
-  partsStore = [...realParts, ...INITIAL_PARTS];
+  partsStore = uniqueParts([...realParts, ...INITIAL_PARTS]);
   machinesStore = [...realMachines, ...INITIAL_MACHINES];
   routingsStore = [...realRoutings, ...INITIAL_ROUTINGS];
   transactionsStore = [...realTx, ...INITIAL_TRANSACTIONS];

@@ -103,6 +103,7 @@ export const ProductionPlanningModuleView: React.FC<ProductionPlanningModuleView
   const [focusedMachineCode, setFocusedMachineCode] = useState<string | null>(null);
   const [isOrderModalOpen, setIsOrderModalOpen] = useState(false);
   const [editingOrder, setEditingOrder] = useState<CustomerOrder | null>(null);
+  const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
 
   // Search & Filter in Orders
   const [orderSearchTerm, setOrderSearchTerm] = useState('');
@@ -605,7 +606,7 @@ export const ProductionPlanningModuleView: React.FC<ProductionPlanningModuleView
         />
       )}
 
-      {/* 3. Customer Orders Sub-Tab */}
+      {/* 3. Customer Orders Sub-Tab (SAP Fiori Master-Detail Split Screen) */}
       {activeSubTab === 'orders' && (
         <div className="space-y-3.5">
           <div className="sap-card p-3 flex flex-col md:flex-row md:items-center justify-between gap-3">
@@ -647,140 +648,151 @@ export const ProductionPlanningModuleView: React.FC<ProductionPlanningModuleView
             </button>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
-            {filteredOrders.map(order => (
-              <div
-                key={order.id}
-                className="sap-card p-3.5 space-y-3 hover:border-[#007cc0] transition"
-              >
-                <div className="flex items-center justify-between border-b border-[#e8e8e8] pb-2.5">
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <span className="font-semibold text-[#333333] text-sm font-mono">
-                        {order.orderNumber}
-                      </span>
-                      <span
-                        className={`px-2 py-0.5 rounded text-[10px] font-semibold ${
-                          order.priority === 1
-                            ? 'bg-[#ffecec] text-[#bb0000] border border-[#f5b7b1]'
-                            : order.priority === 2
-                            ? 'bg-[#e5f3fa] text-[#007cc0] border border-[#b3ddf2]'
-                            : 'bg-[#f5f5f5] text-[#666666] border border-[#d9d9d9]'
-                        }`}
-                      >
-                        {order.priority === 1 ? 'اولویت فوری' : order.priority === 2 ? 'اولویت عادی' : 'اولویت مازاد'}
-                      </span>
-                    </div>
-                    <div className="text-xs text-[#666666] mt-1 flex items-center gap-2 flex-wrap">
-                      <Building2 className="w-3.5 h-3.5 text-[#666666]" />
-                      <span>{order.customerName}</span>
-                      {order.contractNumber && (
-                        <button
-                          type="button"
-                          onClick={() => router.traceDocument(order.contractNumber, 'CONTRACTS')}
-                          className="sap-doc-link font-mono text-[11px] cursor-pointer"
-                          title="مشاهده قرارداد در ماژول قراردادها"
-                        >
-                          ({order.contractNumber})
-                        </button>
-                      )}
-                    </div>
-                  </div>
-
-                  <div className="text-left">
-                    {order.status === 'CANCELLED' ? (
-                      <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-[#ffecec] text-[#bb0000] border border-[#f5b7b1]">
-                        ابطال شده (Reversed)
-                      </span>
-                    ) : (
-                      <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-[#ebf5ec] text-[#107e3e] border border-[#b7dfbf]">
-                        سفارش فعال
-                      </span>
-                    )}
-                    <div className="text-[11px] text-[#666666] mt-1 tabular-nums font-mono">
-                      تحویل: {formatToJalali(order.dueDate)}
-                    </div>
-                  </div>
-                </div>
-
-                {/* Order Lines */}
-                <div className="space-y-1.5">
-                  <div className="text-[11px] text-[#666666] font-medium">اقلام تعهد تحویل:</div>
-                  {order.lines.map(line => (
-                    <div
-                      key={line.id}
-                      className="bg-[#f5f5f5] p-2 rounded border border-[#d9d9d9] flex items-center justify-between text-xs"
-                    >
-                      <div>
-                        <div className="font-semibold text-[#333333]">{line.partName}</div>
-                        <button
-                          type="button"
-                          onClick={() => router.traceDocument(line.partCode, 'INVENTORY_LEDGER')}
-                          className="sap-doc-link text-[11px] font-mono cursor-pointer"
-                          title="مشاهده موجودی و کاردکس قطعه"
-                        >
-                          {line.partCode}
-                        </button>
-                      </div>
-                      <div className="text-left tabular-nums">
-                        <span className="text-[#333333] font-semibold font-mono">
-                          {formatNumber(line.orderedQuantity)}
-                        </span>{' '}
-                        <span className="text-[#666666] text-[10px]">عدد</span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-
-                {order.notes && (
-                  <div className="text-[11px] text-[#666666] bg-[#f5f5f5] p-2 rounded border border-[#d9d9d9]">
-                    یادداشت: {order.notes}
-                  </div>
-                )}
-
-                {/* Enterprise Dynamic Action Bar (Edit / Delete / Dynamic Priority) */}
-                <div className="flex items-center justify-between pt-2 border-t border-[#e8e8e8] text-xs">
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-[10px] text-[#666666]">تغییر اولویت:</span>
-                    <select
-                      value={order.priority}
-                      onChange={e => handleQuickUpdatePriority(order.id, Number(e.target.value) as 1 | 2 | 3)}
-                      className="text-[11px] font-semibold bg-[#ffffff] border border-[#bfbfbf] rounded px-2 py-0.5 text-[#333333] cursor-pointer focus:outline-none focus:border-[#007cc0]"
-                    >
-                      <option value={1}>فوری (اولویت ۱)</option>
-                      <option value={2}>عادی (اولویت ۲)</option>
-                      <option value={3}>مازاد (اولویت ۳)</option>
-                    </select>
-                  </div>
-
-                  <div className="flex items-center gap-1.5">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setEditingOrder(order);
-                        setIsOrderModalOpen(true);
-                      }}
-                      className="sap-btn-standard px-2.5 py-1 text-[11px] font-semibold cursor-pointer flex items-center gap-1 whitespace-nowrap"
-                      title="ویرایش کامل مشخصات و تیراژ سفارش"
-                    >
-                      <Edit3 className="w-3.5 h-3.5 text-[#007cc0]" />
-                      <span>ویرایش</span>
-                    </button>
-                    {order.status !== 'CANCELLED' && (
-                      <button
-                        type="button"
-                        onClick={() => handleReverseCustomerOrder(order)}
-                        className="px-2.5 py-1 text-[#bb0000] bg-[#ffecec] hover:bg-[#f5b7b1] rounded transition cursor-pointer flex items-center gap-1 text-[11px] font-semibold border border-[#f5b7b1] whitespace-nowrap"
-                        title="ابطال سفارش و صدور سند معکوس (Reversal)"
-                      >
-                        <RotateCcw className="w-3.5 h-3.5" />
-                        <span>ابطال سفارش</span>
-                      </button>
-                    )}
-                  </div>
-                </div>
+          {/* Master-Detail Split Screen (Fiori Style: 1/3 Right Master, 2/3 Left Detail) */}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+            {/* Right Column (Master List: 1/3 -> lg:col-span-4) */}
+            <div className="lg:col-span-4 sap-card p-3 space-y-2 max-h-[75vh] overflow-y-auto">
+              <div className="text-xs font-bold text-[#333333] border-b border-[#e8e8e8] pb-2 flex items-center justify-between">
+                <span>لیست سفارشات ساپکو ({toPersianDigits(filteredOrders.length)})</span>
+                <span className="text-[10px] text-[#666666]">انتخاب جهت جزئیات</span>
               </div>
-            ))}
+              {filteredOrders.length === 0 ? (
+                <div className="text-center py-8 text-xs text-[#666666]">سفارشی یافت نشد.</div>
+              ) : (
+                filteredOrders.map(order => {
+                  const isSelected = selectedOrderId === order.id || (!selectedOrderId && filteredOrders[0]?.id === order.id);
+                  return (
+                    <div
+                      key={order.id}
+                      onClick={() => setSelectedOrderId(order.id)}
+                      className={`p-3 rounded border cursor-pointer transition-all ${
+                        isSelected
+                          ? 'bg-[#e5f3fa] border-[#007cc0] shadow-sm'
+                          : 'bg-[#ffffff] border-[#d9d9d9] hover:bg-[#f5f5f5]'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between text-xs font-mono font-bold text-[#333333]">
+                        <span>{order.orderNumber}</span>
+                        <span className={`px-1.5 py-0.5 rounded text-[9px] ${
+                          order.status === 'CANCELLED' ? 'bg-[#ffecec] text-[#bb0000]' : 'bg-[#ebf5ec] text-[#107e3e]'
+                        }`}>
+                          {order.status === 'CANCELLED' ? 'ابطال' : 'فعال'}
+                        </span>
+                      </div>
+                      <div className="text-[11px] text-[#666666] mt-1 flex items-center justify-between">
+                        <span>{order.customerName}</span>
+                        <span className="tabular-nums font-mono">{formatToJalali(order.dueDate)}</span>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            {/* Left Column (Detail Panel: 2/3 -> lg:col-span-8) */}
+            <div className="lg:col-span-8 sap-card p-4 space-y-4">
+              {(() => {
+                const currentOrder = filteredOrders.find(o => o.id === selectedOrderId) || filteredOrders[0];
+                if (!currentOrder) {
+                  return (
+                    <div className="text-center py-16 text-xs text-[#666666]">
+                      لطفاً یک سفارش را از لیست سمت راست انتخاب کنید تا جزئیات کامل، BOM و عملیات‌های آن نمایش داده شود.
+                    </div>
+                  );
+                }
+                return (
+                  <div className="space-y-4">
+                    <div className="flex items-center justify-between border-b border-[#e8e8e8] pb-3">
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <h3 className="text-base font-bold text-[#333333] font-mono">{currentOrder.orderNumber}</h3>
+                          <span className={`px-2 py-0.5 rounded text-xs font-semibold ${
+                            currentOrder.priority === 1 ? 'bg-[#ffecec] text-[#bb0000]' : 'bg-[#e5f3fa] text-[#007cc0]'
+                          }`}>
+                            {currentOrder.priority === 1 ? 'اولویت فوری' : 'اولویت عادی'}
+                          </span>
+                        </div>
+                        <p className="text-xs text-[#666666] mt-1 flex items-center gap-2">
+                          <Building2 className="w-3.5 h-3.5 text-[#666666]" />
+                          <span>مشتری: {currentOrder.customerName}</span>
+                          {currentOrder.contractNumber && <span>| قرارداد: {currentOrder.contractNumber}</span>}
+                        </p>
+                      </div>
+                      <div className="text-left">
+                        <div className="text-xs font-mono text-[#666666]">تاریخ تحویل:</div>
+                        <div className="text-xs font-bold text-[#333333] font-mono">{formatToJalali(currentOrder.dueDate)}</div>
+                      </div>
+                    </div>
+
+                    {/* Order Lines & BOM Requirements */}
+                    <div className="space-y-2">
+                      <div className="text-xs font-bold text-[#333333] flex items-center gap-1.5">
+                        <Layers className="w-4 h-4 text-[#007cc0]" />
+                        <span>اقلام تعهد تحویل و ساختار محصول (BOM & Requirements):</span>
+                      </div>
+                      {currentOrder.lines.map(line => (
+                        <div key={line.id} className="bg-[#f5f5f5] p-3 rounded border border-[#d9d9d9] flex items-center justify-between text-xs">
+                          <div>
+                            <div className="font-semibold text-[#333333] text-sm">{line.partName}</div>
+                            <div className="text-[11px] text-[#666666] font-mono mt-0.5">کد کاتالوگ: {line.partCode}</div>
+                          </div>
+                          <div className="text-left tabular-nums">
+                            <div className="text-sm font-bold text-[#333333] font-mono">{formatNumber(line.orderedQuantity)} عدد</div>
+                            <div className="text-[10px] text-[#107e3e]">تحویل شده: {formatNumber(line.deliveredQuantity || 0)}</div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {currentOrder.notes && (
+                      <div className="text-xs text-[#666666] bg-[#f5f5f5] p-3 rounded border border-[#d9d9d9]">
+                        <span className="font-semibold text-[#333333]">یادداشت‌های مهندسی فروش:</span> {currentOrder.notes}
+                      </div>
+                    )}
+
+                    {/* Action Bar */}
+                    <div className="flex items-center justify-between pt-3 border-t border-[#e8e8e8] text-xs">
+                      <div className="flex items-center gap-2">
+                        <span className="text-[#666666]">تغییر فوری اولویت برنامه‌ریزی:</span>
+                        <select
+                          value={currentOrder.priority}
+                          onChange={e => handleQuickUpdatePriority(currentOrder.id, Number(e.target.value) as 1 | 2 | 3)}
+                          className="text-xs font-semibold bg-[#ffffff] border border-[#bfbfbf] rounded px-2.5 py-1 text-[#333333] cursor-pointer focus:outline-none focus:border-[#007cc0]"
+                        >
+                          <option value={1}>فوری (اولویت ۱)</option>
+                          <option value={2}>عادی (اولویت ۲)</option>
+                          <option value={3}>مازاد (اولویت ۳)</option>
+                        </select>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEditingOrder(currentOrder);
+                            setIsOrderModalOpen(true);
+                          }}
+                          className="sap-btn-standard px-3 py-1.5 font-semibold cursor-pointer flex items-center gap-1.5"
+                        >
+                          <Edit3 className="w-3.5 h-3.5 text-[#007cc0]" />
+                          <span>ویرایش سفارش</span>
+                        </button>
+                        {currentOrder.status !== 'CANCELLED' && (
+                          <button
+                            type="button"
+                            onClick={() => handleReverseCustomerOrder(currentOrder)}
+                            className="px-3 py-1.5 text-[#bb0000] bg-[#ffecec] hover:bg-[#f5b7b1] rounded transition cursor-pointer flex items-center gap-1.5 font-semibold border border-[#f5b7b1]"
+                          >
+                            <RotateCcw className="w-3.5 h-3.5" />
+                            <span>ابطال سند (Reversal)</span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
           </div>
         </div>
       )}
