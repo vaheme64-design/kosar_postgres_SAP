@@ -16,6 +16,9 @@ import {
   Clock,
   Play,
   ShieldCheck,
+  Gauge,
+  AlertTriangle,
+  ExternalLink,
 } from 'lucide-react';
 import {
   Part,
@@ -23,6 +26,8 @@ import {
   Operator,
   Routing,
   StageInventorySummary,
+  ProcessType,
+  FACTORY_STAGES,
 } from '../../types/inventory';
 import {
   ManufacturingOrder,
@@ -48,6 +53,7 @@ export type WipViewMode =
   | 'UNIFIED_DIRECTORY'
   | 'TRACEABILITY'
   | 'DASHBOARD'
+  | 'BOTTLENECK'
   | 'ORDERS'
   | 'TRANSFERS'
   | 'STAGES';
@@ -94,6 +100,8 @@ export const ProductionWipModuleView: React.FC<ProductionWipModuleViewProps> = (
     transfers_group: true,
   });
   const [expandedMoIds, setExpandedMoIds] = useState<Record<string, boolean>>({});
+  const [selectedBottleneckStageId, setSelectedBottleneckStageId] = useState<string | null>(null);
+  const [showBottleneckPanel, setShowBottleneckPanel] = useState<boolean>(true);
 
   useEffect(() => {
     if (initialView) {
@@ -168,6 +176,218 @@ export const ProductionWipModuleView: React.FC<ProductionWipModuleViewProps> = (
   useEffect(() => {
     loadWipData();
   }, [loadWipData]);
+
+  const bottleneckAnalysis = React.useMemo(() => {
+    const STAGE_PROCESS_MAP: Record<string, ProcessType[]> = {
+      STAGE_SHEARING: ['SHEARING'],
+      STAGE_BLANKING: ['BLANKING'],
+      STAGE_FORMING: ['DRAWING', 'PUNCH_FORM', 'TRIMMING'],
+      STAGE_BENDING: ['BENDING'],
+      STAGE_SPOT_WELD: ['SPOT_WELD'],
+      STAGE_CO2_WELD: ['CO2_WELD'],
+      STAGE_WELDING: ['SPOT_WELD', 'CO2_WELD'],
+      STAGE_PAINT: ['PAINT'],
+      STAGE_ED_PAINT: ['PAINT'],
+      STAGE_ASSEMBLY: ['ASSEMBLY'],
+    };
+
+    const EXCLUDED_NON_WIP_STAGES = new Set([
+      'STAGE_RAW_STORE',
+      'STAGE_FINISHED_STORE',
+      'STAGE_SCRAP_YARD',
+    ]);
+
+    const routingByPartId = new Map<string, Routing>();
+    const routingByPartCode = new Map<string, Routing>();
+    const cycleStatsByProcess = new Map<ProcessType, { sumSec: number; sumSetup: number; count: number }>();
+
+    for (const r of routings) {
+      if (r.partId) routingByPartId.set(r.partId, r);
+      if (r.partCode) routingByPartCode.set(r.partCode.toUpperCase(), r);
+      for (const op of r.operations || []) {
+        const cur = cycleStatsByProcess.get(op.processType) || { sumSec: 0, sumSetup: 0, count: 0 };
+        cur.sumSec += op.standardCycleTimeSec || 15;
+        cur.sumSetup += op.setupTimeMin || 15;
+        cur.count += 1;
+        cycleStatsByProcess.set(op.processType, cur);
+      }
+    }
+
+    const stageMetaMap = new Map<string, { id: string; name: string; orderIndex: number }>();
+    let idxCounter = 0;
+    for (const st of FACTORY_STAGES) {
+      if (st.type === 'WIP') {
+        stageMetaMap.set(st.id, { id: st.id, name: st.name, orderIndex: idxCounter++ });
+      }
+    }
+
+    const balancesByStage = new Map<string, StageInventorySummary[]>();
+    for (const sb of stageBalances) {
+      if (EXCLUDED_NON_WIP_STAGES.has(sb.stageId)) continue;
+      if (!stageMetaMap.has(sb.stageId)) {
+        stageMetaMap.set(sb.stageId, {
+          id: sb.stageId,
+          name: sb.stageName || sb.stageId,
+          orderIndex: idxCounter++,
+        });
+      }
+      const list = balancesByStage.get(sb.stageId) || [];
+      list.push(sb);
+      balancesByStage.set(sb.stageId, list);
+    }
+
+    let totalWipQtyAllStages = 0;
+    let totalThroughputAllHours = 0;
+
+    const stageRows = Array.from(stageMetaMap.values()).map(meta => {
+      const stageItems = (balancesByStage.get(meta.id) || []).filter(sb => sb.totalQty > 0);
+      const mappedProcs = STAGE_PROCESS_MAP[meta.id] || [];
+
+      let stageAvgCycleSec = 15;
+      let stageAvgSetupMin = 15;
+      if (mappedProcs.length > 0) {
+        let sSec = 0;
+        let sSetup = 0;
+        let sCnt = 0;
+        for (const p of mappedProcs) {
+          const stat = cycleStatsByProcess.get(p);
+          if (stat) {
+            sSec += stat.sumSec;
+            sSetup += stat.sumSetup;
+            sCnt += stat.count;
+          }
+        }
+        if (sCnt > 0) {
+          stageAvgCycleSec = sSec / sCnt;
+          stageAvgSetupMin = sSetup / sCnt;
+        }
+      }
+
+      let totalQty = 0;
+      let usableQty = 0;
+      let inTransitQty = 0;
+      let scrapQty = 0;
+      let throughputHours = 0;
+      let weightedCycleSum = 0;
+
+      const partBreakdown = stageItems
+        .map(sb => {
+          const routing =
+            routingByPartId.get(sb.partId) ||
+            routingByPartCode.get((sb.partCode || '').toUpperCase());
+
+          let matchedOp = routing?.operations?.find(
+            op =>
+              mappedProcs.includes(op.processType) ||
+              (sb.processType && op.processType === sb.processType),
+          );
+          if (!matchedOp && routing?.operations?.length) {
+            // Fallback to mean of the part's routing operations when stage ID isn't explicitly mapped
+            const opsCount = routing.operations.length;
+            const avgCyc = routing.operations.reduce((s, o) => s + (o.standardCycleTimeSec || 15), 0) / opsCount;
+            const avgSet = routing.operations.reduce((s, o) => s + (o.setupTimeMin || 15), 0) / opsCount;
+            matchedOp = {
+              stepNumber: 1,
+              stepCode: meta.id,
+              stepName: meta.name,
+              processType: mappedProcs[0] || 'PUNCH_FORM',
+              standardCycleTimeSec: avgCyc,
+              setupTimeMin: avgSet,
+              scrapNormPercent: 1.5,
+            };
+          }
+
+          const cycleTimeSec = matchedOp?.standardCycleTimeSec || stageAvgCycleSec;
+          const setupTimeMin = matchedOp?.setupTimeMin ?? stageAvgSetupMin;
+          const partThroughputHours = Number(
+            ((sb.totalQty * cycleTimeSec) / 3600 + setupTimeMin / 60).toFixed(2),
+          );
+
+          totalQty += sb.totalQty;
+          usableQty += sb.usableQty;
+          inTransitQty += sb.inTransitQty;
+          scrapQty += sb.scrapQty;
+          throughputHours += partThroughputHours;
+          weightedCycleSum += sb.totalQty * cycleTimeSec;
+
+          return {
+            partId: sb.partId,
+            partCode: sb.partCode,
+            partName: sb.partName,
+            qty: sb.totalQty,
+            usableQty: sb.usableQty,
+            inTransitQty: sb.inTransitQty,
+            cycleTimeSec: Number(cycleTimeSec.toFixed(1)),
+            setupTimeMin: Math.round(setupTimeMin),
+            throughputHours: partThroughputHours,
+            hasExactRouting: Boolean(routing),
+          };
+        })
+        .sort((a, b) => b.throughputHours - a.throughputHours);
+
+      const roundedThroughputHours = Number(throughputHours.toFixed(1));
+      totalWipQtyAllStages += totalQty;
+      totalThroughputAllHours += roundedThroughputHours;
+
+      return {
+        stageId: meta.id,
+        stageName: meta.name,
+        orderIndex: meta.orderIndex,
+        totalQty,
+        usableQty,
+        inTransitQty,
+        scrapQty,
+        partsCount: partBreakdown.length,
+        avgCycleTimeSec: totalQty > 0 ? Number((weightedCycleSum / totalQty).toFixed(1)) : Number(stageAvgCycleSec.toFixed(1)),
+        throughputHours: roundedThroughputHours,
+        shiftLoad: Number((roundedThroughputHours / 7.5).toFixed(2)),
+        partBreakdown,
+      };
+    });
+
+    const maxThroughputHours = Math.max(1, ...stageRows.map(s => s.throughputHours));
+
+    const enrichedStages = stageRows.map(s => {
+      const wipSharePercent =
+        totalWipQtyAllStages > 0 ? Math.round((s.totalQty / totalWipQtyAllStages) * 100) : 0;
+      const barWidthPercent = Math.min(100, Math.round((s.throughputHours / maxThroughputHours) * 100));
+
+      let severity: 'CRITICAL' | 'WARNING' | 'NORMAL' | 'IDLE' = 'IDLE';
+      if (
+        s.throughputHours >= 15 ||
+        (s.totalQty >= 2000 && s.throughputHours >= 8) ||
+        (wipSharePercent >= 35 && s.throughputHours >= 6)
+      ) {
+        severity = 'CRITICAL';
+      } else if (s.throughputHours >= 7.5 || s.totalQty >= 800 || wipSharePercent >= 25) {
+        severity = 'WARNING';
+      } else if (s.totalQty > 0) {
+        severity = 'NORMAL';
+      }
+
+      return {
+        ...s,
+        wipSharePercent,
+        barWidthPercent,
+        severity,
+      };
+    });
+
+    const peakStage =
+      [...enrichedStages].sort((a, b) => b.throughputHours - a.throughputHours)[0] || null;
+    const criticalCount = enrichedStages.filter(s => s.severity === 'CRITICAL').length;
+    const warningCount = enrichedStages.filter(s => s.severity === 'WARNING').length;
+
+    return {
+      stages: enrichedStages,
+      totalWipQtyAllStages,
+      totalThroughputAllHours: Number(totalThroughputAllHours.toFixed(1)),
+      maxThroughputHours,
+      peakStage,
+      criticalCount,
+      warningCount,
+    };
+  }, [stageBalances, routings]);
 
   // Show shared Skeleton component during initial data loading phase
   if (loading && orders.length === 0 && !metrics) {
@@ -461,6 +681,9 @@ export const ProductionWipModuleView: React.FC<ProductionWipModuleViewProps> = (
                   <option value="UNIFIED_DIRECTORY">
                     نمای درختی یکپارچه (همه دستورات کار و ایستگاه‌ها)
                   </option>
+                  <option value="BOTTLENECK">
+                    تحلیلگر زنده گلوگاه و زمان گذر ایستگاه‌ها (Bottleneck Visualizer)
+                  </option>
                   <option value="TRACEABILITY">
                     فرم شناسایی و ردیابی قطعه (استعلام شماره رهگیری و پرینت لیبل)
                   </option>
@@ -500,7 +723,25 @@ export const ProductionWipModuleView: React.FC<ProductionWipModuleViewProps> = (
               </label>
             </div>
 
-            <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <button
+                type="button"
+                onClick={() =>
+                  setActiveView(prev => (prev === 'BOTTLENECK' ? 'UNIFIED_DIRECTORY' : 'BOTTLENECK'))
+                }
+                className={`px-2.5 py-1 rounded border text-[11px] font-semibold cursor-pointer flex items-center gap-1.5 transition-colors ${
+                  activeView === 'BOTTLENECK'
+                    ? 'bg-[#007cc0] text-white border-[#007cc0]'
+                    : bottleneckAnalysis.criticalCount > 0
+                    ? 'bg-[#fde8e8] text-[#bb0000] border-[#f5b8b8] hover:bg-[#fbd5d5]'
+                    : 'bg-white text-[#333333] border-[#d9d9d9] hover:bg-[#e5f3fa]'
+                }`}
+              >
+                <Gauge className="w-3.5 h-3.5" />
+                <span>
+                  گلوگاه‌های لحظه‌ای ({toPersianDigits(bottleneckAnalysis.totalThroughputAllHours)} ساعت)
+                </span>
+              </button>
               {activeView !== 'UNIFIED_DIRECTORY' && (
                 <button
                   type="button"
@@ -621,6 +862,338 @@ export const ProductionWipModuleView: React.FC<ProductionWipModuleViewProps> = (
               )}
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Real-Time Stage Bottleneck Visualizer (Embedded strip in Unified/Dashboard OR Full Panel in BOTTLENECK mode) */}
+      {(activeView === 'BOTTLENECK' || activeView === 'UNIFIED_DIRECTORY' || activeView === 'DASHBOARD') && (
+        <div className="bg-white border border-[#d9d9d9] rounded-md shadow-2xs overflow-hidden">
+          <div className="px-4 py-2.5 bg-[#fafafa] border-b border-[#e5e5e5] flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Gauge className="w-4 h-4 text-[#007cc0]" />
+              <div>
+                <h2 className="text-xs font-bold text-[#333333]">
+                  پایش لحظه‌ای گلوگاه و زمان گذر ایستگاه‌ها (Real-Time Stage Bottleneck & Throughput Visualizer)
+                </h2>
+                <p className="text-[11px] text-[#666666]">
+                  محاسبه‌شده از روی موجودی لحظه‌ای ایستگاه‌ها و زمان سیکل/ستاپ مسیر عملیات (Routing) — مبنای هشدار: شیفت ۷٫۵ ساعته
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-3 text-[11px] flex-wrap font-mono tabular-nums">
+              <span>
+                جمع WIP ایستگاه‌ها:{' '}
+                <strong className="text-[#333333]">{formatNumber(bottleneckAnalysis.totalWipQtyAllStages)}</strong> عدد
+              </span>
+              <span className="text-[#d9d9d9]">|</span>
+              <span>
+                کل زمان گذر صف:{' '}
+                <strong className="text-[#007cc0]">{toPersianDigits(bottleneckAnalysis.totalThroughputAllHours)}</strong> ساعت
+              </span>
+              {bottleneckAnalysis.criticalCount > 0 && (
+                <>
+                  <span className="text-[#d9d9d9]">|</span>
+                  <span className="font-sans font-bold text-[#bb0000]">
+                    {toPersianDigits(bottleneckAnalysis.criticalCount)} ایستگاه با تراکم بحرانی
+                  </span>
+                </>
+              )}
+              {activeView !== 'BOTTLENECK' && (
+                <button
+                  type="button"
+                  onClick={() => setShowBottleneckPanel(p => !p)}
+                  className="sap-btn-standard px-2 py-0.5 text-[11px] font-sans cursor-pointer"
+                >
+                  {showBottleneckPanel ? 'جمع‌کردن نمودار' : 'نمایش نمودار گلوگاه'}
+                </button>
+              )}
+            </div>
+          </div>
+
+          {(activeView === 'BOTTLENECK' || showBottleneckPanel) && (
+            <div className="p-4 space-y-4">
+              {/* Peak Bottleneck Alert Banner */}
+              {bottleneckAnalysis.peakStage && bottleneckAnalysis.peakStage.totalQty > 0 && (
+                <div
+                  className={`p-3 rounded border flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs ${
+                    bottleneckAnalysis.peakStage.severity === 'CRITICAL'
+                      ? 'bg-[#fde8e8] border-[#f5b8b8] text-[#bb0000]'
+                      : bottleneckAnalysis.peakStage.severity === 'WARNING'
+                      ? 'bg-[#fff4e5] border-[#f9d6a7] text-[#b85a00]'
+                      : 'bg-[#ebf5ec] border-[#b7dfbf] text-[#107e3e]'
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4 shrink-0" />
+                    <span>
+                      <strong>گلوگاه اول خط:</strong> {bottleneckAnalysis.peakStage.stageName} با{' '}
+                      <strong className="font-mono tabular-nums">
+                        {formatNumber(bottleneckAnalysis.peakStage.totalQty)}
+                      </strong>{' '}
+                      عدد انباشت WIP و زمان گذر برآوردی{' '}
+                      <strong className="font-mono tabular-nums">
+                        {toPersianDigits(bottleneckAnalysis.peakStage.throughputHours)} ساعت
+                      </strong>{' '}
+                      (معادل{' '}
+                      <strong className="font-mono tabular-nums">
+                        {toPersianDigits(bottleneckAnalysis.peakStage.shiftLoad)}
+                      </strong>{' '}
+                      شیفت کاری)
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setSelectedBottleneckStageId(prev =>
+                        prev === bottleneckAnalysis.peakStage?.stageId
+                          ? null
+                          : bottleneckAnalysis.peakStage?.stageId || null,
+                      )
+                    }
+                    className="px-2.5 py-1 rounded bg-white/80 hover:bg-white border border-current text-[11px] font-semibold cursor-pointer shrink-0 whitespace-nowrap"
+                  >
+                    مشاهده قطعات متوقف در این گلوگاه
+                  </button>
+                </div>
+              )}
+
+              {/* Visual Color-Coded Throughput Bars Grid */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
+                {bottleneckAnalysis.stages.map(st => {
+                  const isSelected = selectedBottleneckStageId === st.stageId;
+                  const borderAccent =
+                    st.severity === 'CRITICAL'
+                      ? 'border-[#f5b8b8] border-r-4 border-r-[#bb0000] bg-[#fde8e8]/30'
+                      : st.severity === 'WARNING'
+                      ? 'border-[#f9d6a7] border-r-4 border-r-[#e9730c] bg-[#fff4e5]/40'
+                      : st.severity === 'NORMAL'
+                      ? 'border-[#d9d9d9] border-r-4 border-r-[#107e3e] bg-white'
+                      : 'border-[#e5e5e5] border-r-4 border-r-[#bfbfbf] bg-[#fafafa]';
+
+                  const barColor =
+                    st.severity === 'CRITICAL'
+                      ? 'bg-[#bb0000]'
+                      : st.severity === 'WARNING'
+                      ? 'bg-[#e9730c]'
+                      : st.severity === 'NORMAL'
+                      ? 'bg-[#107e3e]'
+                      : 'bg-[#cccccc]';
+
+                  const statusTextColor =
+                    st.severity === 'CRITICAL'
+                      ? 'text-[#bb0000]'
+                      : st.severity === 'WARNING'
+                      ? 'text-[#b85a00]'
+                      : st.severity === 'NORMAL'
+                      ? 'text-[#107e3e]'
+                      : 'text-[#777777]';
+
+                  const statusLabel =
+                    st.severity === 'CRITICAL'
+                      ? 'انباشت بحرانی'
+                      : st.severity === 'WARNING'
+                      ? 'تراکم بالا'
+                      : st.severity === 'NORMAL'
+                      ? 'جریان پایدار'
+                      : 'صف خالی';
+
+                  return (
+                    <button
+                      key={st.stageId}
+                      type="button"
+                      onClick={() =>
+                        setSelectedBottleneckStageId(prev => (prev === st.stageId ? null : st.stageId))
+                      }
+                      className={`p-3 rounded border text-right cursor-pointer transition-all flex flex-col justify-between gap-2 ${borderAccent} ${
+                        isSelected ? 'ring-2 ring-[#007cc0]' : 'hover:shadow-sm'
+                      }`}
+                    >
+                      <div className="space-y-1 w-full">
+                        <div className="flex items-center justify-between gap-1 text-[10px]">
+                          <span className={`font-bold ${statusTextColor}`}>{statusLabel}</span>
+                          <span className="font-mono tabular-nums text-[#666666]">
+                            {toPersianDigits(st.wipSharePercent)}٪ کل WIP
+                          </span>
+                        </div>
+                        <div className="text-xs font-bold text-[#333333] leading-snug line-clamp-1">
+                          {st.stageName}
+                        </div>
+                      </div>
+
+                      <div className="space-y-1.5 w-full font-mono tabular-nums">
+                        <div className="flex items-baseline justify-between gap-2">
+                          <span className="text-sm font-bold text-[#333333]">
+                            {toPersianDigits(st.throughputHours)}{' '}
+                            <span className="text-[10px] font-sans font-normal text-[#666666]">ساعت</span>
+                          </span>
+                          <span className="text-[11px] text-[#555555]">
+                            {formatNumber(st.totalQty)} <span className="font-sans">عدد</span>
+                          </span>
+                        </div>
+
+                        <div className="h-2 w-full bg-[#e8e8e8] rounded-full overflow-hidden">
+                          <div
+                            className={`h-full rounded-full transition-all duration-300 ${barColor}`}
+                            style={{ width: `${st.barWidthPercent}%` }}
+                          />
+                        </div>
+
+                        <div className="flex items-center justify-between text-[10px] text-[#666666]">
+                          <span>سیکل میانگین: {toPersianDigits(st.avgCycleTimeSec)}s</span>
+                          <span>{toPersianDigits(st.partsCount)} کد قطعه</span>
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Drill-down table for selected stage OR top accumulating stages in BOTTLENECK mode */}
+              {(selectedBottleneckStageId || activeView === 'BOTTLENECK') && (
+                <div className="border border-[#d9d9d9] rounded overflow-hidden">
+                  <div className="px-3.5 py-2 bg-[#f5f5f5] border-b border-[#d9d9d9] flex items-center justify-between text-xs">
+                    <span className="font-bold text-[#333333]">
+                      {selectedBottleneckStageId
+                        ? `ریز قطعات و زمان گذر در: ${
+                            bottleneckAnalysis.stages.find(s => s.stageId === selectedBottleneckStageId)?.stageName ||
+                            selectedBottleneckStageId
+                          }`
+                        : 'جدول کامل زمان گذر ایستگاه‌ها و جزئیات صف قطعات (برای مشاهده قطعات روی هر ایستگاه کلیک کنید)'}
+                    </span>
+                    {selectedBottleneckStageId && (
+                      <button
+                        type="button"
+                        onClick={() => setSelectedBottleneckStageId(null)}
+                        className="text-[11px] text-[#007cc0] hover:underline cursor-pointer"
+                      >
+                        بستن جزئیات ایستگاه
+                      </button>
+                    )}
+                  </div>
+
+                  {selectedBottleneckStageId ? (
+                    (() => {
+                      const stageObj = bottleneckAnalysis.stages.find(
+                        s => s.stageId === selectedBottleneckStageId,
+                      );
+                      if (!stageObj || stageObj.partBreakdown.length === 0) {
+                        return (
+                          <div className="p-4 text-center text-xs text-[#666666]">
+                            در حال حاضر هیچ قطعه‌ای در صف این ایستگاه انباشته نشده است.
+                          </div>
+                        );
+                      }
+                      return (
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-right border-collapse text-[11px]">
+                            <thead>
+                              <tr className="bg-[#fafafa] border-b border-[#e5e5e5] text-[#555555]">
+                                <th className="py-2 px-3 font-semibold">کد و نام قطعه</th>
+                                <th className="py-2 px-2.5 font-semibold">تعداد موجود در ایستگاه</th>
+                                <th className="py-2 px-2.5 font-semibold">قابل استفاده</th>
+                                <th className="py-2 px-2.5 font-semibold">در حال انتقال</th>
+                                <th className="py-2 px-2.5 font-semibold">زمان سیکل مسیر</th>
+                                <th className="py-2 px-2.5 font-semibold">ستاپ (دقیقه)</th>
+                                <th className="py-2 px-2.5 font-semibold">زمان گذر (ساعت)</th>
+                                <th className="py-2 px-3 font-semibold">پیگیری</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-[#eeeeee] font-mono tabular-nums">
+                              {stageObj.partBreakdown.map(p => (
+                                <tr key={`${stageObj.stageId}-${p.partId}`} className="hover:bg-[#f7fbfe]">
+                                  <td className="py-2 px-3 font-sans">
+                                    <div className="font-semibold text-[#333333]">{p.partName}</div>
+                                    <div className="text-[10px] text-[#666666] font-mono">
+                                      {p.partCode}
+                                      {!p.hasExactRouting ? ' (سیکل استاندارد پیش‌فرض)' : ''}
+                                    </div>
+                                  </td>
+                                  <td className="py-2 px-2.5 font-bold text-[#333333]">{formatNumber(p.qty)}</td>
+                                  <td className="py-2 px-2.5 text-[#107e3e]">{formatNumber(p.usableQty)}</td>
+                                  <td className="py-2 px-2.5 text-[#e9730c]">{formatNumber(p.inTransitQty)}</td>
+                                  <td className="py-2 px-2.5">{toPersianDigits(p.cycleTimeSec)} ثانیه</td>
+                                  <td className="py-2 px-2.5">{toPersianDigits(p.setupTimeMin)} دقیقه</td>
+                                  <td className="py-2 px-2.5 font-bold text-[#007cc0]">
+                                    {toPersianDigits(p.throughputHours)} ساعت
+                                  </td>
+                                  <td className="py-2 px-3 font-sans">
+                                    <button
+                                      type="button"
+                                      onClick={() => router.traceDocument(p.partCode, 'INVENTORY_LEDGER')}
+                                      className="sap-doc-link inline-flex items-center gap-1 text-[11px] cursor-pointer"
+                                    >
+                                      <span>کاردکس</span>
+                                      <ExternalLink className="w-3 h-3" />
+                                    </button>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      );
+                    })()
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-right border-collapse text-[11px]">
+                        <thead>
+                          <tr className="bg-[#fafafa] border-b border-[#e5e5e5] text-[#555555]">
+                            <th className="py-2 px-3 font-semibold">ایستگاه تولید</th>
+                            <th className="py-2 px-2.5 font-semibold">موجودی WIP</th>
+                            <th className="py-2 px-2.5 font-semibold">سهم انباشت</th>
+                            <th className="py-2 px-2.5 font-semibold">سیکل میانگین</th>
+                            <th className="py-2 px-2.5 font-semibold">زمان گذر کل</th>
+                            <th className="py-2 px-2.5 font-semibold">بار شیفت (۷.۵h)</th>
+                            <th className="py-2 px-3 font-semibold">وضعیت گلوگاه</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-[#eeeeee] font-mono tabular-nums">
+                          {bottleneckAnalysis.stages.map(st => (
+                            <tr
+                              key={st.stageId}
+                              onClick={() => setSelectedBottleneckStageId(st.stageId)}
+                              className="hover:bg-[#f7fbfe] cursor-pointer"
+                            >
+                              <td className="py-2 px-3 font-sans font-semibold text-[#333333]">{st.stageName}</td>
+                              <td className="py-2 px-2.5 font-bold">{formatNumber(st.totalQty)}</td>
+                              <td className="py-2 px-2.5">{toPersianDigits(st.wipSharePercent)}٪</td>
+                              <td className="py-2 px-2.5">{toPersianDigits(st.avgCycleTimeSec)} ثانیه</td>
+                              <td className="py-2 px-2.5 font-bold text-[#007cc0]">
+                                {toPersianDigits(st.throughputHours)} ساعت
+                              </td>
+                              <td className="py-2 px-2.5">{toPersianDigits(st.shiftLoad)} شیفت</td>
+                              <td className="py-2 px-3 font-sans font-bold">
+                                <span
+                                  className={
+                                    st.severity === 'CRITICAL'
+                                      ? 'text-[#bb0000]'
+                                      : st.severity === 'WARNING'
+                                      ? 'text-[#e9730c]'
+                                      : st.severity === 'NORMAL'
+                                      ? 'text-[#107e3e]'
+                                      : 'text-[#777777]'
+                                  }
+                                >
+                                  {st.severity === 'CRITICAL'
+                                    ? 'گلوگاه بحرانی'
+                                    : st.severity === 'WARNING'
+                                    ? 'هشدار انباشت'
+                                    : st.severity === 'NORMAL'
+                                    ? 'عادی'
+                                    : 'خالی'}
+                                </span>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 

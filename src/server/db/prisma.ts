@@ -2,6 +2,7 @@ import net from 'node:net';
 import tls from 'node:tls';
 import fs from 'node:fs';
 import path from 'node:path';
+import { execFile } from 'node:child_process';
 import { PrismaClient } from '@prisma/client';
 
 /**
@@ -34,6 +35,10 @@ declare global {
   var __kpimsLastProbeFailedAt: number | undefined;
   // eslint-disable-next-line no-var
   var __kpimsEmbeddedSapPpStore: EmbeddedSapPpStore | undefined;
+  // eslint-disable-next-line no-var
+  var __kpimsSchemaReadyUrl: string | undefined;
+  // eslint-disable-next-line no-var
+  var __kpimsSchemaEnsurePromise: Promise<{ ready: boolean; autoPushed: boolean; snapshotOnly: boolean; error?: string }> | undefined;
 }
 
 const DEFAULT_FALLBACK_PG_URL = 'postgresql://postgres:postgres@localhost:5432/kpims_db?schema=public';
@@ -608,6 +613,8 @@ export const resetPrismaConnectionPool = (): void => {
   global.__kpimsDbReachable = undefined;
   global.__kpimsLastDbError = undefined;
   global.__kpimsLastProbeFailedAt = undefined;
+  global.__kpimsSchemaReadyUrl = undefined;
+  global.__kpimsSchemaEnsurePromise = undefined;
   const existing = global.__prismaClient;
   global.__prismaClient = undefined;
   if (existing) {
@@ -1205,4 +1212,130 @@ export async function checkDatabaseConnection(probeAllLinks = false): Promise<Da
     dualLinks,
   };
 }
+
+export const isMissingRelationError = (err: unknown): boolean => {
+  if (!err) return false;
+  const code = typeof err === 'object' && err !== null ? (err as any).code : undefined;
+  if (code === 'P2021' || code === 'P2022' || code === '42P01') return true;
+  const msg = err instanceof Error ? err.message : String(err);
+  return (
+    /does not exist in the current database/i.test(msg) ||
+    /relation ".*" does not exist/i.test(msg) ||
+    /P2021/.test(msg) ||
+    /42P01/.test(msg)
+  );
+};
+
+async function runPrismaDbPush(dbUrl: string): Promise<{ ok: boolean; error?: string }> {
+  const isWin = process.platform === 'win32';
+  const localPrismaBin = path.resolve(
+    process.cwd(),
+    'node_modules',
+    '.bin',
+    isWin ? 'prisma.cmd' : 'prisma',
+  );
+  const cmd = fs.existsSync(localPrismaBin) ? localPrismaBin : (isWin ? 'npx.cmd' : 'npx');
+  const args = fs.existsSync(localPrismaBin)
+    ? ['db', 'push', '--skip-generate', '--accept-data-loss']
+    : ['prisma', 'db', 'push', '--skip-generate', '--accept-data-loss'];
+
+  return new Promise(resolve => {
+    execFile(
+      cmd,
+      args,
+      {
+        cwd: process.cwd(),
+        env: { ...process.env, DATABASE_URL: dbUrl },
+        timeout: 45_000,
+        maxBuffer: 1024 * 1024 * 4,
+      },
+      (error, _stdout, stderr) => {
+        if (!error) {
+          resolve({ ok: true });
+        } else {
+          resolve({ ok: false, error: (stderr || error.message || 'prisma db push failed').slice(0, 300) });
+        }
+      },
+    );
+  });
+}
+
+export async function ensurePostgresSchemaReady(
+  force = false,
+): Promise<{ ready: boolean; autoPushed: boolean; snapshotOnly: boolean; error?: string }> {
+  if (!isDatabaseUrlConfigured()) {
+    return { ready: false, autoPushed: false, snapshotOnly: false };
+  }
+
+  const activeUrl = resolveDatabaseUrl();
+  if (!force && global.__kpimsSchemaReadyUrl === activeUrl) {
+    return { ready: true, autoPushed: false, snapshotOnly: false };
+  }
+
+  if (global.__kpimsSchemaEnsurePromise) {
+    return global.__kpimsSchemaEnsurePromise;
+  }
+
+  const run = async (): Promise<{ ready: boolean; autoPushed: boolean; snapshotOnly: boolean; error?: string }> => {
+    try {
+      const client = getOrCreateRealPrismaClient();
+      const checkTables = async () => {
+        const rows = (await client.$queryRawUnsafe(
+          `SELECT to_regclass('public.units_of_measure')::text AS uom, to_regclass('public.parts')::text AS parts, to_regclass('public.materials')::text AS materials, to_regclass('public.inventory_app_state_snapshots')::text AS snap`,
+        )) as Array<{ uom: string | null; parts: string | null; materials: string | null; snap: string | null }>;
+        return rows?.[0] || { uom: null, parts: null, materials: null, snap: null };
+      };
+
+      const initial = await checkTables();
+      if (initial.uom && initial.parts && initial.materials && initial.snap) {
+        global.__kpimsSchemaReadyUrl = activeUrl;
+        return { ready: true, autoPushed: false, snapshotOnly: false };
+      }
+
+      console.warn('[KPIMS DB] Missing relational schema detected in PostgreSQL; running automatic prisma db push...');
+      const pushRes = await runPrismaDbPush(activeUrl);
+      if (pushRes.ok) {
+        const after = await checkTables();
+        if (after.uom && after.parts && after.materials) {
+          global.__kpimsSchemaReadyUrl = activeUrl;
+          console.info('[KPIMS DB] Automatic prisma db push completed successfully.');
+          return { ready: true, autoPushed: true, snapshotOnly: false };
+        }
+      }
+
+      // Ensure snapshot table at minimum so durable state syncs even if full relational DDL lacks privileges
+      let snapshotOk = Boolean(initial.snap);
+      if (!snapshotOk) {
+        try {
+          await client.$executeRawUnsafe(
+            `CREATE TABLE IF NOT EXISTS "inventory_app_state_snapshots" ("id" TEXT NOT NULL PRIMARY KEY, "payload" JSONB NOT NULL, "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
+          );
+          snapshotOk = true;
+        } catch {
+          snapshotOk = false;
+        }
+      }
+
+      return {
+        ready: false,
+        autoPushed: false,
+        snapshotOnly: snapshotOk,
+        error: pushRes.error || 'جداول رابطه‌ای PostgreSQL (مانند units_of_measure و parts) در این پایگاه داده ایجاد نشده‌اند.',
+      };
+    } catch (err) {
+      return {
+        ready: false,
+        autoPushed: false,
+        snapshotOnly: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    } finally {
+      global.__kpimsSchemaEnsurePromise = undefined;
+    }
+  };
+
+  global.__kpimsSchemaEnsurePromise = run();
+  return global.__kpimsSchemaEnsurePromise;
+}
+
 

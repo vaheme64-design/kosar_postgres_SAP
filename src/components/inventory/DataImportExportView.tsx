@@ -94,6 +94,7 @@ export const DataImportExportView: React.FC<DataImportExportViewProps> = ({
   const [templateType, setTemplateType] = useState<string>(initialTemplateType);
   const [templateData, setTemplateData] = useState<any>(null);
   const [previewRows, setPreviewRows] = useState<any[]>([]);
+  const [previewPage, setPreviewPage] = useState(1);
   const [validationResult, setValidationResult] = useState<any>(null);
   const [isValidating, setIsValidating] = useState(false);
   const [isConfirming, setIsConfirming] = useState(false);
@@ -156,6 +157,7 @@ export const DataImportExportView: React.FC<DataImportExportViewProps> = ({
       await fetchTemplate(detectedType, true);
     }
     setPreviewRows(normalizedRows);
+    setPreviewPage(1);
     setValidationResult(null);
     setNotification({
       type: 'success',
@@ -620,47 +622,90 @@ export const DataImportExportView: React.FC<DataImportExportViewProps> = ({
               </div>
             </div>
 
-            {/* Visual Table Preview */}
-            {previewRows.length > 0 && templateData && (
-              <div className="overflow-x-auto rounded-sm border border-[#d9d9d9] max-h-80">
-                <table className="w-full text-right text-xs sap-table-compact">
-                  <thead className="bg-[#ffffff] text-[#333333] border-b border-[#d9d9d9] sticky top-0">
-                    <tr>
-                      <th className="w-12">ردیف</th>
-                      {(templateData.columns || []).map((c: any) => (
-                        <th key={c.key}>
-                          {c.titlePersian || c.label || c.key}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-[#e8e8e8]">
-                    {previewRows.map((row, idx) => (
-                      <tr key={idx} className="hover:bg-[#e5f3fa]">
-                        <td className="font-mono text-[#666666]">{toPersianDigits(idx + 1)}</td>
-                        {(templateData.columns || []).map((c: any) => {
-                          const val = row[c.key] ?? row[c.titlePersian] ?? row[c.label] ?? '';
+            {/* Visual Table Preview (Paginated at 50 rows/page so 1,461+ rows stay responsive) */}
+            {previewRows.length > 0 && templateData && (() => {
+              const pageSize = 50;
+              const totalPages = Math.max(1, Math.ceil(previewRows.length / pageSize));
+              const safePage = Math.min(previewPage, totalPages);
+              const startIdx = (safePage - 1) * pageSize;
+              const visibleRows = previewRows.slice(startIdx, startIdx + pageSize);
+
+              return (
+                <div className="space-y-2">
+                  <div className="overflow-x-auto rounded-sm border border-[#d9d9d9] max-h-80">
+                    <table className="w-full text-right text-xs sap-table-compact">
+                      <thead className="bg-[#ffffff] text-[#333333] border-b border-[#d9d9d9] sticky top-0">
+                        <tr>
+                          <th className="w-12">ردیف</th>
+                          {(templateData.columns || []).map((c: any) => (
+                            <th key={c.key}>
+                              {c.titlePersian || c.label || c.key}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-[#e8e8e8]">
+                        {visibleRows.map((row, localIdx) => {
+                          const idx = startIdx + localIdx;
                           return (
-                            <td key={c.key} className="font-mono text-[#333333]">
-                              <input
-                                type="text"
-                                value={val}
-                                onChange={e => {
-                                  const next = [...previewRows];
-                                  next[idx] = { ...next[idx], [c.key]: e.target.value };
-                                  setPreviewRows(next);
-                                }}
-                                className="w-full bg-transparent border-b border-transparent focus:border-[#007cc0] focus:bg-[#ffffff] px-1 py-0.5 rounded-sm focus:outline-none"
-                              />
-                            </td>
+                            <tr key={idx} className="hover:bg-[#e5f3fa]">
+                              <td className="font-mono text-[#666666]">{toPersianDigits(idx + 1)}</td>
+                              {(templateData.columns || []).map((c: any) => {
+                                const val = row[c.key] ?? row[c.titlePersian] ?? row[c.label] ?? '';
+                                return (
+                                  <td key={c.key} className="font-mono text-[#333333]">
+                                    <input
+                                      type="text"
+                                      value={val}
+                                      onChange={e => {
+                                        const next = [...previewRows];
+                                        next[idx] = { ...next[idx], [c.key]: e.target.value };
+                                        setPreviewRows(next);
+                                      }}
+                                      className="w-full bg-transparent border-b border-transparent focus:border-[#007cc0] focus:bg-[#ffffff] px-1 py-0.5 rounded-sm focus:outline-none"
+                                    />
+                                  </td>
+                                );
+                              })}
+                            </tr>
                           );
                         })}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
+                      </tbody>
+                    </table>
+                  </div>
+                  {previewRows.length > pageSize && (
+                    <div className="flex items-center justify-between text-[11px] text-[#666666] px-1">
+                      <span>
+                        نمایش ردیف‌های {toPersianDigits(startIdx + 1)} تا{' '}
+                        {toPersianDigits(Math.min(startIdx + pageSize, previewRows.length))} از{' '}
+                        <strong className="text-[#333333] font-mono">{formatNumber(previewRows.length)}</strong> ردیف
+                      </span>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          disabled={safePage <= 1}
+                          onClick={() => setPreviewPage(p => Math.max(1, p - 1))}
+                          className="sap-btn-standard px-2.5 py-1 text-[11px] disabled:opacity-40 cursor-pointer"
+                        >
+                          صفحه قبل
+                        </button>
+                        <span className="font-mono">
+                          {toPersianDigits(safePage)} / {toPersianDigits(totalPages)}
+                        </span>
+                        <button
+                          type="button"
+                          disabled={safePage >= totalPages}
+                          onClick={() => setPreviewPage(p => Math.min(totalPages, p + 1))}
+                          className="sap-btn-standard px-2.5 py-1 text-[11px] disabled:opacity-40 cursor-pointer"
+                        >
+                          صفحه بعد
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
 
             {/* Step 6 & 7: Validation Results & Confirm Import */}
             {validationResult && (

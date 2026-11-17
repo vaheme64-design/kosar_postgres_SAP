@@ -394,27 +394,48 @@ export interface ExecuteScenarioResult {
 
 const fmt = (n: number) => Math.round(n * 100) / 100;
 
+function normalizeSearchQuery(raw?: string): string {
+  if (!raw) return '';
+  return String(raw)
+    .replace(/[۰-۹]/g, ch => String('۰۱۲۳۴۵۶۷۸۹'.indexOf(ch)))
+    .replace(/[٠-٩]/g, ch => String('٠١٢٣٤٥٦٧٨٩'.indexOf(ch)))
+    .replace(/ي/g, 'ی')
+    .replace(/ك/g, 'ک')
+    .replace(/\u200c/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 /**
  * Exact/fuzzy lookup WITHOUT silently falling back when the user explicitly queried a part name/code!
+ * Fast and reliable across 1,461+ parts with Persian/Arabic digit normalization.
  */
 function findRequestedPart(parts: Part[], partIdOrCode?: string): { part: Part | null; explicitQuery: string | undefined } {
-  const trimmed = (partIdOrCode || '').trim();
+  const trimmed = normalizeSearchQuery(partIdOrCode);
   if (trimmed) {
     const lower = trimmed.toLowerCase();
     const exact = parts.find(
       p =>
-        p.id.toLowerCase() === lower ||
-        p.code.toLowerCase() === lower ||
-        (p.sapcoCode && p.sapcoCode.toLowerCase() === lower) ||
-        p.name.toLowerCase() === lower,
+        normalizeSearchQuery(p.id).toLowerCase() === lower ||
+        normalizeSearchQuery(p.code).toLowerCase() === lower ||
+        (p.sapcoCode && normalizeSearchQuery(p.sapcoCode).toLowerCase() === lower) ||
+        normalizeSearchQuery(p.name).toLowerCase() === lower,
     );
     if (exact) return { part: exact, explicitQuery: trimmed };
 
+    const prefix = parts.find(
+      p =>
+        normalizeSearchQuery(p.code).toLowerCase().startsWith(lower) ||
+        (p.sapcoCode && normalizeSearchQuery(p.sapcoCode).toLowerCase().startsWith(lower)) ||
+        normalizeSearchQuery(p.name).toLowerCase().startsWith(lower),
+    );
+    if (prefix) return { part: prefix, explicitQuery: trimmed };
+
     const fuzzy = parts.find(
       p =>
-        p.code.toLowerCase().includes(lower) ||
-        p.name.toLowerCase().includes(lower) ||
-        (p.sapcoCode && p.sapcoCode.toLowerCase().includes(lower)),
+        normalizeSearchQuery(p.code).toLowerCase().includes(lower) ||
+        normalizeSearchQuery(p.name).toLowerCase().includes(lower) ||
+        (p.sapcoCode && normalizeSearchQuery(p.sapcoCode).toLowerCase().includes(lower)),
     );
     return { part: fuzzy || null, explicitQuery: trimmed };
   }
@@ -598,19 +619,26 @@ export function getScenarioSelectors(stores: ScenarioRuntimeStores) {
   const { balances: rawBalances } = calculateDetailedStockBalances(stores.inventoryDocs, stores.reservations, stores.parts);
   const balances = applyQcHoldsToBalances(rawBalances, serverQcHoldStore);
 
+  const availByPartId = new Map<string, number>();
+  const availByPartCode = new Map<string, number>();
+  for (const b of balances) {
+    if (b.partId) availByPartId.set(b.partId, (availByPartId.get(b.partId) || 0) + b.availableQty);
+    if (b.partCode) availByPartCode.set(b.partCode.toUpperCase(), (availByPartCode.get(b.partCode.toUpperCase()) || 0) + b.availableQty);
+  }
+
   const finishedParts = stores.parts
     .filter(p => p.category === 'FINISHED_GOOD' || p.category === 'WIP_PART')
     .map(p => {
-      const avail = balances
-        .filter(b => b.partId === p.id || b.partCode === p.code)
-        .reduce((s, b) => s + b.availableQty, 0);
+      const avail = availByPartId.get(p.id) ?? availByPartCode.get((p.code || '').toUpperCase()) ?? 0;
       return {
         id: p.id,
         code: p.code,
         name: p.name,
         category: p.category,
         materialGrade: p.materialGrade || '',
+        sapcoCode: p.sapcoCode || '',
         minStock: p.minStock || 0,
+        leadTimeDays: p.leadTimeDays || 2,
         availableQty: fmt(avail),
       };
     });
@@ -645,10 +673,659 @@ export function getScenarioSelectors(stores: ScenarioRuntimeStores) {
   return {
     catalog: SCENARIO_CATALOG,
     finishedParts,
+    allPartsCount: stores.parts.length,
     coils,
     machines,
     qcBlockedCount: heldLots.length + blockedCoils.length,
     kpiSnapshot: getIndustrialKpiSnapshot(stores),
+  };
+}
+
+export interface MrpFeasibilityInput {
+  partIdOrCode?: string;
+  proposedQty: number;
+  targetDueDate?: string;
+  deductExistingFgAndWip?: boolean;
+}
+
+export interface MrpFeasibilityMaterialRow {
+  partId: string;
+  partCode: string;
+  partName: string;
+  categoryLabel: string;
+  unit: string;
+  materialGrade?: string;
+  bomQtyPerUnit: number;
+  scrapPercent: number;
+  requiredGrossQty: number;
+  requiredNetQty: number;
+  availableStockQty: number;
+  availableCoilKg: number;
+  committedToOpenMosQty: number;
+  freeForProposedMoQty: number;
+  shortageGrossQty: number;
+  shortageNetQty: number;
+  minSafetyStock: number;
+  projectedBalanceAfterMo: number;
+  leadTimeDays: number;
+  coveragePercent: number;
+  status: 'SUFFICIENT' | 'TIGHT' | 'SHORTAGE' | 'MISSING_MASTER';
+}
+
+export interface MrpFeasibilityContractItem {
+  id: string;
+  contractNumber: string;
+  title: string;
+  customerName: string;
+  materialGrade: string;
+  allocatedWeightKg: number;
+  totalReceivedKg: number;
+  totalConsumedKg: number;
+  remainingQuotaKg: number;
+  status: string;
+  endDate: string;
+}
+
+export interface MrpFeasibilityResult {
+  evaluatedAt: string;
+  partExists: boolean;
+  requestedPartQuery?: string;
+  proposedQty: number;
+  netToManufactureQty: number;
+  deductExistingFgAndWip: boolean;
+  feasibilityStatus: 'FEASIBLE_IMMEDIATE' | 'FEASIBLE_WITH_WARNINGS' | 'BLOCKED_SHORTAGE' | 'PART_NOT_FOUND';
+  canCreateMoSafely: boolean;
+  summaryFa: string;
+  selectedPart: {
+    id: string;
+    code: string;
+    name: string;
+    category: string;
+    unit: string;
+    materialGrade?: string;
+    thicknessMm?: number;
+    weightPerUnitKg: number;
+    minStock: number;
+    leadTimeDays: number;
+    hasBom: boolean;
+    hasRouting: boolean;
+  } | null;
+  stockSnapshot: {
+    finishedGoodsAvailable: number;
+    finishedGoodsReserved: number;
+    wipActiveQty: number;
+    wipWarehouseQty: number;
+    qcHeldQty: number;
+    openCustomerDemandQty: number;
+    matchingCoilKg: number;
+    blockedCoilKg: number;
+  };
+  openContracts: MrpFeasibilityContractItem[];
+  competingOrders: Array<{
+    orderNumber: string;
+    customerName: string;
+    openQty: number;
+    dueDate: string;
+    status: string;
+  }>;
+  materialRequirements: MrpFeasibilityMaterialRow[];
+  scheduleProjection: {
+    partManufacturingLeadTimeDays: number;
+    criticalMaterialLeadTimeDays: number;
+    estimatedProductionHours: number;
+    estimatedProductionDays: number;
+    totalCumulativeLeadTimeDays: number;
+    earliestFeasibleDateIso: string;
+    earliestFeasibleDateFa: string;
+    targetDueDateIso?: string;
+    daysSlackOrDelay?: number;
+  };
+  warnings: Array<{ severity: 'CRITICAL' | 'WARNING' | 'INFO'; title: string; detail: string }>;
+}
+
+export function simulateMrpFeasibility(
+  input: MrpFeasibilityInput,
+  stores: ScenarioRuntimeStores,
+): MrpFeasibilityResult {
+  const { part, explicitQuery } = findRequestedPart(stores.parts, input.partIdOrCode);
+  const proposedQty = Math.max(1, Math.round(Number(input.proposedQty) || 5000));
+  const deductExisting = input.deductExistingFgAndWip !== false;
+  const evaluatedAt = new Date().toISOString();
+
+  if (!part) {
+    return {
+      evaluatedAt,
+      partExists: false,
+      requestedPartQuery: explicitQuery || input.partIdOrCode || 'نامشخص',
+      proposedQty,
+      netToManufactureQty: proposedQty,
+      deductExistingFgAndWip: deductExisting,
+      feasibilityStatus: 'PART_NOT_FOUND',
+      canCreateMoSafely: false,
+      summaryFa: `قطعه «${explicitQuery || input.partIdOrCode || 'نامشخص'}» در کاتالوگ قطعات یافت نشد؛ پیش از شبیه‌سازی MRP و صدور MO باید قطعه تعریف شود.`,
+      selectedPart: null,
+      stockSnapshot: {
+        finishedGoodsAvailable: 0,
+        finishedGoodsReserved: 0,
+        wipActiveQty: 0,
+        wipWarehouseQty: 0,
+        qcHeldQty: 0,
+        openCustomerDemandQty: 0,
+        matchingCoilKg: 0,
+        blockedCoilKg: 0,
+      },
+      openContracts: [],
+      competingOrders: [],
+      materialRequirements: [],
+      scheduleProjection: {
+        partManufacturingLeadTimeDays: 0,
+        criticalMaterialLeadTimeDays: 0,
+        estimatedProductionHours: 0,
+        estimatedProductionDays: 0,
+        totalCumulativeLeadTimeDays: 0,
+        earliestFeasibleDateIso: evaluatedAt.slice(0, 10),
+        earliestFeasibleDateFa: formatToJalali(new Date()),
+      },
+      warnings: [
+        {
+          severity: 'CRITICAL',
+          title: 'قطعه در کاتالوگ وجود ندارد',
+          detail: `برای قطعه «${explicitQuery || input.partIdOrCode || 'نامشخص'}» ابتدا باید رکورد پایه در کاتالوگ قطعات ایجاد شود.`,
+        },
+      ],
+    };
+  }
+
+  const { balances: rawBalances } = calculateDetailedStockBalances(stores.inventoryDocs, stores.reservations, stores.parts);
+  const balances = applyQcHoldsToBalances(rawBalances, serverQcHoldStore);
+  const partsById = new Map(stores.parts.map(p => [p.id, p]));
+  const partsByCode = new Map(stores.parts.map(p => [p.code.toUpperCase(), p]));
+  const boms = getAllBoms();
+
+  // Build O(M) balance index
+  const balancesByPartKey = new Map<string, typeof balances>();
+  for (const b of balances) {
+    if (b.partId) {
+      const arr = balancesByPartKey.get(b.partId) || [];
+      arr.push(b);
+      balancesByPartKey.set(b.partId, arr);
+    }
+    if (b.partCode) {
+      const ck = b.partCode.toUpperCase();
+      if (ck !== b.partId) {
+        const arr = balancesByPartKey.get(ck) || [];
+        arr.push(b);
+        balancesByPartKey.set(ck, arr);
+      }
+    }
+  }
+
+  const getPartBalances = (pId?: string, pCode?: string) => {
+    const seen = new Set<typeof balances[number]>();
+    if (pId && balancesByPartKey.has(pId)) {
+      balancesByPartKey.get(pId)!.forEach(b => seen.add(b));
+    }
+    if (pCode && balancesByPartKey.has(pCode.toUpperCase())) {
+      balancesByPartKey.get(pCode.toUpperCase())!.forEach(b => seen.add(b));
+    }
+    return Array.from(seen);
+  };
+
+  const partBalances = getPartBalances(part.id, part.code);
+  const finishedGoodsAvailable = fmt(
+    partBalances.filter(b => b.warehouseId === 'WH-FINISHED').reduce((s, b) => s + b.availableQty, 0),
+  );
+  const wipWarehouseQty = fmt(
+    partBalances.filter(b => b.warehouseId !== 'WH-FINISHED' && b.warehouseId !== 'WH-RAW').reduce((s, b) => s + b.availableQty, 0),
+  );
+  const finishedGoodsReserved = fmt(
+    stores.reservations
+      .filter(r => r.status === 'ACTIVE' && (r.partId === part.id || r.partCode === part.code))
+      .reduce((s, r) => s + r.quantity, 0),
+  );
+  const qcHeldQty = fmt(
+    Object.values(serverQcHoldStore)
+      .filter(h => h.isHeld && (h.partId === part.id || h.partCode === part.code))
+      .reduce((s, h) => s + (h.heldQty || 0), 0),
+  );
+
+  const openMosForPart = manufacturingOrdersStore.filter(
+    m => (m.partId === part.id || m.partCode === part.code) && (m.status === 'RELEASED' || m.status === 'IN_PROGRESS'),
+  );
+  const wipActiveQty = fmt(
+    openMosForPart.reduce(
+      (s, m) => s + m.operations.reduce((os, o) => os + o.waitingInputQty + o.inProgressQty + o.readyForTransferQty, 0),
+      0,
+    ),
+  );
+
+  const competingOrders = customerOrdersStore
+    .filter(
+      o =>
+        o.status !== 'CANCELLED' &&
+        o.status !== 'FULFILLED' &&
+        o.status !== 'TERMINATED' &&
+        o.lines.some(l => l.partId === part.id || l.partCode === part.code),
+    )
+    .map(o => {
+      const openQty = o.lines
+        .filter(l => l.partId === part.id || l.partCode === part.code)
+        .reduce((s, l) => s + Math.max(0, l.orderedQuantity - (l.deliveredQuantity || 0)), 0);
+      return {
+        orderNumber: o.orderNumber,
+        customerName: o.customerName,
+        openQty: fmt(openQty),
+        dueDate: o.dueDate,
+        status: o.status,
+      };
+    })
+    .filter(o => o.openQty > 0);
+  const openCustomerDemandQty = fmt(competingOrders.reduce((s, o) => s + o.openQty, 0));
+
+  const freeFgAfterCustomerDemand = Math.max(0, finishedGoodsAvailable - openCustomerDemandQty);
+  const netToManufactureQty = deductExisting
+    ? Math.max(0, Math.round(proposedQty - freeFgAfterCustomerDemand - wipActiveQty - wipWarehouseQty))
+    : proposedQty;
+
+  // Matching coils by grade/part
+  const matchingCoils = stores.physicalCoils.filter(c => {
+    const gradeMatch = part.materialGrade
+      ? c.materialGrade.toUpperCase() === part.materialGrade.toUpperCase()
+      : c.partCode === part.code;
+    return gradeMatch && c.remainingWeightKg > 0 && c.qualityStatus === 'AVAILABLE' && c.physicalStatus !== 'BLOCKED';
+  });
+  const matchingCoilKg = fmt(matchingCoils.reduce((s, c) => s + c.remainingWeightKg, 0));
+  const blockedCoilKg = fmt(
+    stores.physicalCoils
+      .filter(c => {
+        const gradeMatch = part.materialGrade
+          ? c.materialGrade.toUpperCase() === part.materialGrade.toUpperCase()
+          : c.partCode === part.code;
+        return gradeMatch && c.remainingWeightKg > 0 && (c.qualityStatus !== 'AVAILABLE' || c.physicalStatus === 'BLOCKED');
+      })
+      .reduce((s, c) => s + c.remainingWeightKg, 0),
+  );
+
+  // Open contracts matching part OR material grade
+  const openContracts: MrpFeasibilityContractItem[] = stores.contracts
+    .filter(c => {
+      if (c.status !== 'ACTIVE') return false;
+      const explicitLine = (c.commercialLines || []).some(l => l.partId === part.id || l.partCode === part.code);
+      const assocCode = (c.associatedPartCodes || []).some(code => code.toUpperCase() === part.code.toUpperCase());
+      const gradeMatch = part.materialGrade && c.materialGrade.toUpperCase() === part.materialGrade.toUpperCase();
+      return explicitLine || assocCode || Boolean(gradeMatch);
+    })
+    .map(c => ({
+      id: c.id,
+      contractNumber: c.contractNumber,
+      title: c.title,
+      customerName: c.customerName || 'ساپکو',
+      materialGrade: c.materialGrade,
+      allocatedWeightKg: fmt(c.allocatedWeightKg),
+      totalReceivedKg: fmt(c.totalReceivedKg),
+      totalConsumedKg: fmt(c.totalConsumedKg),
+      remainingQuotaKg: fmt(Math.max(0, c.allocatedWeightKg - c.totalConsumedKg)),
+      status: c.status,
+      endDate: c.endDate,
+    }));
+
+  // BOM explosion vs fallback material model
+  const matchingBom = boms.find(b => b.assemblyPartId === part.id || b.assemblyPartCode === part.code);
+  const matchingRouting = stores.routings.find(r => r.partId === part.id || r.partCode === part.code);
+
+  // Track material demand already committed by open MOs on shop floor
+  const openMoMaterialCommitments = new Map<string, number>();
+  for (const mo of manufacturingOrdersStore) {
+    if (mo.status !== 'RELEASED' && mo.status !== 'IN_PROGRESS') continue;
+    const remMoQty = Math.max(0, mo.targetQuantity - mo.completedQuantity - mo.initialInputQuantity);
+    if (remMoQty <= 0) continue;
+    const moBom = boms.find(b => b.assemblyPartId === mo.partId || b.assemblyPartCode === mo.partCode);
+    if (moBom) {
+      for (const comp of moBom.components) {
+        const scrapMult = 1 + (comp.scrapAllowancePercent || 0) / 100;
+        const unitQty = comp.componentType === 'RAW_SHEET' && comp.unit === 'KG' && comp.grossWeightKg > 0
+          ? comp.grossWeightKg
+          : (comp.quantityPerAssembly || 1) * scrapMult;
+        const need = unitQty * remMoQty;
+        const codeKey = (comp.componentPartCode || '').toUpperCase();
+        if (codeKey) {
+          openMoMaterialCommitments.set(codeKey, (openMoMaterialCommitments.get(codeKey) || 0) + need);
+        }
+      }
+    } else {
+      const moPart = partsById.get(mo.partId) || partsByCode.get(mo.partCode.toUpperCase());
+      if (moPart?.materialGrade) {
+        const key = `GRADE:${moPart.materialGrade.toUpperCase()}`;
+        openMoMaterialCommitments.set(key, (openMoMaterialCommitments.get(key) || 0) + remMoQty * (moPart.weightPerUnitKg || 1) * 1.12);
+      }
+    }
+  }
+
+  const materialRequirements: MrpFeasibilityMaterialRow[] = [];
+
+  if (matchingBom && matchingBom.components.length > 0) {
+    for (const comp of matchingBom.components) {
+      const compCode = comp.componentPartCode || '';
+      const compPart = partsById.get(comp.componentPartId) || partsByCode.get(compCode.toUpperCase());
+      const scrapPct = comp.scrapAllowancePercent || 0;
+      const scrapMult = 1 + scrapPct / 100;
+      const perUnitConsumption =
+        comp.componentType === 'RAW_SHEET' && comp.unit === 'KG' && comp.grossWeightKg > 0
+          ? comp.grossWeightKg
+          : (comp.quantityPerAssembly || 1) * scrapMult;
+      const reqGross = fmt(proposedQty * perUnitConsumption);
+      const reqNet = fmt(netToManufactureQty * perUnitConsumption);
+
+      const cBalances = getPartBalances(compPart?.id || comp.componentPartId, compCode);
+      const whAvailable = fmt(cBalances.reduce((s, b) => s + b.availableQty, 0));
+
+      let coilKg = 0;
+      const compGrade = compPart?.materialGrade || (comp.componentType === 'RAW_SHEET' ? part.materialGrade : undefined);
+      if (comp.componentType === 'RAW_SHEET' || comp.unit === 'KG') {
+        const cGrade = (compGrade || '').toUpperCase();
+        coilKg = fmt(
+          stores.physicalCoils
+            .filter(
+              c =>
+                c.remainingWeightKg > 0 &&
+                c.qualityStatus === 'AVAILABLE' &&
+                c.physicalStatus !== 'BLOCKED' &&
+                ((c.partCode || '').toUpperCase() === compCode.toUpperCase() ||
+                  (cGrade !== '' && c.materialGrade.toUpperCase() === cGrade)),
+            )
+            .reduce((s, c) => s + c.remainingWeightKg, 0),
+        );
+      }
+
+      // Avoid double counting if WH-RAW warehouse stock mirrors coil weight: take max cleanly
+      const totalAvail = fmt(coilKg > 0 ? Math.max(whAvailable, coilKg) : whAvailable);
+      const committed = fmt(
+        openMoMaterialCommitments.get(compCode.toUpperCase()) ||
+          (compGrade ? openMoMaterialCommitments.get(`GRADE:${compGrade.toUpperCase()}`) || 0 : 0),
+      );
+      const freeForThisMo = fmt(Math.max(0, totalAvail - committed));
+      const activeTargetReq = deductExisting ? reqNet : reqGross;
+      const shortageGross = fmt(Math.max(0, reqGross - freeForThisMo));
+      const shortageNet = fmt(Math.max(0, reqNet - freeForThisMo));
+      const minSafety = compPart?.minStock || 0;
+      const projectedBalanceAfterMo = fmt(freeForThisMo - activeTargetReq);
+      const leadTimeDays =
+        compPart?.leadTimeDays ||
+        (comp.componentType === 'RAW_SHEET'
+          ? 7
+          : comp.componentType === 'FASTENER_HARDWARE' || comp.componentType === 'RUBBER_SEAL'
+          ? 5
+          : 2);
+      const coveragePercent = activeTargetReq > 0 ? Math.min(100, Math.round((freeForThisMo / activeTargetReq) * 100)) : 100;
+
+      const rowStatus: MrpFeasibilityMaterialRow['status'] = !compPart
+        ? 'MISSING_MASTER'
+        : (deductExisting ? shortageNet : shortageGross) > 0
+        ? 'SHORTAGE'
+        : minSafety > 0 && projectedBalanceAfterMo < minSafety
+        ? 'TIGHT'
+        : 'SUFFICIENT';
+
+      materialRequirements.push({
+        partId: compPart?.id || comp.componentPartId,
+        partCode: compCode,
+        partName: compPart?.name || comp.componentPartName,
+        categoryLabel:
+          comp.componentType === 'RAW_SHEET'
+            ? 'ورق / کلاف خام'
+            : comp.componentType === 'FASTENER_HARDWARE'
+            ? 'اتصالات / مهره جوشی'
+            : comp.componentType === 'WIP_SUB_PART'
+            ? 'زیرمجموعه نیمه‌ساخته'
+            : comp.componentType === 'RUBBER_SEAL'
+            ? 'لاستیک / بوش / ضربه‌گیر'
+            : 'تکمیل / مواد مصرفی',
+        unit: comp.unit,
+        materialGrade: compGrade,
+        bomQtyPerUnit: fmt(perUnitConsumption),
+        scrapPercent: scrapPct,
+        requiredGrossQty: reqGross,
+        requiredNetQty: reqNet,
+        availableStockQty: whAvailable,
+        availableCoilKg: coilKg,
+        committedToOpenMosQty: committed,
+        freeForProposedMoQty: freeForThisMo,
+        shortageGrossQty: shortageGross,
+        shortageNetQty: shortageNet,
+        minSafetyStock: minSafety,
+        projectedBalanceAfterMo,
+        leadTimeDays,
+        coveragePercent,
+        status: rowStatus,
+      });
+    }
+  } else {
+    // Fallback material requirement derived from Part sheet grade & unit weight
+    const grade = (part.materialGrade || 'DC01A').toUpperCase();
+    const rawPartMatch = stores.parts.find(
+      p => p.category === 'RAW_MATERIAL' && p.materialGrade?.toUpperCase() === grade,
+    );
+    const grossPerUnit = Math.max(0.1, (part.weightPerUnitKg || 1) * 1.12);
+    const reqGross = fmt(proposedQty * grossPerUnit);
+    const reqNet = fmt(netToManufactureQty * grossPerUnit);
+    const rawBalances = rawPartMatch ? getPartBalances(rawPartMatch.id, rawPartMatch.code) : [];
+    const whAvail = fmt(rawBalances.reduce((s, b) => s + b.availableQty, 0));
+    const totalAvail = fmt(Math.max(whAvail, matchingCoilKg));
+    const committed = fmt(openMoMaterialCommitments.get(`GRADE:${grade}`) || 0);
+    const freeForThisMo = fmt(Math.max(0, totalAvail - committed));
+    const activeTargetReq = deductExisting ? reqNet : reqGross;
+    const shortageGross = fmt(Math.max(0, reqGross - freeForThisMo));
+    const shortageNet = fmt(Math.max(0, reqNet - freeForThisMo));
+    const leadTimeDays = rawPartMatch?.leadTimeDays || 7;
+    const minSafety = rawPartMatch?.minStock || 0;
+    const projectedBalanceAfterMo = fmt(freeForThisMo - activeTargetReq);
+    const coveragePercent = activeTargetReq > 0 ? Math.min(100, Math.round((freeForThisMo / activeTargetReq) * 100)) : 100;
+
+    materialRequirements.push({
+      partId: rawPartMatch?.id || `RAW-${grade}`,
+      partCode: rawPartMatch?.code || `RM-COIL-${grade}`,
+      partName: rawPartMatch?.name || `کلاف ورق فولادی گرید ${grade} (برآورد وزنی بدون BOM)`,
+      categoryLabel: 'ورق / کلاف خام (برآورد استاندارد)',
+      unit: 'KG',
+      materialGrade: grade,
+      bomQtyPerUnit: fmt(grossPerUnit),
+      scrapPercent: 12,
+      requiredGrossQty: reqGross,
+      requiredNetQty: reqNet,
+      availableStockQty: whAvail,
+      availableCoilKg: matchingCoilKg,
+      committedToOpenMosQty: committed,
+      freeForProposedMoQty: freeForThisMo,
+      shortageGrossQty: shortageGross,
+      shortageNetQty: shortageNet,
+      minSafetyStock: minSafety,
+      projectedBalanceAfterMo,
+      leadTimeDays,
+      coveragePercent,
+      status:
+        (deductExisting ? shortageNet : shortageGross) > 0
+          ? 'SHORTAGE'
+          : minSafety > 0 && projectedBalanceAfterMo < minSafety
+          ? 'TIGHT'
+          : 'SUFFICIENT',
+    });
+  }
+
+  // Schedule & Lead Times calculation
+  const routingOps = matchingRouting?.operations || [];
+  const totalSetupMin = routingOps.reduce((s, o) => s + (o.setupTimeMin || 15), 0);
+  const totalCycleSec = routingOps.reduce((s, o) => s + (o.standardCycleTimeSec || 12), 0);
+  const targetForRouting = deductExisting ? netToManufactureQty : proposedQty;
+  const estimatedProductionHours = fmt(
+    targetForRouting > 0 ? totalSetupMin / 60 + (targetForRouting * (totalCycleSec || 25)) / 3600 : 0,
+  );
+  const estimatedProductionDays = targetForRouting > 0 ? Math.max(1, Math.ceil(estimatedProductionHours / 15)) : 0;
+  const partManufacturingLeadTimeDays = part.leadTimeDays || Math.max(1, estimatedProductionDays);
+  const criticalMaterialLeadTimeDays = materialRequirements.reduce((maxLt, row) => {
+    const hasShortage = (deductExisting ? row.shortageNetQty : row.shortageGrossQty) > 0;
+    return hasShortage ? Math.max(maxLt, row.leadTimeDays) : maxLt;
+  }, 0);
+  const totalCumulativeLeadTimeDays =
+    criticalMaterialLeadTimeDays + Math.max(partManufacturingLeadTimeDays, estimatedProductionDays);
+
+  const earliestDate = new Date(Date.now() + totalCumulativeLeadTimeDays * 86400_000);
+  const earliestFeasibleDateIso = earliestDate.toISOString().slice(0, 10);
+  const earliestFeasibleDateFa = formatToJalali(earliestDate);
+
+  let daysSlackOrDelay: number | undefined;
+  if (input.targetDueDate) {
+    const targetTime = new Date(input.targetDueDate).getTime();
+    if (!Number.isNaN(targetTime)) {
+      daysSlackOrDelay = Math.round((targetTime - earliestDate.getTime()) / 86400_000);
+    }
+  }
+
+  // Build actionable warnings before MO creation
+  const warnings: MrpFeasibilityResult['warnings'] = [];
+  const shortageRows = materialRequirements.filter(r => r.status === 'SHORTAGE');
+  const tightRows = materialRequirements.filter(r => r.status === 'TIGHT');
+  const missingMasterRows = materialRequirements.filter(r => r.status === 'MISSING_MASTER');
+
+  if (!matchingRouting || routingOps.length === 0) {
+    warnings.push({
+      severity: 'CRITICAL',
+      title: 'فقدان مسیر عملیات تولید (Routing)',
+      detail: `برای قطعه «${part.code}» مسیر ساخت ثبت نشده است. پیش از صدور MO باید عملیات پرس و ماشین‌ها تعریف شوند.`,
+    });
+  }
+  if (!matchingBom) {
+    warnings.push({
+      severity: 'INFO',
+      title: 'محاسبه بر مبنای وزن استاندارد (بدون درخت BOM اختصاصی)',
+      detail: `ساختار BOM چندسطحی برای «${part.code}» ثبت نشده و نیازمندی ورق بر اساس وزن قطعه (${part.weightPerUnitKg} kg) + ۱۲٪ پرت برآورد شده است.`,
+    });
+  }
+  if (shortageRows.length > 0) {
+    warnings.push({
+      severity: 'CRITICAL',
+      title: `کسری مواد در ${shortageRows.length} قلم پیش از صدور دستور کار`,
+      detail: shortageRows
+        .map(
+          r =>
+            `${r.partName} (${r.partCode}): کسری ${fmt(deductExisting ? r.shortageNetQty : r.shortageGrossQty)} ${r.unit} — زمان تدارک ${r.leadTimeDays} روز`,
+        )
+        .join(' | '),
+    });
+  }
+  if (tightRows.length > 0) {
+    warnings.push({
+      severity: 'WARNING',
+      title: `افت موجودی ${tightRows.length} قلم به زیر نقطه سفارش (Safety Stock)`,
+      detail: tightRows
+        .map(r => `${r.partName}: مانده پیش‌بینی‌شده ${r.projectedBalanceAfterMo} از حداقل ایمنی ${r.minSafetyStock}`)
+        .join(' | '),
+    });
+  }
+  if (missingMasterRows.length > 0) {
+    warnings.push({
+      severity: 'WARNING',
+      title: `${missingMasterRows.length} قلم زیرمجموعه در کاتالوگ قطعات یافت نشد`,
+      detail: missingMasterRows.map(r => r.partCode).join('، '),
+    });
+  }
+  if (qcHeldQty > 0 || blockedCoilKg > 0) {
+    warnings.push({
+      severity: 'WARNING',
+      title: 'وجود موجودی در قرنطینه کیفی (QC Hold)',
+      detail: `${qcHeldQty > 0 ? `${qcHeldQty} عدد قطعه` : ''}${qcHeldQty > 0 && blockedCoilKg > 0 ? ' و ' : ''}${blockedCoilKg > 0 ? `${blockedCoilKg} kg کلاف` : ''} در قرنطینه قرار دارد و در موجودی قابل تخصیص لحاظ نشده است.`,
+    });
+  }
+  if (openContracts.length === 0 && part.category !== 'RAW_MATERIAL') {
+    warnings.push({
+      severity: 'INFO',
+      title: 'عدم اتصال به قرارداد فعال ساپکو/مشتری',
+      detail: 'قرارداد فعالی با گرید یا کد این قطعه یافت نشد؛ در صورت صدور MO به‌صورت تولید آزاد/ذخیره انبار برنامه‌ریزی می‌شود.',
+    });
+  } else if (openContracts.length > 0) {
+    const totalContractRemaining = openContracts.reduce((s, c) => s + c.remainingQuotaKg, 0);
+    const totalSheetReq = materialRequirements
+      .filter(r => r.unit === 'KG')
+      .reduce((s, r) => s + (deductExisting ? r.requiredNetQty : r.requiredGrossQty), 0);
+    if (totalSheetReq > totalContractRemaining) {
+      warnings.push({
+        severity: 'WARNING',
+        title: 'نیاز ورق بیشتر از مانده سهمیه قراردادهای فعال',
+        detail: `نیاز ورق (${fmt(totalSheetReq)} kg) از مانده سهمیه قراردادها (${fmt(totalContractRemaining)} kg) بیشتر است.`,
+      });
+    }
+  }
+  if (daysSlackOrDelay !== undefined && daysSlackOrDelay < 0) {
+    warnings.push({
+      severity: 'CRITICAL',
+      title: `تاخیر زمانی ${Math.abs(daysSlackOrDelay)} روزه نسبت به تاریخ تحویل هدف`,
+      detail: `با توجه به Lead Time تدارک مواد (${criticalMaterialLeadTimeDays} روز) و ساخت (${partManufacturingLeadTimeDays} روز)، اولین تحویل ممکن ${earliestFeasibleDateFa} است.`,
+    });
+  }
+
+  const feasibilityStatus: MrpFeasibilityResult['feasibilityStatus'] =
+    shortageRows.length > 0 || !matchingRouting || routingOps.length === 0 || (daysSlackOrDelay !== undefined && daysSlackOrDelay < 0)
+      ? 'BLOCKED_SHORTAGE'
+      : warnings.some(w => w.severity === 'WARNING')
+      ? 'FEASIBLE_WITH_WARNINGS'
+      : 'FEASIBLE_IMMEDIATE';
+
+  const canCreateMoSafely = feasibilityStatus !== 'BLOCKED_SHORTAGE';
+  const summaryFa =
+    feasibilityStatus === 'FEASIBLE_IMMEDIATE'
+      ? `امکان‌سنجی تایید شد: برای تولید ${proposedQty.toLocaleString('fa-IR')} عدد «${part.name}» (خالص ساخت ${netToManufactureQty.toLocaleString('fa-IR')} عدد) تمام مواد، کلاف‌ها و مسیر تولید آماده و تکمیل است.`
+      : feasibilityStatus === 'FEASIBLE_WITH_WARNINGS'
+      ? `صدور دستور کار امکان‌پذیر است اما ${warnings.length} هشدار کنترلی (نقطه سفارش، قرنطینه یا قرارداد) پیش از صدور MO شناسایی شد.`
+      : `هشدار پیش از صدور MO: به دلیل کسری در ${shortageRows.length} قلم متریال${!matchingRouting ? ' / فقدان مسیر عملیات' : ''} صدور دستور کار با ریسک توقف خط همراه است.`;
+
+  return {
+    evaluatedAt,
+    partExists: true,
+    requestedPartQuery: explicitQuery,
+    proposedQty,
+    netToManufactureQty,
+    deductExistingFgAndWip: deductExisting,
+    feasibilityStatus,
+    canCreateMoSafely,
+    summaryFa,
+    selectedPart: {
+      id: part.id,
+      code: part.code,
+      name: part.name,
+      category: part.category,
+      unit: part.unit,
+      materialGrade: part.materialGrade,
+      thicknessMm: part.thicknessMm,
+      weightPerUnitKg: part.weightPerUnitKg || 1,
+      minStock: part.minStock || 0,
+      leadTimeDays: partManufacturingLeadTimeDays,
+      hasBom: Boolean(matchingBom),
+      hasRouting: Boolean(matchingRouting && routingOps.length > 0),
+    },
+    stockSnapshot: {
+      finishedGoodsAvailable,
+      finishedGoodsReserved,
+      wipActiveQty,
+      wipWarehouseQty,
+      qcHeldQty,
+      openCustomerDemandQty,
+      matchingCoilKg,
+      blockedCoilKg,
+    },
+    openContracts,
+    competingOrders,
+    materialRequirements,
+    scheduleProjection: {
+      partManufacturingLeadTimeDays,
+      criticalMaterialLeadTimeDays,
+      estimatedProductionHours,
+      estimatedProductionDays,
+      totalCumulativeLeadTimeDays,
+      earliestFeasibleDateIso,
+      earliestFeasibleDateFa,
+      targetDueDateIso: input.targetDueDate,
+      daysSlackOrDelay,
+    },
+    warnings,
   };
 }
 

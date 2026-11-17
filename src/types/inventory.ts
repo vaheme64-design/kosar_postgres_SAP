@@ -141,6 +141,7 @@ export interface Part {
   materialGrade?: string;     // گرید فولاد: ST12, ST14, DX51D, ST37
   minStock?: number;          // حداقل موجودی اطمینان
   maxStock?: number;          // حداکثر ظرفیت انبار
+  leadTimeDays?: number;      // زمان انتظار تدارک یا ساخت (روز)
   isPinned?: boolean;         // نشانه‌گذاری قطعه کلیدی / VIP برای کنترل سریع
   isVIP?: boolean;            // وضعیت رسمی قطعه کلیدی (VIP) در کل سیستم
   isDemo?: boolean;

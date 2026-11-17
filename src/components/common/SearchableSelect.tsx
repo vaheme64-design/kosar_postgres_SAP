@@ -22,6 +22,7 @@ interface SearchableSelectProps {
   addNewText?: string;
   allowClear?: boolean;
   required?: boolean;
+  maxRenderedOptions?: number;
 }
 
 export const SearchableSelect: React.FC<SearchableSelectProps> = ({
@@ -36,6 +37,7 @@ export const SearchableSelect: React.FC<SearchableSelectProps> = ({
   addNewText = '+ افزودن مورد جدید',
   allowClear = false,
   required = false,
+  maxRenderedOptions = 80,
 }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
@@ -43,16 +45,26 @@ export const SearchableSelect: React.FC<SearchableSelectProps> = ({
   const containerRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
 
+  const normalizeSearch = (raw: string) =>
+    raw
+      .replace(/[۰-۹]/g, ch => String('۰۱۲۳۴۵۶۷۸۹'.indexOf(ch)))
+      .replace(/[٠-٩]/g, ch => String('٠١٢٣٤٥٦٧٨٩'.indexOf(ch)))
+      .replace(/ي/g, 'ی')
+      .replace(/ك/g, 'ک')
+      .toLowerCase()
+      .trim();
+
   const selectedOption = options.find(o => o.value === value);
 
   const filteredOptions = options.filter(opt => {
     if (!searchTerm.trim()) return true;
-    const term = searchTerm.toLowerCase().trim();
-    const matchLabel = opt.label.toLowerCase().includes(term);
-    const matchSublabel = opt.sublabel?.toLowerCase().includes(term);
-    const matchValue = opt.value.toLowerCase().includes(term);
+    const term = normalizeSearch(searchTerm);
+    const matchLabel = normalizeSearch(opt.label).includes(term);
+    const matchSublabel = opt.sublabel ? normalizeSearch(opt.sublabel).includes(term) : false;
+    const matchValue = normalizeSearch(opt.value).includes(term);
     return matchLabel || matchSublabel || matchValue;
   });
+  const renderedOptions = filteredOptions.slice(0, maxRenderedOptions);
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -97,14 +109,14 @@ export const SearchableSelect: React.FC<SearchableSelectProps> = ({
 
     if (e.key === 'ArrowDown') {
       e.preventDefault();
-      setHighlightedIndex(prev => (prev < filteredOptions.length - 1 ? prev + 1 : 0));
+      setHighlightedIndex(prev => (prev < renderedOptions.length - 1 ? prev + 1 : 0));
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
-      setHighlightedIndex(prev => (prev > 0 ? prev - 1 : filteredOptions.length - 1));
+      setHighlightedIndex(prev => (prev > 0 ? prev - 1 : Math.max(0, renderedOptions.length - 1)));
     } else if (e.key === 'Enter') {
       e.preventDefault();
-      if (filteredOptions[highlightedIndex]) {
-        handleSelect(filteredOptions[highlightedIndex]);
+      if (renderedOptions[highlightedIndex]) {
+        handleSelect(renderedOptions[highlightedIndex]);
       }
     } else if (e.key === 'Escape') {
       e.preventDefault();
@@ -205,48 +217,55 @@ export const SearchableSelect: React.FC<SearchableSelectProps> = ({
 
           {/* Options List */}
           <div className="max-h-56 overflow-y-auto divide-y divide-[#e8e8e8] p-1">
-            {filteredOptions.length === 0 ? (
+            {renderedOptions.length === 0 ? (
               <div className="py-6 text-center text-xs text-[#666666]">
                 موردی با عنوان «{searchTerm}» یافت نشد
               </div>
             ) : (
-              filteredOptions.map((opt, idx) => {
-                const isSelected = opt.value === value;
-                const isHighlighted = idx === highlightedIndex;
+              <>
+                {renderedOptions.map((opt, idx) => {
+                  const isSelected = opt.value === value;
+                  const isHighlighted = idx === highlightedIndex;
 
-                return (
-                  <div
-                    key={opt.value}
-                    onClick={() => handleSelect(opt)}
-                    onMouseEnter={() => setHighlightedIndex(idx)}
-                    className={`flex items-center justify-between gap-2 px-3 py-1.5 rounded text-xs cursor-pointer transition-colors ${
-                      isSelected
-                        ? 'bg-[#e5f3fa] text-[#007cc0] font-bold'
-                        : isHighlighted
-                        ? 'bg-[#f7f7f7] text-[#333333]'
-                        : 'text-[#333333] hover:bg-[#f7f7f7]'
-                    }`}
-                  >
-                    <div className="flex-1 truncate">
-                      <div className="flex items-center gap-1.5 truncate">
-                        <span className="truncate">{opt.label}</span>
-                        {opt.badge && (
-                          <span className="text-[10px] px-1.5 py-0.2 rounded bg-[#f0f0f0] text-[#333333] font-medium">
-                            {opt.badge}
-                          </span>
+                  return (
+                    <div
+                      key={opt.value}
+                      onClick={() => handleSelect(opt)}
+                      onMouseEnter={() => setHighlightedIndex(idx)}
+                      className={`flex items-center justify-between gap-2 px-3 py-1.5 rounded text-xs cursor-pointer transition-colors ${
+                        isSelected
+                          ? 'bg-[#e5f3fa] text-[#007cc0] font-bold'
+                          : isHighlighted
+                          ? 'bg-[#f7f7f7] text-[#333333]'
+                          : 'text-[#333333] hover:bg-[#f7f7f7]'
+                      }`}
+                    >
+                      <div className="flex-1 truncate">
+                        <div className="flex items-center gap-1.5 truncate">
+                          <span className="truncate">{opt.label}</span>
+                          {opt.badge && (
+                            <span className="text-[10px] px-1.5 py-0.2 rounded bg-[#f0f0f0] text-[#333333] font-medium">
+                              {opt.badge}
+                            </span>
+                          )}
+                        </div>
+                        {opt.sublabel && (
+                          <div className="text-[11px] text-[#666666] font-mono mt-0.5 truncate">
+                            {opt.sublabel}
+                          </div>
                         )}
                       </div>
-                      {opt.sublabel && (
-                        <div className="text-[11px] text-[#666666] font-mono mt-0.5 truncate">
-                          {opt.sublabel}
-                        </div>
-                      )}
-                    </div>
 
-                    {isSelected && <Check className="w-4 h-4 text-[#007cc0] shrink-0" />}
+                      {isSelected && <Check className="w-4 h-4 text-[#007cc0] shrink-0" />}
+                    </div>
+                  );
+                })}
+                {filteredOptions.length > renderedOptions.length && (
+                  <div className="px-3 py-1.5 text-[10px] text-[#666666] bg-[#f7f7f7] text-center">
+                    نمایش {renderedOptions.length} مورد اول از {filteredOptions.length} نتیجه — برای دقت بیشتر جستجو کنید
                   </div>
-                );
-              })
+                )}
+              </>
             )}
           </div>
 

@@ -39,6 +39,8 @@ import {
   testSingleDatabaseUrl,
   readDualDbStoredConfig,
   recordDualDbSyncResult,
+  ensurePostgresSchemaReady,
+  isMissingRelationError,
   DbTargetMode,
 } from './db/prisma';
 import { CreateProductionPlanSchema, CreateSapcoReceiptSchema } from './validation/index';
@@ -247,6 +249,7 @@ import {
   evaluateIndustrialScenario,
   executeIndustrialScenario,
   getIndustrialKpiSnapshot,
+  simulateMrpFeasibility,
   ScenarioId,
   SCENARIO_CATALOG,
 } from './industrialScenariosEngine';
@@ -268,16 +271,33 @@ function uniqueParts(parts: Part[]): Part[] {
   return Array.from(map.values());
 }
 
+function uniqueById<T extends { id?: string; code?: string }>(items: T[]): T[] {
+  const map = new Map<string, T>();
+  for (const item of items) {
+    if (!item || typeof item !== 'object') continue;
+    const idKey = (item.id || '').trim();
+    const codeKey = (item.code || '').trim().toUpperCase();
+    const key = idKey || codeKey;
+    if (!key) continue;
+    if (!map.has(key)) {
+      map.set(key, item);
+    } else {
+      map.set(key, { ...map.get(key)!, ...item });
+    }
+  }
+  return Array.from(map.values());
+}
+
 let partsStore: Part[] = uniqueParts([...INITIAL_PARTS]);
-let machinesStore: Machine[] = [...INITIAL_MACHINES];
-let routingsStore: Routing[] = [...INITIAL_ROUTINGS];
-let transactionsStore: InventoryTransaction[] = [...INITIAL_TRANSACTIONS];
-let diesStore: DieMold[] = [...INITIAL_DIES_MOLDS];
-let operatorsStore: Operator[] = [...INITIAL_OPERATORS];
-let hallsStore: FactoryHall[] = [...FACTORY_HALLS];
+let machinesStore: Machine[] = uniqueById([...INITIAL_MACHINES]);
+let routingsStore: Routing[] = uniqueById([...INITIAL_ROUTINGS]);
+let transactionsStore: InventoryTransaction[] = uniqueById([...INITIAL_TRANSACTIONS]);
+let diesStore: DieMold[] = uniqueById([...INITIAL_DIES_MOLDS]);
+let operatorsStore: Operator[] = uniqueById([...INITIAL_OPERATORS]);
+let hallsStore: FactoryHall[] = uniqueById([...FACTORY_HALLS]);
 let processesStore = [...PROCESS_DEFINITIONS];
-let plansStore: ProductionPlan[] = [...INITIAL_PRODUCTION_PLANS];
-let coilsStore: SapcoCoilReceipt[] = [...INITIAL_SAPCO_COILS];
+let plansStore: ProductionPlan[] = uniqueById([...INITIAL_PRODUCTION_PLANS]);
+let coilsStore: SapcoCoilReceipt[] = uniqueById([...INITIAL_SAPCO_COILS]);
 
 // Advanced Inventory Module Stores
 let inventoryDocsStore: InventoryDocument[] = [...INITIAL_INVENTORY_DOCUMENTS];
@@ -499,6 +519,7 @@ let inventoryStateQueue: Promise<unknown> = Promise.resolve();
 export interface PostgresSyncResult {
   attempted: boolean;
   syncedCount: number;
+  skippedMissingSchema?: boolean;
   error?: string;
 }
 
@@ -506,6 +527,10 @@ export async function syncUnitsToPostgres(unitsToSync: UnitDefinition[]): Promis
   if (!isDatabaseUrlConfigured() || !unitsToSync.length) return { attempted: false, syncedCount: 0 };
   let syncedCount = 0;
   try {
+    const schema = await ensurePostgresSchemaReady();
+    if (!schema.ready) {
+      return { attempted: true, syncedCount: 0, skippedMissingSchema: true, error: schema.error };
+    }
     const prisma = getPrismaClient();
     for (const u of unitsToSync) {
       const code = String(u.symbol || 'PCS').trim().toUpperCase();
@@ -532,7 +557,12 @@ export async function syncUnitsToPostgres(unitsToSync: UnitDefinition[]): Promis
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn('[KPIMS Sync] syncUnitsToPostgres warning:', msg);
-    return { attempted: true, syncedCount, error: msg };
+    return {
+      attempted: true,
+      syncedCount,
+      skippedMissingSchema: isMissingRelationError(err),
+      error: msg,
+    };
   }
 }
 
@@ -540,6 +570,10 @@ export async function syncWarehousesToPostgres(warehousesToSync: WarehouseDefini
   if (!isDatabaseUrlConfigured() || !warehousesToSync.length) return { attempted: false, syncedCount: 0 };
   let syncedCount = 0;
   try {
+    const schema = await ensurePostgresSchemaReady();
+    if (!schema.ready) {
+      return { attempted: true, syncedCount: 0, skippedMissingSchema: true, error: schema.error };
+    }
     const prisma = getPrismaClient();
     for (const w of warehousesToSync) {
       const code = String(w.code || w.id || '').trim().toUpperCase();
@@ -583,7 +617,12 @@ export async function syncWarehousesToPostgres(warehousesToSync: WarehouseDefini
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn('[KPIMS Sync] syncWarehousesToPostgres warning:', msg);
-    return { attempted: true, syncedCount, error: msg };
+    return {
+      attempted: true,
+      syncedCount,
+      skippedMissingSchema: isMissingRelationError(err),
+      error: msg,
+    };
   }
 }
 
@@ -591,6 +630,10 @@ export async function syncCustomersToPostgres(customersToSync: CustomerDefinitio
   if (!isDatabaseUrlConfigured() || !customersToSync.length) return { attempted: false, syncedCount: 0 };
   let syncedCount = 0;
   try {
+    const schema = await ensurePostgresSchemaReady();
+    if (!schema.ready) {
+      return { attempted: true, syncedCount: 0, skippedMissingSchema: true, error: schema.error };
+    }
     const prisma = getPrismaClient();
     for (const c of customersToSync) {
       const code = String(c.code || c.id || '').trim().toUpperCase();
@@ -620,7 +663,12 @@ export async function syncCustomersToPostgres(customersToSync: CustomerDefinitio
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn('[KPIMS Sync] syncCustomersToPostgres warning:', msg);
-    return { attempted: true, syncedCount, error: msg };
+    return {
+      attempted: true,
+      syncedCount,
+      skippedMissingSchema: isMissingRelationError(err),
+      error: msg,
+    };
   }
 }
 
@@ -628,8 +676,42 @@ export async function syncPartsToPostgres(partsToSync: Part[]): Promise<Postgres
   if (!isDatabaseUrlConfigured() || !partsToSync.length) return { attempted: false, syncedCount: 0 };
   let syncedCount = 0;
   try {
+    const schema = await ensurePostgresSchemaReady();
+    if (!schema.ready) {
+      return { attempted: true, syncedCount: 0, skippedMissingSchema: true, error: schema.error };
+    }
     const prisma = getPrismaClient();
     await syncUnitsToPostgres(unitsStore);
+
+    // Pre-cache unique UOMs & Materials to avoid N+1 per-row DB roundtrips on 1,461+ parts
+    const uomIdMap = new Map<string, string>();
+    const materialIdMap = new Map<string, string>();
+
+    const existingUoms = await prisma.unitOfMeasure.findMany({ select: { id: true, code: true } });
+    for (const u of existingUoms) {
+      uomIdMap.set(String(u.code).toUpperCase(), u.id);
+    }
+    const existingMaterials = await prisma.material.findMany({ select: { id: true, code: true } });
+    for (const m of existingMaterials) {
+      materialIdMap.set(String(m.code).toUpperCase(), m.id);
+    }
+
+    const preparedRows: Array<{
+      partNumber: string;
+      idCandidate?: string;
+      supplierPartNumber: string | null;
+      name: string;
+      category: any;
+      carModel: string | null;
+      unitId: string;
+      materialId: string | null;
+      thicknessMm: number | null;
+      weightNetKg: number;
+      weightGrossKg: number;
+      minSafetyStock: number;
+      maxStock: number | null;
+      leadTimeDays: number;
+    }> = [];
 
     for (const p of partsToSync) {
       const partNumber = normalizeExcelDigits(p.code);
@@ -637,18 +719,23 @@ export async function syncPartsToPostgres(partsToSync: Part[]): Promise<Postgres
       const normCat = normalizePartCategory(p.category, partNumber);
       const normUom = normalizePartUnit(p.unit, normCat);
 
-      const uomRecord = await prisma.unitOfMeasure.upsert({
-        where: { code: normUom },
-        create: {
-          id: `UNIT-${normUom}`,
-          code: normUom,
-          name: normUom === 'KG' ? 'کیلوگرم' : 'عدد (قطعه)',
-          symbol: normUom,
-          isBase: true,
-          active: true,
-        },
-        update: {},
-      });
+      let uomId = uomIdMap.get(normUom);
+      if (!uomId) {
+        const uomRecord = await prisma.unitOfMeasure.upsert({
+          where: { code: normUom },
+          create: {
+            id: `UNIT-${normUom}`,
+            code: normUom,
+            name: normUom === 'KG' ? 'کیلوگرم' : 'عدد (قطعه)',
+            symbol: normUom,
+            isBase: true,
+            active: true,
+          },
+          update: {},
+        });
+        uomId = uomRecord.id;
+        uomIdMap.set(normUom, uomId);
+      }
 
       let materialId: string | null = null;
       const gradeStr = String(p.materialGrade || '').trim().toUpperCase();
@@ -657,68 +744,108 @@ export async function syncPartsToPostgres(partsToSync: Part[]): Promise<Postgres
         const matCode = cleanedGrade
           ? `MAT-${cleanedGrade}`
           : `MAT-${Buffer.from(gradeStr).toString('hex').slice(0, 12).toUpperCase()}`;
-        const matRecord = await prisma.material.upsert({
-          where: { code: matCode },
-          create: {
-            code: matCode,
-            name: `ورق فولادی گرید ${gradeStr}`,
-            grade: gradeStr,
-            active: true,
-          },
-          update: {
-            grade: gradeStr,
-            active: true,
-          },
-        });
-        materialId = matRecord.id;
+        let cachedMatId = materialIdMap.get(matCode);
+        if (!cachedMatId) {
+          const matRecord = await prisma.material.upsert({
+            where: { code: matCode },
+            create: {
+              code: matCode,
+              name: `ورق فولادی گرید ${gradeStr}`,
+              grade: gradeStr,
+              active: true,
+            },
+            update: {
+              grade: gradeStr,
+              active: true,
+            },
+          });
+          cachedMatId = matRecord.id;
+          materialIdMap.set(matCode, cachedMatId);
+        }
+        materialId = cachedMatId;
       }
 
       const weightVal = Math.max(0.0001, parseExcelNumber(p.weightPerUnitKg, 1));
       const minSafetyStock = Math.max(0, parseExcelNumber(p.minStock, 0));
       const maxStockVal = p.maxStock != null && Number(p.maxStock) > 0 ? parseExcelNumber(p.maxStock, 0) : null;
       const thicknessVal = p.thicknessMm != null && Number(p.thicknessMm) > 0 ? parseExcelNumber(p.thicknessMm, 0) : null;
+      const leadTimeVal = Math.max(1, Math.round(Number(p.leadTimeDays) || 1));
 
-      await prisma.part.upsert({
-        where: { partNumber },
-        create: {
-          id: p.id && !p.id.startsWith('PRT-IMP-') ? p.id : undefined,
-          partNumber,
-          supplierPartNumber: p.sapcoCode ? String(p.sapcoCode).trim() : null,
-          name: String(p.name).trim(),
-          category: normCat as any,
-          carModel: p.carModel ? String(p.carModel).trim() : null,
-          unitId: uomRecord.id,
-          materialId,
-          thicknessMm: thicknessVal,
-          weightNetKg: weightVal,
-          weightGrossKg: weightVal,
-          scrapNormPercent: 0,
-          minSafetyStock,
-          maxStock: maxStockVal,
-          active: true,
-        },
-        update: {
-          supplierPartNumber: p.sapcoCode ? String(p.sapcoCode).trim() : null,
-          name: String(p.name).trim(),
-          category: normCat as any,
-          carModel: p.carModel ? String(p.carModel).trim() : null,
-          unitId: uomRecord.id,
-          materialId,
-          thicknessMm: thicknessVal,
-          weightNetKg: weightVal,
-          weightGrossKg: weightVal,
-          minSafetyStock,
-          maxStock: maxStockVal,
-          active: true,
-        },
+      preparedRows.push({
+        partNumber,
+        idCandidate: p.id && !p.id.startsWith('PRT-IMP-') ? p.id : undefined,
+        supplierPartNumber: p.sapcoCode ? String(p.sapcoCode).trim() : null,
+        name: String(p.name).trim(),
+        category: normCat as any,
+        carModel: p.carModel ? String(p.carModel).trim() : null,
+        unitId: uomId,
+        materialId,
+        thicknessMm: thicknessVal,
+        weightNetKg: weightVal,
+        weightGrossKg: weightVal,
+        minSafetyStock,
+        maxStock: maxStockVal,
+        leadTimeDays: leadTimeVal,
       });
-      syncedCount++;
     }
+
+    // Batch upsert parts in chunks of 50 inside transactions for fast 1,461+ row sync
+    const CHUNK_SIZE = 50;
+    for (let i = 0; i < preparedRows.length; i += CHUNK_SIZE) {
+      const chunk = preparedRows.slice(i, i + CHUNK_SIZE);
+      await prisma.$transaction(
+        chunk.map(row =>
+          prisma.part.upsert({
+            where: { partNumber: row.partNumber },
+            create: {
+              id: row.idCandidate,
+              partNumber: row.partNumber,
+              supplierPartNumber: row.supplierPartNumber,
+              name: row.name,
+              category: row.category,
+              carModel: row.carModel,
+              unitId: row.unitId,
+              materialId: row.materialId,
+              thicknessMm: row.thicknessMm,
+              weightNetKg: row.weightNetKg,
+              weightGrossKg: row.weightGrossKg,
+              scrapNormPercent: 0,
+              minSafetyStock: row.minSafetyStock,
+              maxStock: row.maxStock,
+              leadTimeDays: row.leadTimeDays,
+              active: true,
+            },
+            update: {
+              supplierPartNumber: row.supplierPartNumber,
+              name: row.name,
+              category: row.category,
+              carModel: row.carModel,
+              unitId: row.unitId,
+              materialId: row.materialId,
+              thicknessMm: row.thicknessMm,
+              weightNetKg: row.weightNetKg,
+              weightGrossKg: row.weightGrossKg,
+              minSafetyStock: row.minSafetyStock,
+              maxStock: row.maxStock,
+              leadTimeDays: row.leadTimeDays,
+              active: true,
+            },
+          }),
+        ),
+      );
+      syncedCount += chunk.length;
+    }
+
     return { attempted: true, syncedCount };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn('[KPIMS Sync] syncPartsToPostgres warning:', msg);
-    return { attempted: true, syncedCount, error: msg };
+    return {
+      attempted: true,
+      syncedCount,
+      skippedMissingSchema: isMissingRelationError(err),
+      error: msg,
+    };
   }
 }
 
@@ -726,6 +853,10 @@ export async function syncContractsToPostgres(contractsToSync: SapcoContract[]):
   if (!isDatabaseUrlConfigured() || !contractsToSync.length) return { attempted: false, syncedCount: 0 };
   let syncedCount = 0;
   try {
+    const schema = await ensurePostgresSchemaReady();
+    if (!schema.ready) {
+      return { attempted: true, syncedCount: 0, skippedMissingSchema: true, error: schema.error };
+    }
     const prisma = getPrismaClient();
     await syncCustomersToPostgres(customersStore);
     for (const c of contractsToSync) {
@@ -775,7 +906,12 @@ export async function syncContractsToPostgres(contractsToSync: SapcoContract[]):
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn('[KPIMS Sync] syncContractsToPostgres warning:', msg);
-    return { attempted: true, syncedCount, error: msg };
+    return {
+      attempted: true,
+      syncedCount,
+      skippedMissingSchema: isMissingRelationError(err),
+      error: msg,
+    };
   }
 }
 
@@ -783,6 +919,10 @@ export async function syncCoilsToPostgres(coilsToSync: PhysicalCoil[]): Promise<
   if (!isDatabaseUrlConfigured() || !coilsToSync.length) return { attempted: false, syncedCount: 0 };
   let syncedCount = 0;
   try {
+    const schema = await ensurePostgresSchemaReady();
+    if (!schema.ready) {
+      return { attempted: true, syncedCount: 0, skippedMissingSchema: true, error: schema.error };
+    }
     const prisma = getPrismaClient();
     await syncWarehousesToPostgres(warehousesStore);
     for (const c of coilsToSync) {
@@ -841,7 +981,12 @@ export async function syncCoilsToPostgres(coilsToSync: PhysicalCoil[]): Promise<
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn('[KPIMS Sync] syncCoilsToPostgres warning:', msg);
-    return { attempted: true, syncedCount, error: msg };
+    return {
+      attempted: true,
+      syncedCount,
+      skippedMissingSchema: isMissingRelationError(err),
+      error: msg,
+    };
   }
 }
 
@@ -890,19 +1035,19 @@ function applyHydratedInventoryPayload(payload: any): void {
     customersStore = payload.customers;
   }
   if (Array.isArray(payload.machines) && payload.machines.length > 0) {
-    machinesStore = payload.machines;
+    machinesStore = uniqueById(payload.machines);
   }
   if (Array.isArray(payload.routings) && payload.routings.length > 0) {
-    routingsStore = payload.routings;
+    routingsStore = uniqueById(payload.routings);
   }
   if (Array.isArray(payload.dies) && payload.dies.length > 0) {
-    diesStore = payload.dies;
+    diesStore = uniqueById(payload.dies);
   }
   if (Array.isArray(payload.operators) && payload.operators.length > 0) {
-    operatorsStore = payload.operators;
+    operatorsStore = uniqueById(payload.operators);
   }
   if (Array.isArray(payload.halls) && payload.halls.length > 0) {
-    hallsStore = payload.halls;
+    hallsStore = uniqueById(payload.halls);
   }
   if (Array.isArray(payload.processes) && payload.processes.length > 0) {
     processesStore = payload.processes;
@@ -920,10 +1065,10 @@ function applyHydratedInventoryPayload(payload: any): void {
     operationsStore = payload.operations;
   }
   if (Array.isArray(payload.plans)) {
-    plansStore = payload.plans;
+    plansStore = uniqueById(payload.plans);
   }
   if (Array.isArray(payload.coils)) {
-    coilsStore = payload.coils;
+    coilsStore = uniqueById(payload.coils);
   }
   if (Array.isArray(payload.advancedBoms) && payload.advancedBoms.length > 0) {
     setAllBoms(payload.advancedBoms);
@@ -1098,14 +1243,14 @@ export async function loadInventoryAppState(): Promise<void> {
       where: { active: true },
       include: { unit: true, material: true },
       orderBy: { partNumber: 'asc' },
-    });
+    }).catch(() => [] as any[]);
     if (dbParts.length === 0 && partsStore.length > 0) {
       await syncPartsToPostgres(partsStore);
       dbParts = await prisma.part.findMany({
         where: { active: true },
         include: { unit: true, material: true },
         orderBy: { partNumber: 'asc' },
-      });
+      }).catch(() => [] as any[]);
     }
     if (dbParts.length > 0) {
       const existingByCode = new Map(partsStore.map(p => [p.code.toUpperCase(), p]));
@@ -1126,6 +1271,7 @@ export async function loadInventoryAppState(): Promise<void> {
           materialGrade: dbPart.material?.grade || template?.materialGrade || undefined,
           minStock: Number(dbPart.minSafetyStock) || template?.minStock || 0,
           maxStock: dbPart.maxStock == null ? template?.maxStock : Number(dbPart.maxStock),
+          leadTimeDays: dbPart.leadTimeDays ?? template?.leadTimeDays,
           isVIP: vip,
           isPinned: vip,
           isDemo: false,
@@ -1443,6 +1589,12 @@ function assertAuthorizedRole(
 }
 
 function syncErpRuntimeStores() {
+  partsStore = uniqueParts(partsStore);
+  machinesStore = uniqueById(machinesStore);
+  routingsStore = uniqueById(routingsStore);
+  diesStore = uniqueById(diesStore);
+  coilsStore = uniqueById(coilsStore);
+
   if (INITIAL_PARTS !== partsStore) {
     INITIAL_PARTS.splice(0, INITIAL_PARTS.length, ...partsStore);
   }
@@ -1894,6 +2046,7 @@ apiRouter.delete('/parts/:id', async (req: Request, res: Response) => {
  * 6. Machines Endpoints
  */
 apiRouter.get('/machines', (_req: Request, res: Response) => {
+  machinesStore = uniqueById(machinesStore);
   res.json({ success: true, count: machinesStore.length, data: machinesStore });
 });
 
@@ -2838,13 +2991,13 @@ apiRouter.post('/demo-data/seed', async (req: Request, res: Response) => {
   const realOps = operatorsStore.filter(o => !o.isDemo);
 
   partsStore = uniqueParts([...realParts, ...INITIAL_PARTS]);
-  machinesStore = [...realMachines, ...INITIAL_MACHINES];
-  routingsStore = [...realRoutings, ...INITIAL_ROUTINGS];
-  transactionsStore = [...realTx, ...INITIAL_TRANSACTIONS];
-  diesStore = [...realDies, ...INITIAL_DIES_MOLDS];
-  operatorsStore = [...realOps, ...INITIAL_OPERATORS];
-  plansStore = [...INITIAL_PRODUCTION_PLANS];
-  coilsStore = [...INITIAL_SAPCO_COILS];
+  machinesStore = uniqueById([...realMachines, ...INITIAL_MACHINES]);
+  routingsStore = uniqueById([...realRoutings, ...INITIAL_ROUTINGS]);
+  transactionsStore = uniqueById([...realTx, ...INITIAL_TRANSACTIONS]);
+  diesStore = uniqueById([...realDies, ...INITIAL_DIES_MOLDS]);
+  operatorsStore = uniqueById([...realOps, ...INITIAL_OPERATORS]);
+  plansStore = uniqueById([...INITIAL_PRODUCTION_PLANS]);
+  coilsStore = uniqueById([...INITIAL_SAPCO_COILS]);
   physicalCoilsStore.length = 0;
   physicalCoilsStore.push(...INITIAL_PHYSICAL_COILS);
   inventoryDocsStore.length = 0;
@@ -8409,6 +8562,7 @@ apiRouter.post('/inventory/import/create-missing-master-data', async (req: Reque
           sapcoCode: extracted.sapcoCode,
           minStock: extracted.minStock || 0,
           maxStock: extracted.maxStock,
+          leadTimeDays: extracted.leadTimeDays,
           isDemo: false,
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
@@ -8476,15 +8630,20 @@ apiRouter.post('/inventory/import/create-missing-master-data', async (req: Reque
     }
 
     const pgErrors: string[] = [];
-    const uRes = await syncUnitsToPostgres(unitsStore);
-    if (uRes.attempted && uRes.error) pgErrors.push(uRes.error);
-    const wRes = await syncWarehousesToPostgres(warehousesStore);
-    if (wRes.attempted && wRes.error) pgErrors.push(wRes.error);
-    const cRes = await syncCustomersToPostgres(customersStore);
-    if (cRes.attempted && cRes.error) pgErrors.push(cRes.error);
+    const schemaWarnings: string[] = [];
+    const collectSyncRes = (syncRes: PostgresSyncResult) => {
+      if (!syncRes.attempted) return;
+      if (syncRes.skippedMissingSchema) {
+        if (syncRes.error) schemaWarnings.push(syncRes.error);
+      } else if (syncRes.error) {
+        pgErrors.push(syncRes.error);
+      }
+    };
+    collectSyncRes(await syncUnitsToPostgres(unitsStore));
+    collectSyncRes(await syncWarehousesToPostgres(warehousesStore));
+    collectSyncRes(await syncCustomersToPostgres(customersStore));
     if (syncedParts.length > 0) {
-      const pRes = await syncPartsToPostgres(syncedParts);
-      if (pRes.attempted && pRes.error) pgErrors.push(pRes.error);
+      collectSyncRes(await syncPartsToPostgres(syncedParts));
     }
     if (pgErrors.length > 0) {
       return res.status(500).json({
@@ -8492,10 +8651,10 @@ apiRouter.post('/inventory/import/create-missing-master-data', async (req: Reque
         error: `خطا در ذخیره‌سازی اطلاعات پایه در PostgreSQL: ${pgErrors.join(' | ')}`,
       });
     }
-    if (isDatabaseUrlConfigured() && openingDocsToPersistInDb.length > 0) {
+    if (isDatabaseUrlConfigured() && openingDocsToPersistInDb.length > 0 && schemaWarnings.length === 0) {
       for (const docToDb of openingDocsToPersistInDb) {
         const dbDocRes = await postDocumentInDbTransaction(docToDb, { uid: 'USR-AUTO-IMPORT', displayName: 'ورود خودکار اکسل' });
-        if (!dbDocRes.success) {
+        if (!dbDocRes.success && !isMissingRelationError(dbDocRes.error)) {
           return res.status(500).json({
             success: false,
             error: dbDocRes.error || 'خطا در ثبت سند اول دوره در PostgreSQL',
@@ -8504,7 +8663,8 @@ apiRouter.post('/inventory/import/create-missing-master-data', async (req: Reque
       }
     }
     await persistInventoryAppState();
-    const persistedTarget = isDatabaseUrlConfigured() ? 'POSTGRESQL' : 'HYBRID_DURABLE_DISK';
+    const persistedTarget =
+      isDatabaseUrlConfigured() && schemaWarnings.length === 0 ? 'POSTGRESQL' : 'HYBRID_DURABLE_DISK';
 
     res.json({
       success: true,
@@ -8705,6 +8865,9 @@ apiRouter.post('/inventory/import/confirm', async (req: Request, res: Response) 
     const openingDocsToPersistInDb: InventoryDocument[] = [];
     const pgErrors: string[] = [];
 
+    const partsByCodeLower = new Map<string, number>();
+    partsStore.forEach((p, idx) => partsByCodeLower.set(p.code.toLowerCase(), idx));
+
     if (bTypeUpper === 'PARTS' || bTypeUpper === 'ITEMS' || bTypeUpper === 'ITEM_MASTER') {
       for (const row of validRowsToImport) {
         const extracted = extractPartRowFields(row);
@@ -8720,11 +8883,12 @@ apiRouter.post('/inventory/import/confirm', async (req: Request, res: Response) 
           sapcoCode,
           minStock,
           maxStock,
+          leadTimeDays,
           openingQty,
         } = extracted;
         if (!code || !name) continue;
 
-        const existingIdx = partsStore.findIndex(p => p.code.toLowerCase() === code.toLowerCase());
+        const existingIdx = partsByCodeLower.get(code.toLowerCase()) ?? -1;
         const nowIso = new Date().toISOString();
 
         const newPart: Part = {
@@ -8740,6 +8904,7 @@ apiRouter.post('/inventory/import/confirm', async (req: Request, res: Response) 
           sapcoCode: sapcoCode ?? (existingIdx >= 0 ? partsStore[existingIdx].sapcoCode : undefined),
           minStock: minStock || (existingIdx >= 0 ? partsStore[existingIdx].minStock : 0),
           maxStock: maxStock ?? (existingIdx >= 0 ? partsStore[existingIdx].maxStock : undefined),
+          leadTimeDays: leadTimeDays ?? (existingIdx >= 0 ? partsStore[existingIdx].leadTimeDays : undefined),
           isDemo: false,
           createdAt: existingIdx >= 0 ? partsStore[existingIdx].createdAt : nowIso,
           updatedAt: nowIso,
@@ -8749,7 +8914,8 @@ apiRouter.post('/inventory/import/confirm', async (req: Request, res: Response) 
           partsStore[existingIdx] = { ...partsStore[existingIdx], ...newPart };
           partsToPersistInDb.push(partsStore[existingIdx]);
         } else {
-          partsStore.unshift(newPart);
+          partsStore.push(newPart);
+          partsByCodeLower.set(code.toLowerCase(), partsStore.length - 1);
           partsToPersistInDb.push(newPart);
         }
 
@@ -9031,17 +9197,24 @@ apiRouter.post('/inventory/import/confirm', async (req: Request, res: Response) 
       }
     }
 
+    const schemaWarnings: string[] = [];
+    const handlePgSyncResult = (syncRes: PostgresSyncResult) => {
+      if (!syncRes.attempted) return;
+      if (syncRes.skippedMissingSchema) {
+        if (syncRes.error) schemaWarnings.push(syncRes.error);
+      } else if (syncRes.error) {
+        pgErrors.push(syncRes.error);
+      }
+    };
+
     if (partsToPersistInDb.length > 0) {
-      const pRes = await syncPartsToPostgres(partsToPersistInDb);
-      if (pRes.attempted && pRes.error) pgErrors.push(pRes.error);
+      handlePgSyncResult(await syncPartsToPostgres(partsToPersistInDb));
     }
     if (contractsToPersistInDb.length > 0) {
-      const cRes = await syncContractsToPostgres(contractsToPersistInDb);
-      if (cRes.attempted && cRes.error) pgErrors.push(cRes.error);
+      handlePgSyncResult(await syncContractsToPostgres(contractsToPersistInDb));
     }
     if (coilsToPersistInDb.length > 0) {
-      const coilRes = await syncCoilsToPostgres(coilsToPersistInDb);
-      if (coilRes.attempted && coilRes.error) pgErrors.push(coilRes.error);
+      handlePgSyncResult(await syncCoilsToPostgres(coilsToPersistInDb));
     }
     if (pgErrors.length > 0) {
       return res.status(500).json({
@@ -9049,11 +9222,11 @@ apiRouter.post('/inventory/import/confirm', async (req: Request, res: Response) 
         error: `خطا در همگام‌سازی فایل اکسل با پایگاه داده اصلی PostgreSQL: ${pgErrors.join(' | ')}`,
       });
     }
-    if (isDatabaseUrlConfigured() && openingDocsToPersistInDb.length > 0) {
+    if (isDatabaseUrlConfigured() && openingDocsToPersistInDb.length > 0 && schemaWarnings.length === 0) {
       const postUser = { uid: user?.uid || 'USR-OP', displayName: user?.displayName || 'مدیر انبار' };
       for (const openDoc of openingDocsToPersistInDb) {
         const dbDocRes = await postDocumentInDbTransaction(openDoc, postUser);
-        if (!dbDocRes.success) {
+        if (!dbDocRes.success && !isMissingRelationError(dbDocRes.error)) {
           return res.status(500).json({
             success: false,
             error: dbDocRes.error || 'خطا در ثبت سند موجودی اول دوره در PostgreSQL',
@@ -9077,16 +9250,20 @@ apiRouter.post('/inventory/import/confirm', async (req: Request, res: Response) 
     };
 
     importBatchesStore.unshift(batchSummary);
-    const pgActive = isDatabaseUrlConfigured();
+    const pgActive = isDatabaseUrlConfigured() && schemaWarnings.length === 0;
     const persistedTarget = pgActive ? 'POSTGRESQL' : 'HYBRID_DURABLE_DISK';
     const invalidNote = validation.invalidRows.length > 0 ? ` (${validation.invalidRows.length} ردیف دارای خطا نادیده گرفته شد)` : '';
+    const schemaNote =
+      schemaWarnings.length > 0
+        ? ' (توجه: جداول رابطه‌ای PostgreSQL هنوز ایجاد نشده‌اند؛ داده‌ها به‌طور کامل در اسنپ‌شات سرور و دیسک پایدار ذخیره شدند.)'
+        : '';
 
     res.status(201).json({
       success: true,
       persistedTarget,
       message: pgActive
         ? `تعداد ${importedCount} ردیف با موفقیت در پایگاه داده اصلی (PostgreSQL) و کاتالوگ سیستم ثبت شد.${invalidNote}`
-        : `تعداد ${importedCount} ردیف با موفقیت در پایگاه داده پایدار محلی (Durable Disk Storage) و کاتالوگ سیستم ثبت شد. (توجه: اتصال پایگاه داده ابری PostgreSQL در دسترس نیست؛ داده‌ها روی دیسک پایدار سرور ذخیره شدند.)${invalidNote}`,
+        : `تعداد ${importedCount} ردیف با موفقیت در پایگاه داده پایدار سرور و کاتالوگ سیستم ثبت شد.${schemaNote}${invalidNote}`,
       batch: batchSummary,
       parts: partsStore,
       partsCount: partsStore.length,
@@ -9848,6 +10025,26 @@ apiRouter.post('/scenarios/evaluate', (req: Request, res: Response) => {
     res.status(500).json({
       success: false,
       error: error instanceof Error ? error.message : 'خطا در ارزیابی سناریو',
+    });
+  }
+});
+
+apiRouter.post('/scenarios/mrp-feasibility', (req: Request, res: Response) => {
+  try {
+    const data = simulateMrpFeasibility(
+      {
+        partIdOrCode: req.body?.partIdOrCode,
+        proposedQty: Number(req.body?.proposedQty) || 5000,
+        targetDueDate: req.body?.targetDueDate ? String(req.body.targetDueDate) : undefined,
+        deductExistingFgAndWip: req.body?.deductExistingFgAndWip !== false,
+      },
+      getScenarioStores(),
+    );
+    res.json({ success: true, data });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'خطا در اجرای شبیه‌ساز امکان‌سنجی MRP',
     });
   }
 });

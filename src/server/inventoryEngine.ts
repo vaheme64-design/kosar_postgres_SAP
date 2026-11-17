@@ -1744,6 +1744,13 @@ export function extractPartRowFields(row: Record<string, any>) {
     'حداکثر ظرفیت',
     'حداکثر موجودی',
   ]);
+  const leadTimeRaw = getRowFieldByAliases(row, [
+    'leadTimeDays',
+    'leadTime',
+    'زمان انتظار (روز)',
+    'زمان انتظار',
+    'مدت تامین',
+  ]);
   const openingQtyRaw = getRowFieldByAliases(row, [
     'quantity',
     'openingBalance',
@@ -1769,6 +1776,8 @@ export function extractPartRowFields(row: Record<string, any>) {
   const minStock = parseExcelNumber(minStockRaw, 0);
   const maxStockParsed = parseExcelNumber(maxStockRaw, NaN);
   const maxStock = Number.isFinite(maxStockParsed) && maxStockParsed > 0 ? maxStockParsed : undefined;
+  const leadTimeParsed = parseExcelNumber(leadTimeRaw, NaN);
+  const leadTimeDays = Number.isFinite(leadTimeParsed) && leadTimeParsed >= 1 ? Math.round(leadTimeParsed) : undefined;
   const openingQty = parseExcelNumber(openingQtyRaw, 0);
 
   return {
@@ -1783,6 +1792,7 @@ export function extractPartRowFields(row: Record<string, any>) {
     sapcoCode,
     minStock,
     maxStock,
+    leadTimeDays,
     openingQty,
   };
 }

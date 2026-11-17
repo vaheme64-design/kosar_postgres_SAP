@@ -222,31 +222,50 @@ function AppContent() {
         fetch('/api/sapco/coils').then(r => r.json()).catch(() => ({ success: false })),
       ]);
 
+      const uniqueById = <T extends { id?: string }>(items: T[]): T[] => {
+        if (!Array.isArray(items)) return [];
+        const map = new Map<string, T>();
+        for (const item of items) {
+          const key = (item?.id || '').trim();
+          if (key) map.set(key, item);
+        }
+        return Array.from(map.values());
+      };
+
+      const cleanParts = partsRes.success ? uniqueById<Part>(partsRes.data) : undefined;
+      const cleanMachines = machinesRes.success ? uniqueById<Machine>(machinesRes.data) : undefined;
+      const cleanRoutings = routingsRes.success ? uniqueById<Routing>(routingsRes.data) : undefined;
+      const cleanDies = diesRes.success ? uniqueById<DieMold>(diesRes.data) : undefined;
+      const cleanOps = opsRes.success ? uniqueById<Operator>(opsRes.data) : undefined;
+      const cleanHalls = hallsRes.success ? uniqueById<FactoryHall>(hallsRes.data) : undefined;
+      const cleanPlans = plansRes.success ? uniqueById<ProductionPlan>(plansRes.data) : undefined;
+      const cleanCoils = coilsRes.success ? uniqueById<SapcoCoilReceipt>(coilsRes.data) : undefined;
+
       if (sumRes.success) setSummary(sumRes.data);
-      if (txRes.success) setTransactions(txRes.data);
-      if (partsRes.success) setParts(partsRes.data);
-      if (machinesRes.success) setMachines(machinesRes.data);
-      if (routingsRes.success) setRoutings(routingsRes.data);
-      if (diesRes.success) setDies(diesRes.data);
-      if (opsRes.success) setOperators(opsRes.data);
-      if (hallsRes.success) setHalls(hallsRes.data);
-      if (plansRes.success) setPlans(plansRes.data);
-      if (coilsRes.success) setCoils(coilsRes.data);
+      if (txRes.success) setTransactions(uniqueById(txRes.data));
+      if (cleanParts) setParts(cleanParts);
+      if (cleanMachines) setMachines(cleanMachines);
+      if (cleanRoutings) setRoutings(cleanRoutings);
+      if (cleanDies) setDies(cleanDies);
+      if (cleanOps) setOperators(cleanOps);
+      if (cleanHalls) setHalls(cleanHalls);
+      if (cleanPlans) setPlans(cleanPlans);
+      if (cleanCoils) setCoils(cleanCoils);
 
       try {
         localStorage.setItem(
           'kpims_offline_erp_snapshot',
           JSON.stringify({
             summary: sumRes.data,
-            transactions: txRes.data,
-            parts: partsRes.data,
-            machines: machinesRes.data,
-            routings: routingsRes.data,
-            dies: diesRes.data,
-            operators: opsRes.data,
-            halls: hallsRes.data,
-            plans: plansRes.data,
-            coils: coilsRes.data,
+            transactions: txRes.success ? uniqueById(txRes.data) : txRes.data,
+            parts: cleanParts || partsRes.data,
+            machines: cleanMachines || machinesRes.data,
+            routings: cleanRoutings || routingsRes.data,
+            dies: cleanDies || diesRes.data,
+            operators: cleanOps || opsRes.data,
+            halls: cleanHalls || hallsRes.data,
+            plans: cleanPlans || plansRes.data,
+            coils: cleanCoils || coilsRes.data,
           })
         );
       } catch {
@@ -257,17 +276,25 @@ function AppContent() {
       try {
         const cached = localStorage.getItem('kpims_offline_erp_snapshot');
         if (cached) {
+          const dedup = <T extends { id?: string }>(arr: T[]) => {
+            const map = new Map<string, T>();
+            for (const x of arr || []) {
+              const k = (x?.id || '').trim();
+              if (k) map.set(k, x);
+            }
+            return Array.from(map.values());
+          };
           const snap = JSON.parse(cached);
           if (snap.summary) setSummary(snap.summary);
-          if (snap.transactions) setTransactions(snap.transactions);
-          if (snap.parts) setParts(snap.parts);
-          if (snap.machines) setMachines(snap.machines);
-          if (snap.routings) setRoutings(snap.routings);
-          if (snap.dies) setDies(snap.dies);
-          if (snap.operators) setOperators(snap.operators);
-          if (snap.halls) setHalls(snap.halls);
-          if (snap.plans) setPlans(snap.plans);
-          if (snap.coils) setCoils(snap.coils);
+          if (snap.transactions) setTransactions(dedup(snap.transactions));
+          if (snap.parts) setParts(dedup(snap.parts));
+          if (snap.machines) setMachines(dedup(snap.machines));
+          if (snap.routings) setRoutings(dedup(snap.routings));
+          if (snap.dies) setDies(dedup(snap.dies));
+          if (snap.operators) setOperators(dedup(snap.operators));
+          if (snap.halls) setHalls(dedup(snap.halls));
+          if (snap.plans) setPlans(dedup(snap.plans));
+          if (snap.coils) setCoils(dedup(snap.coils));
         }
       } catch {
         // ignore
