@@ -155,6 +155,16 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
       }
       setDbFeedback({ ok: true, text: json.message || 'تنظیمات دو پایگاه داده با موفقیت ذخیره شد.' });
       await fetchDbStatus(false);
+      if (onCheckCloudUpdates) {
+        onCheckCloudUpdates(true).catch(() => {});
+      } else {
+        fetch('/api/db/sync/check?force=true')
+          .then(r => r.json())
+          .then(chk => {
+            if (chk?.success && chk.data) setLocalCheckOverride(chk.data);
+          })
+          .catch(() => {});
+      }
     } catch (err) {
       setDbFeedback({
         ok: false,
@@ -176,8 +186,14 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
       });
       const json = await res.json();
       const result = { ok: Boolean(json.success), message: json.message || json.error || 'نتیجه نامشخص' };
-      if (target === 'LOCAL') setLocalTestResult(result);
-      else setCloudTestResult(result);
+      if (target === 'LOCAL') {
+        setLocalTestResult(result);
+      } else {
+        setCloudTestResult(result);
+        if (result.ok) {
+          onCheckCloudUpdates?.(true);
+        }
+      }
     } catch (err) {
       const result = { ok: false, message: err instanceof Error ? err.message : 'خطا در تست اتصال' };
       if (target === 'LOCAL') setLocalTestResult(result);

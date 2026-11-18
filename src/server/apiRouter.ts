@@ -3267,7 +3267,7 @@ async function evaluateCloudSyncStatus(force = false): Promise<CloudSyncCheckRes
   const autoCheckEnabled = Boolean(refreshedCfg.autoCheckCloudUpdates);
   const checkIntervalSec = refreshedCfg.cloudCheckIntervalSec || 120;
 
-  const remote = await fetchCloudSyncManifestLightweight(force, 2800);
+  const remote = await fetchCloudSyncManifestLightweight(force, force ? 12_000 : 6000);
   if (!remote.cloudConfigured) {
     return {
       state: 'CLOUD_NOT_CONFIGURED',
@@ -3404,7 +3404,10 @@ async function writeFullSnapshotBundleToPgUrl(
   manifest: CloudSyncManifest,
   alsoSyncRelationalParts = true,
 ): Promise<{ relationalPartsSynced: number }> {
-  return withScopedPgClient(targetUrl, 25_000, async (client, enrichedUrl) => {
+  return withScopedPgClient(
+    targetUrl,
+    30_000,
+    async (client, enrichedUrl) => {
     const schemaReady = await ensureTargetFullSchemaBestEffort(client, enrichedUrl);
     await ensureTargetSnapshotTables(client);
 
@@ -3506,7 +3509,8 @@ async function writeFullSnapshotBundleToPgUrl(
     }
 
     return { relationalPartsSynced };
-  });
+  },
+  { skipWireProbe: true });
 }
 
 // Lightweight Git-like Update Checker (zero heavy payload transfer)
@@ -3540,7 +3544,7 @@ apiRouter.post('/db/sync/push', async (req: Request, res: Response) => {
         : cfg.deviceLabel || getDefaultDeviceLabel();
 
     const localInfo = computeLocalSyncSnapshotInfo();
-    const currentRemote = await fetchCloudSyncManifestLightweight(true, 3000);
+    const currentRemote = await fetchCloudSyncManifestLightweight(true, 12_000);
     if (!currentRemote.cloudReachable) {
       return res.status(503).json({
         success: false,
@@ -3606,45 +3610,50 @@ apiRouter.post('/db/sync/pull', async (_req: Request, res: Response) => {
       });
     }
 
-    const pulled = await withScopedPgClient(cfg.cloudDbUrl, 25_000, async client => {
-      const regRows = (await client.$queryRawUnsafe(
-        `SELECT to_regclass('public.inventory_app_state_snapshots')::text AS snap, to_regclass('public.wip_state_snapshots')::text AS wip`,
-      )) as Array<{ snap: string | null; wip: string | null }>;
-      if (!regRows?.[0]?.snap) {
-        return null;
-      }
+    const pulled = await withScopedPgClient(
+      cfg.cloudDbUrl,
+      30_000,
+      async client => {
+        const regRows = (await client.$queryRawUnsafe(
+          `SELECT to_regclass('public.inventory_app_state_snapshots')::text AS snap, to_regclass('public.wip_state_snapshots')::text AS wip`,
+        )) as Array<{ snap: string | null; wip: string | null }>;
+        if (!regRows?.[0]?.snap) {
+          return null;
+        }
 
-      const invRows = (await client.$queryRawUnsafe(
-        `SELECT "payload", "updatedAt" FROM "inventory_app_state_snapshots" WHERE "id" = $1 LIMIT 1`,
-        INVENTORY_APP_SNAPSHOT_ID,
-      )) as Array<{ payload: any; updatedAt: Date | string }>;
+        const invRows = (await client.$queryRawUnsafe(
+          `SELECT "payload", "updatedAt" FROM "inventory_app_state_snapshots" WHERE "id" = $1 LIMIT 1`,
+          INVENTORY_APP_SNAPSHOT_ID,
+        )) as Array<{ payload: any; updatedAt: Date | string }>;
 
-      const manifestRows = (await client.$queryRawUnsafe(
-        `SELECT "payload", "updatedAt" FROM "inventory_app_state_snapshots" WHERE "id" = $1 LIMIT 1`,
-        CLOUD_SYNC_MANIFEST_ID,
-      )) as Array<{ payload: any; updatedAt: Date | string }>;
+        const manifestRows = (await client.$queryRawUnsafe(
+          `SELECT "payload", "updatedAt" FROM "inventory_app_state_snapshots" WHERE "id" = $1 LIMIT 1`,
+          CLOUD_SYNC_MANIFEST_ID,
+        )) as Array<{ payload: any; updatedAt: Date | string }>;
 
-      let wipRows: Array<{ payload: any; version: number }> = [];
-      if (regRows?.[0]?.wip) {
-        wipRows = (await client.$queryRawUnsafe(
-          `SELECT "payload", "version" FROM "wip_state_snapshots" WHERE "id" = $1 LIMIT 1`,
-          'production-wip-state',
-        )) as Array<{ payload: any; version: number }>;
-      }
+        let wipRows: Array<{ payload: any; version: number }> = [];
+        if (regRows?.[0]?.wip) {
+          wipRows = (await client.$queryRawUnsafe(
+            `SELECT "payload", "version" FROM "wip_state_snapshots" WHERE "id" = $1 LIMIT 1`,
+            'production-wip-state',
+          )) as Array<{ payload: any; version: number }>;
+        }
 
-      const parseJson = (val: any) => (typeof val === 'string' ? JSON.parse(val) : val);
-      const invPayload = invRows?.[0]?.payload ? parseJson(invRows[0].payload) : null;
-      const wipPayload = wipRows?.[0]?.payload ? parseJson(wipRows[0].payload) : null;
-      const manifestPayload = manifestRows?.[0]?.payload ? (parseJson(manifestRows[0].payload) as CloudSyncManifest) : null;
+        const parseJson = (val: any) => (typeof val === 'string' ? JSON.parse(val) : val);
+        const invPayload = invRows?.[0]?.payload ? parseJson(invRows[0].payload) : null;
+        const wipPayload = wipRows?.[0]?.payload ? parseJson(wipRows[0].payload) : null;
+        const manifestPayload = manifestRows?.[0]?.payload ? (parseJson(manifestRows[0].payload) as CloudSyncManifest) : null;
 
-      return {
-        invPayload,
-        invUpdatedAt: invRows?.[0]?.updatedAt ? new Date(invRows[0].updatedAt).toISOString() : undefined,
-        wipPayload,
-        wipVersion: wipRows?.[0]?.version,
-        manifestPayload,
-      };
-    });
+        return {
+          invPayload,
+          invUpdatedAt: invRows?.[0]?.updatedAt ? new Date(invRows[0].updatedAt).toISOString() : undefined,
+          wipPayload,
+          wipVersion: wipRows?.[0]?.version,
+          manifestPayload,
+        };
+      },
+      { skipWireProbe: true },
+    );
 
     if (!pulled || (!pulled.invPayload && !pulled.wipPayload)) {
       return res.status(404).json({

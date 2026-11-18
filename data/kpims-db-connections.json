@@ -5,7 +5,7 @@
   "autoCheckCloudUpdates": false,
   "cloudCheckIntervalSec": 120,
   "deviceLabel": "localhost",
-  "lastLocalHash": "704e14cd7b69f894814bcf78",
-  "lastLocalRevision": 2,
-  "lastLocalUpdatedAt": "2026-11-18T04:54:15.857Z"
+  "lastLocalHash": "abcbfbf134468f9e601dbd43",
+  "lastLocalRevision": 3,
+  "lastLocalUpdatedAt": "2026-11-18T06:25:45.272Z"
 }

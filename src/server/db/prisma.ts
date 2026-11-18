@@ -631,15 +631,31 @@ const enrichPoolerParameters = (rawUrl: string): string => {
   if (!rawUrl) return rawUrl;
   try {
     const parsed = new URL(rawUrl);
-    if (parsed.hostname.includes('pooler.supabase.com')) {
+    const host = parsed.hostname.toLowerCase();
+    if (host.includes('pooler.supabase.com')) {
       if (!parsed.searchParams.has('connection_limit')) {
         parsed.searchParams.set('connection_limit', '3');
       }
       if (!parsed.searchParams.has('pool_timeout')) {
-        parsed.searchParams.set('pool_timeout', '10');
+        parsed.searchParams.set('pool_timeout', '15');
       }
       if (!parsed.searchParams.has('connect_timeout')) {
-        parsed.searchParams.set('connect_timeout', '10');
+        parsed.searchParams.set('connect_timeout', '15');
+      }
+      return parsed.toString();
+    }
+    if (!isLocalhostUrl(rawUrl)) {
+      if (!parsed.searchParams.has('connect_timeout')) {
+        parsed.searchParams.set('connect_timeout', '15');
+      }
+      if (!parsed.searchParams.has('pool_timeout')) {
+        parsed.searchParams.set('pool_timeout', '15');
+      }
+      if (
+        (host.includes('supabase.co') || host.includes('supabase.com') || host.includes('neon.tech')) &&
+        !parsed.searchParams.has('sslmode')
+      ) {
+        parsed.searchParams.set('sslmode', 'require');
       }
       return parsed.toString();
     }
@@ -876,105 +892,143 @@ async function probePostgresWireProtocol(rawUrl: string, timeoutMs: number): Pro
     const user = decodeURIComponent(parsed.username || 'postgres');
     const database = decodeURIComponent(parsed.pathname.replace(/^\//, '') || 'postgres');
     const startupPacket = buildPgStartupMessage(user, database);
+    const sslMode = (parsed.searchParams.get('sslmode') || '').toLowerCase();
+    const preferSslFirst =
+      !isLocalhostUrl(rawUrl) ||
+      sslMode === 'require' ||
+      sslMode === 'verify-ca' ||
+      sslMode === 'verify-full';
 
-    const plainResult = await new Promise<'OK' | 'SSL_REQUIRED' | 'FAIL'>(resolve => {
-      let settled = false;
-      const done = (val: 'OK' | 'SSL_REQUIRED' | 'FAIL') => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        try {
-          socket.destroy();
-        } catch {
-          // ignore
-        }
-        resolve(val);
-      };
+    const connectOpts: net.NetConnectOpts = {
+      host,
+      port,
+      autoSelectFamily: true,
+      autoSelectFamilyAttemptTimeout: 600,
+    } as any;
 
-      const socket = net.createConnection({ host, port });
-      const timer = setTimeout(() => done('FAIL'), timeoutMs);
-
-      socket.once('connect', () => {
-        socket.write(startupPacket);
-      });
-
-      socket.once('data', (chunk: Buffer) => {
-        if (!chunk || chunk.length === 0) return done('FAIL');
-        const firstByte = String.fromCharCode(chunk[0]);
-        if (firstByte === 'R') {
-          return done('OK');
-        }
-        const text = chunk.toString('utf8');
-        if (firstByte === 'E' && /ssl|encryption/i.test(text) && !/ENOTFOUND|tenant\/user/i.test(text)) {
-          return done('SSL_REQUIRED');
-        }
-        return done('FAIL');
-      });
-
-      socket.once('error', () => done('FAIL'));
-      socket.once('close', () => done('FAIL'));
-    });
-
-    if (plainResult === 'OK') return true;
-    if (plainResult === 'FAIL') return false;
-
-    return await new Promise<boolean>(resolve => {
-      let settled = false;
-      const socket = net.createConnection({ host, port });
-      const timer = setTimeout(() => {
-        if (!settled) {
+    const tryPlainStartup = (): Promise<'OK' | 'SSL_REQUIRED' | 'FAIL'> =>
+      new Promise(resolve => {
+        let settled = false;
+        const done = (val: 'OK' | 'SSL_REQUIRED' | 'FAIL') => {
+          if (settled) return;
           settled = true;
-          socket.destroy();
-          resolve(false);
-        }
-      }, timeoutMs);
-
-      const finish = (ok: boolean, stream?: net.Socket | tls.TLSSocket) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        try {
-          stream?.destroy();
-          socket.destroy();
-        } catch {
-          // ignore
-        }
-        resolve(ok);
-      };
-
-      socket.once('connect', () => {
-        const sslReq = Buffer.alloc(8);
-        sslReq.writeInt32BE(8, 0);
-        sslReq.writeInt32BE(80877103, 4);
-        socket.write(sslReq);
-      });
-
-      socket.once('data', (chunk: Buffer) => {
-        if (!chunk || chunk.length === 0 || String.fromCharCode(chunk[0]) !== 'S') {
-          return finish(false);
-        }
-        const tlsSocket = tls.connect(
-          { socket, servername: host, rejectUnauthorized: false },
-          () => {
-            tlsSocket.write(startupPacket);
+          clearTimeout(timer);
+          try {
+            socket.destroy();
+          } catch {
+            // ignore
           }
-        );
-        tlsSocket.once('data', (tlsChunk: Buffer) => {
-          if (!tlsChunk || tlsChunk.length === 0) return finish(false, tlsSocket);
-          const code = String.fromCharCode(tlsChunk[0]);
-          finish(code === 'R', tlsSocket);
+          resolve(val);
+        };
+
+        const socket = net.createConnection(connectOpts);
+        const timer = setTimeout(() => done('FAIL'), timeoutMs);
+
+        socket.once('connect', () => {
+          socket.write(startupPacket);
         });
-        tlsSocket.once('error', () => finish(false, tlsSocket));
+
+        socket.once('data', (chunk: Buffer) => {
+          if (!chunk || chunk.length === 0) return done('FAIL');
+          const firstByte = String.fromCharCode(chunk[0]);
+          if (firstByte === 'R' || firstByte === 'N') {
+            return done('OK');
+          }
+          const text = chunk.toString('utf8');
+          if (firstByte === 'E' && /ssl|encryption/i.test(text) && !/ENOTFOUND|tenant\/user/i.test(text)) {
+            return done('SSL_REQUIRED');
+          }
+          return done('FAIL');
+        });
+
+        socket.once('error', () => done('FAIL'));
+        socket.once('close', () => done('FAIL'));
       });
 
-      socket.once('error', () => finish(false));
-    });
+    const trySslStartup = (): Promise<'OK' | 'SSL_NOT_SUPPORTED' | 'FAIL'> =>
+      new Promise(resolve => {
+        let settled = false;
+        const socket = net.createConnection(connectOpts);
+        const timer = setTimeout(() => {
+          if (!settled) {
+            settled = true;
+            try {
+              socket.destroy();
+            } catch {
+              // ignore
+            }
+            resolve('FAIL');
+          }
+        }, timeoutMs);
+
+        const finish = (ok: 'OK' | 'SSL_NOT_SUPPORTED' | 'FAIL', stream?: net.Socket | tls.TLSSocket) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          try {
+            stream?.destroy();
+            socket.destroy();
+          } catch {
+            // ignore
+          }
+          resolve(ok);
+        };
+
+        socket.once('connect', () => {
+          const sslReq = Buffer.alloc(8);
+          sslReq.writeInt32BE(8, 0);
+          sslReq.writeInt32BE(80877103, 4);
+          socket.write(sslReq);
+        });
+
+        socket.once('data', (chunk: Buffer) => {
+          if (!chunk || chunk.length === 0) return finish('FAIL');
+          const code = String.fromCharCode(chunk[0]);
+          if (code === 'N') {
+            return finish('SSL_NOT_SUPPORTED');
+          }
+          if (code !== 'S') {
+            return finish('FAIL');
+          }
+          const tlsSocket = tls.connect(
+            { socket, servername: host, rejectUnauthorized: false },
+            () => {
+              tlsSocket.write(startupPacket);
+            }
+          );
+          tlsSocket.once('data', (tlsChunk: Buffer) => {
+            if (!tlsChunk || tlsChunk.length === 0) return finish('FAIL', tlsSocket);
+            const tlsCode = String.fromCharCode(tlsChunk[0]);
+            finish(tlsCode === 'R' || tlsCode === 'N' ? 'OK' : 'FAIL', tlsSocket);
+          });
+          tlsSocket.once('error', () => finish('FAIL', tlsSocket));
+        });
+
+        socket.once('error', () => finish('FAIL'));
+        socket.once('close', () => finish('FAIL'));
+      });
+
+    if (preferSslFirst) {
+      const sslRes = await trySslStartup();
+      if (sslRes === 'OK') return true;
+      if (sslRes === 'SSL_NOT_SUPPORTED') {
+        return (await tryPlainStartup()) === 'OK';
+      }
+      return false;
+    }
+
+    const plainRes = await tryPlainStartup();
+    if (plainRes === 'OK') return true;
+    if (plainRes === 'SSL_REQUIRED') {
+      return (await trySslStartup()) === 'OK';
+    }
+    return false;
   } catch {
     return false;
   }
 }
 
-export async function testSingleDatabaseUrl(rawUrl: string, timeoutMs = 4500): Promise<{
+export async function testSingleDatabaseUrl(rawUrl: string, timeoutMs = 6000): Promise<{
   success: boolean;
   isValidSyntax: boolean;
   isConnected: boolean;
@@ -1023,6 +1077,7 @@ export async function testSingleDatabaseUrl(rawUrl: string, timeoutMs = 4500): P
         new Promise((_, reject) => setTimeout(() => reject(new Error('DB connection test timeout')), timeoutMs)),
       ]);
       const latencyMs = Date.now() - start;
+      clearCloudManifestCache();
       return {
         success: true,
         isValidSyntax: true,
@@ -1519,22 +1574,28 @@ export async function ensurePostgresSchemaReady(
 }
 
 /**
- * Execute operations against an arbitrary PostgreSQL URL (e.g., Cloud DB while actively working on Local DB)
- * with fast Wire-Protocol preflight so unreachable remote databases fail cleanly in <2.5s without hanging.
+ * Execute operations against an arbitrary PostgreSQL URL (e.g., Cloud DB while actively working on Local DB).
+ * Background polling keeps a fast Wire-Protocol preflight so unreachable remote databases drop quietly;
+ * explicit user Push / Pull / manual Fetch bypasses raw-socket veto so Prisma connects directly with full TLS/timeout handling.
  */
 export async function withScopedPgClient<T>(
   rawUrl: string,
   timeoutMs: number,
   fn: (client: PrismaClient, enrichedUrl: string) => Promise<T>,
+  options?: { skipWireProbe?: boolean; probeTimeoutMs?: number },
 ): Promise<T> {
   const normalized = normalizePgUrl(rawUrl);
   if (!isValidPostgresUrlSyntax(normalized)) {
     throw new Error('آدرس اتصال PostgreSQL معتبر نیست.');
   }
   const enriched = enrichPoolerParameters(normalized);
-  const wireOk = await probePostgresWireProtocol(enriched, Math.min(timeoutMs, 3500));
-  if (!wireOk) {
-    throw new Error('سرور PostgreSQL مقصد در این لحظه در دسترس نیست (Wire-Protocol Unreachable).');
+
+  if (!options?.skipWireProbe) {
+    const probeMs = Math.min(timeoutMs, options?.probeTimeoutMs ?? 6000);
+    const wireOk = await probePostgresWireProtocol(enriched, probeMs);
+    if (!wireOk) {
+      throw new Error('سرور PostgreSQL مقصد در این لحظه در دسترس نیست (Wire-Protocol Unreachable).');
+    }
   }
 
   const client = new PrismaClient({
@@ -1585,7 +1646,7 @@ const MANIFEST_CACHE_TTL_MS = 25_000;
 
 export async function fetchCloudSyncManifestLightweight(
   force = false,
-  timeoutMs = 3000,
+  timeoutMs = force ? 12_000 : 6000,
 ): Promise<{
   cloudConfigured: boolean;
   cloudReachable: boolean;
@@ -1633,41 +1694,48 @@ export async function fetchCloudSyncManifestLightweight(
   const started = Date.now();
   const checkedAtIso = new Date().toISOString();
   try {
-    const result = await withScopedPgClient(cfg.cloudDbUrl, timeoutMs, async client => {
-      const regRows = (await client.$queryRawUnsafe(
-        `SELECT to_regclass('public.inventory_app_state_snapshots')::text AS snap`,
-      )) as Array<{ snap: string | null }>;
-      if (!regRows?.[0]?.snap) {
-        return { manifest: null as CloudSyncManifest | null, hasLegacySnapshot: false, legacyUpdatedAt: undefined as string | undefined };
-      }
+    const result = await withScopedPgClient(
+      cfg.cloudDbUrl,
+      timeoutMs,
+      async client => {
+        try {
+          const rows = (await client.$queryRawUnsafe(
+            `SELECT "id", CASE WHEN "id" = $1 THEN "payload" ELSE NULL END AS "payload", "updatedAt" FROM "inventory_app_state_snapshots" WHERE "id" IN ($1, 'inventory-app-state')`,
+            CLOUD_SYNC_MANIFEST_ID,
+          )) as Array<{ id: string; payload: any; updatedAt: Date | string }>;
 
-      const manifestRows = (await client.$queryRawUnsafe(
-        `SELECT "payload", "updatedAt" FROM "inventory_app_state_snapshots" WHERE "id" = $1 LIMIT 1`,
-        CLOUD_SYNC_MANIFEST_ID,
-      )) as Array<{ payload: any; updatedAt: Date | string }>;
+          const manifestRow = rows?.find(r => r.id === CLOUD_SYNC_MANIFEST_ID && r.payload);
+          const legacyRow = rows?.find(r => r.id === 'inventory-app-state');
 
-      if (manifestRows && manifestRows.length > 0 && manifestRows[0]?.payload) {
-        const p = typeof manifestRows[0].payload === 'string'
-          ? JSON.parse(manifestRows[0].payload)
-          : manifestRows[0].payload;
-        return {
-          manifest: p as CloudSyncManifest,
-          hasLegacySnapshot: true,
-          legacyUpdatedAt: manifestRows[0].updatedAt ? new Date(manifestRows[0].updatedAt).toISOString() : undefined,
-        };
-      }
+          if (manifestRow) {
+            const p = typeof manifestRow.payload === 'string'
+              ? JSON.parse(manifestRow.payload)
+              : manifestRow.payload;
+            return {
+              manifest: p as CloudSyncManifest,
+              hasLegacySnapshot: true,
+              legacyUpdatedAt: manifestRow.updatedAt ? new Date(manifestRow.updatedAt).toISOString() : undefined,
+            };
+          }
 
-      // Check only metadata (updatedAt) of legacy snapshot without downloading payload JSON
-      const legacyRows = (await client.$queryRawUnsafe(
-        `SELECT "updatedAt" FROM "inventory_app_state_snapshots" WHERE "id" = 'inventory-app-state' LIMIT 1`,
-      )) as Array<{ updatedAt: Date | string }>;
-
-      return {
-        manifest: null,
-        hasLegacySnapshot: Boolean(legacyRows && legacyRows.length > 0),
-        legacyUpdatedAt: legacyRows?.[0]?.updatedAt ? new Date(legacyRows[0].updatedAt).toISOString() : undefined,
-      };
-    });
+          return {
+            manifest: null as CloudSyncManifest | null,
+            hasLegacySnapshot: Boolean(legacyRow),
+            legacyUpdatedAt: legacyRow?.updatedAt ? new Date(legacyRow.updatedAt).toISOString() : undefined,
+          };
+        } catch (queryErr) {
+          if (isMissingRelationError(queryErr)) {
+            return {
+              manifest: null as CloudSyncManifest | null,
+              hasLegacySnapshot: false,
+              legacyUpdatedAt: undefined as string | undefined,
+            };
+          }
+          throw queryErr;
+        }
+      },
+      { skipWireProbe: force, probeTimeoutMs: 6000 },
+    );
 
     const latencyMs = Date.now() - started;
     global.__kpimsCloudManifestCache = {
