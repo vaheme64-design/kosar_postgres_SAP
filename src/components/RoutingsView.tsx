@@ -70,7 +70,7 @@ export const RoutingsView: React.FC<RoutingsViewProps> = ({
   onSaveMachine,
   onSaveDie,
 }) => {
-  const { traceDocument, route, clearDocQuery } = useErpRouter();
+  const { traceDocument, route, clearDocQuery, pushSelectionStep } = useErpRouter();
   const { requestConfirm } = useEnterpriseUx();
   const [selectedRoutingId, setSelectedRoutingId] = useState<string>(routings[0]?.id || '');
   const [expandedSteps, setExpandedSteps] = useState<Record<number, boolean>>({});
@@ -642,7 +642,16 @@ export const RoutingsView: React.FC<RoutingsViewProps> = ({
             <div className="inline-flex rounded-sm border border-[#d9d9d9] p-0.5 bg-[#f0f0f0] text-xs">
               <button
                 type="button"
-                onClick={() => setViewMode('STEPPER')}
+                onClick={() => {
+                  if (viewMode !== 'STEPPER') {
+                    pushSelectionStep(
+                      'مراحل مسیر تولید',
+                      () => setViewMode('DIRECTORY'),
+                      'routings-stepper',
+                    );
+                  }
+                  setViewMode('STEPPER');
+                }}
                 className={`px-3 py-1 rounded-sm font-medium transition cursor-pointer ${
                   viewMode === 'STEPPER' ? 'bg-white font-bold text-[#007cc0] border border-[#d9d9d9]' : 'text-[#666666] hover:text-[#333333]'
                 }`}
@@ -651,7 +660,16 @@ export const RoutingsView: React.FC<RoutingsViewProps> = ({
               </button>
               <button
                 type="button"
-                onClick={() => setViewMode('DIRECTORY')}
+                onClick={() => {
+                  if (viewMode !== 'DIRECTORY') {
+                    pushSelectionStep(
+                      'کاتالوگ مسیرها',
+                      () => setViewMode('STEPPER'),
+                      'routings-directory',
+                    );
+                  }
+                  setViewMode('DIRECTORY');
+                }}
                 className={`px-3 py-1 rounded-sm font-medium transition cursor-pointer ${
                   viewMode === 'DIRECTORY' ? 'bg-white font-bold text-[#007cc0] border border-[#d9d9d9]' : 'text-[#666666] hover:text-[#333333]'
                 }`}
@@ -659,6 +677,16 @@ export const RoutingsView: React.FC<RoutingsViewProps> = ({
                 کاتالوگ کلیه قطعات ({toPersianDigits(parts.length)})
               </button>
             </div>
+            {viewMode === 'STEPPER' && (
+              <button
+                type="button"
+                onClick={() => setViewMode('DIRECTORY')}
+                className="sap-btn-standard px-2.5 py-1.5 text-xs font-medium cursor-pointer whitespace-nowrap"
+                title="بازگشت به فهرست کلی قطعات"
+              >
+                بازگشت به فهرست مسیرها
+              </button>
+            )}
           </div>
         </div>
 
@@ -726,7 +754,21 @@ export const RoutingsView: React.FC<RoutingsViewProps> = ({
             <select
               value={activeRouting?.id || ''}
               onChange={e => {
-                setSelectedRoutingId(e.target.value);
+                const nextId = e.target.value;
+                const prevId = selectedRoutingId;
+                const prevMode = viewMode;
+                const targetR = routings.find(item => item.id === nextId);
+                if (nextId && nextId !== prevId) {
+                  pushSelectionStep(
+                    `مسیر ${targetR?.partCode || nextId}`,
+                    () => {
+                      setSelectedRoutingId(prevId);
+                      setViewMode(prevMode);
+                    },
+                    `routing-${nextId}`,
+                  );
+                }
+                setSelectedRoutingId(nextId);
                 setViewMode('STEPPER');
               }}
               className="bg-white border border-[#d9d9d9] rounded-sm px-2.5 py-1 text-xs text-[#333333] font-bold focus:outline-none focus:border-[#007cc0] cursor-pointer"
@@ -860,6 +902,16 @@ export const RoutingsView: React.FC<RoutingsViewProps> = ({
                           <button
                             type="button"
                             onClick={() => {
+                              const prevId = selectedRoutingId;
+                              const prevMode = viewMode;
+                              pushSelectionStep(
+                                `مسیر ${r.partCode}`,
+                                () => {
+                                  setSelectedRoutingId(prevId);
+                                  setViewMode(prevMode);
+                                },
+                                `routing-${r.id}`,
+                              );
                               setSelectedRoutingId(r.id);
                               setViewMode('STEPPER');
                             }}

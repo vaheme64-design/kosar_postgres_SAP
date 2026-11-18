@@ -65,6 +65,9 @@ export interface ManufacturingOrder {
   totalRejectedQuantity: number;// مجموع قطعات نامنطبق
   routingId: string;
   routingVersion: string;      // e.g. V2.1 (route versioning)
+  parentMoId?: string;
+  parentMoNumber?: string;
+  bomId?: string;
   status: ManufacturingOrderStatus;
   startDate: string;
   dueDate: string;

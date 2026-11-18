@@ -51,9 +51,30 @@ export interface RouteNavigateParams {
   modalPartId?: string | null;
 }
 
+export interface HistorySnapshotEntry {
+  id: string;
+  key: string;
+  route: RouteState;
+  label: string;
+  localKey?: string;
+  selectionRestore?: () => void;
+}
+
+export interface BreadcrumbItem {
+  label: string;
+  onClick?: () => void;
+}
+
 interface RouterContextType {
   route: RouteState;
   navigate: (params: RouteNavigateParams, options?: { replace?: boolean }) => void;
+  goBack: () => void;
+  pushSelectionStep: (label: string, onRestorePrevious: () => void, localKey?: string) => void;
+  canGoBack: boolean;
+  previousEntryLabel: string;
+  currentRouteLabel: string;
+  historyDepth: number;
+  breadcrumbs: BreadcrumbItem[];
   openCreateMoModal: (partId?: string) => void;
   openWipCheckModal: (orderId?: string, partId?: string) => void;
   closeModal: () => void;
@@ -387,14 +408,126 @@ function serializeRouteToHash(state: RouteState): string {
   return `${basePath}${queryString ? `?${queryString}` : ''}`;
 }
 
+const TAB_LABELS: Record<TabKey, string> = {
+  dashboard: 'صفحه اصلی (لانچ‌پد SAP Fiori)',
+  master_data: 'اطلاعات پایه و درخت محصول',
+  contracts: 'قراردادها و سفارشات مشتری (SD)',
+  inventory: 'انبار، کالا و کنترل کیفیت (MM/QM)',
+  production: 'میز کار و دستورات تولید (PP)',
+  wip: 'جریان قطعات در ساخت (WIP)',
+  planning: 'برنامه‌ریزی تولید و MRP',
+  machines: 'ماشین‌آلات، قالب‌ها و نت',
+  sapco: 'رول‌ها و مواد امانی ساپکو',
+  reports: 'گزارش‌های تحلیلی و OEE',
+  settings: 'تنظیمات سیستم و پایگاه داده',
+};
+
+const MASTER_SUB_LABELS: Record<string, string> = {
+  HUB: 'میز کار اطلاعات پایه',
+  PARTS: 'کاتالوگ قطعات و مواد',
+  ROUTINGS: 'مسیرهای تولید (Routings)',
+  BOM: 'درخت محصول چندسطحی (BOM)',
+  PRODUCT_STRUCTURE: 'ساختار محصول (Product Structure)',
+  OPERATIONS: 'عملیات و استانداردهای خط',
+  PARALLEL_FLOW: 'جریان‌های تولید موازی',
+  MACHINES: 'ماشین‌آلات و ایستگاه‌ها',
+  DIES: 'قالب‌ها و فیکسچرها',
+  OPERATORS: 'اپراتورهای تولید',
+  HALLS: 'سالن‌های تولید',
+  SUPPLIERS: 'تامین‌کنندگان',
+  WORKFLOW_MAP: 'نقشه مهندسی ساخت',
+  SCENARIO_WIZARD: 'شبیه‌ساز سناریوی تولید و MRP',
+};
+
+const WIP_SUB_LABELS: Record<string, string> = {
+  UNIFIED_DIRECTORY: 'میز کار یکپارچه کارگاه و WIP',
+  BOTTLENECK: 'تحلیل گلوگاه‌های تولید',
+  TRACEABILITY: 'رهگیری سری ساخت و کلاف',
+  DASHBOARD: 'داشبورد شاخص‌های WIP',
+  ORDERS: 'کارت دستورات تولید (MO)',
+  TRANSFERS: 'حواله‌های بین‌ایستگاهی WIP',
+  STAGES: 'ایستگاه‌ها و موجودی پای کار',
+};
+
+const INV_SUB_LABELS: Record<string, string> = {
+  DASHBOARD: 'داشبورد موجودی انبار',
+  INQUIRY: 'موجودی لحظه‌ای و کاردکس (Stock Inquiry)',
+  MOVEMENT: 'اسناد و حواله‌های انبار (MIGO)',
+  COILS: 'مدیریت رول‌ها و کلاف‌های فیزیکی',
+  ALERTS: 'هشدارهای نقطه سفارش (ROP)',
+  CONTRACTS: 'انبار امانی قراردادها',
+  CUSTOM_REPORTS: 'گزارش‌ساز انبار',
+  IMPORT_EXPORT: 'مرکز ورود و خروج اکسل',
+  SAPCO: 'مواد امانی ساپکو',
+  STAGES: 'موجودی مراحل تولید',
+  QUALITY_QM: 'کنترل کیفیت و قرنطینه (QM)',
+};
+
+const PROD_SUB_LABELS: Record<string, string> = {
+  MULTI_PART_SCHEDULER: 'برنامه‌ریزی و زمان‌بندی چندقطعه',
+  DAILY_DISPATCH_SHEET: 'برگه اعزام روزانه خط تولید',
+  LIVE_WIP_OP_TRACKER: 'ردیابی زنده عملیات WIP',
+  KPI_OEE_REPORTS: 'گزارش‌های OEE و بهره‌وری',
+  MATERIAL_REQUIREMENT_PROJECTION: 'پیش‌بینی مصرف مواد اولیه',
+  TREE_TIMELINE_REPORT: 'تایم‌لاین درختی ساخت',
+  SAP_PP_WORKFLOW: 'نقشه گردش کار SAP PP',
+};
+
+const PLAN_SUB_LABELS: Record<string, string> = {
+  erp_workbench: 'میز کار برنامه‌ریزی',
+  mrp: 'موتور نیازسنجی مواد (MRP)',
+  capacity_planning: 'توازن ظرفیت ماشین‌آلات',
+  daily_schedule: 'برنامه شیفت و خط روزانه',
+  orders: 'سفارشات مشتری و تعهدات',
+  approved_plans: 'برنامه‌های تاییدشده تولید',
+  consumables: 'مصرف‌شدنی‌ها و ابزارها',
+  recommendations: 'پیشنهادات و دستورات ساخت (MRP)',
+  dashboard: 'داشبورد شاخص‌های برنامه‌ریزی',
+  workflow_doc: 'مستندات فرآیند برنامه‌ریزی',
+};
+
+export function formatRouteLabel(state: RouteState): string {
+  const tabLabel = TAB_LABELS[state.tab] || 'صفحه فعلی';
+  if (state.moId) return `${tabLabel} ← پرونده دستور ${state.moId}`;
+  if (state.timelineMoId) return `${tabLabel} ← تایم‌لاین ${state.timelineMoId}`;
+  if (state.tab === 'master_data' && state.masterSubSection) {
+    return `${MASTER_SUB_LABELS[state.masterSubSection] || tabLabel}`;
+  }
+  if (state.tab === 'wip' && state.wipSubTab) {
+    return `${WIP_SUB_LABELS[state.wipSubTab] || tabLabel}`;
+  }
+  if (state.tab === 'inventory') {
+    return `${INV_SUB_LABELS[state.inventorySubTab] || tabLabel}`;
+  }
+  if (state.tab === 'production') {
+    if (state.productionViewMode === 'VOUCHERS') return 'ثبت قبض تکی کارگاه (MIGO)';
+    return `${PROD_SUB_LABELS[state.productionModuleTab] || tabLabel}`;
+  }
+  if (state.tab === 'planning') {
+    return `${PLAN_SUB_LABELS[state.planningSubTab] || tabLabel}`;
+  }
+  if (state.tab === 'contracts' && state.contractsSubTab === 'CUSTOMER_ORDERS') {
+    return 'سفارشات تحویل به مشتری';
+  }
+  if (state.tab === 'settings') {
+    return state.settingsSubTab === 'db_architecture'
+      ? 'تنظیمات دو پایگاه داده و همگام‌سازی'
+      : 'کاربران و سطوح دسترسی (RBAC)';
+  }
+  return tabLabel;
+}
+
 export const ErpRouterProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [route, setRoute] = useState<RouteState>(parseUrlToRoute);
+  const [historyStack, setHistoryStack] = useState<HistorySnapshotEntry[]>([]);
+  const [activeLocalLabel, setActiveLocalLabel] = useState<string | null>(null);
 
   // Sync state whenever hash or popstate changes (Browser Back / Forward button support)
   useEffect(() => {
     const handleLocationChange = () => {
       const parsed = parseUrlToRoute();
       setRoute(parsed);
+      setActiveLocalLabel(null);
     };
 
     window.addEventListener('hashchange', handleLocationChange);
@@ -413,6 +546,7 @@ export const ErpRouterProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   }, []);
 
   const navigate = useCallback((params: RouteNavigateParams, options?: { replace?: boolean }) => {
+    setActiveLocalLabel(null);
     setRoute(prev => {
       const next: RouteState = {
         ...prev,
@@ -430,18 +564,155 @@ export const ErpRouterProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         modalPartId: params.modalPartId !== undefined ? params.modalPartId : prev.modalPartId,
       };
 
-      const newHash = serializeRouteToHash(next);
+      const prevKey = serializeRouteToHash(prev);
+      const nextKey = serializeRouteToHash(next);
+
+      if (!options?.replace && nextKey !== prevKey) {
+        setHistoryStack(stack => {
+          const entry: HistorySnapshotEntry = {
+            id: `HIST-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            key: prevKey,
+            route: prev,
+            label: formatRouteLabel(prev),
+          };
+          const top = stack[stack.length - 1];
+          if (top && top.key === entry.key && !top.selectionRestore) {
+            return stack;
+          }
+          return [...stack.slice(-39), entry];
+        });
+      }
+
       if (typeof window !== 'undefined') {
         if (options?.replace) {
-          window.history.replaceState(null, '', newHash);
-        } else {
-          window.history.pushState(null, '', newHash);
+          window.history.replaceState(null, '', nextKey);
+        } else if (nextKey !== prevKey) {
+          window.history.pushState(null, '', nextKey);
         }
       }
 
       return next;
     });
   }, []);
+
+  const pushSelectionStep = useCallback(
+    (label: string, onRestorePrevious: () => void, localKey?: string) => {
+      const currentKey = serializeRouteToHash(route);
+      setActiveLocalLabel(label);
+      setHistoryStack(stack => {
+        const entry: HistorySnapshotEntry = {
+          id: `SEL-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          key: `${currentKey}::${localKey || label}`,
+          route,
+          label: `${formatRouteLabel(route)} ← ${label}`,
+          localKey,
+          selectionRestore: onRestorePrevious,
+        };
+        const top = stack[stack.length - 1];
+        if (top && top.key === entry.key) {
+          return stack;
+        }
+        return [...stack.slice(-39), entry];
+      });
+    },
+    [route],
+  );
+
+  const goBack = useCallback(() => {
+    setHistoryStack(stack => {
+      if (stack.length > 0) {
+        const nextStack = stack.slice(0, -1);
+        const target = stack[stack.length - 1];
+        setActiveLocalLabel(null);
+        setRoute(target.route);
+        const targetHash = serializeRouteToHash(target.route);
+        if (typeof window !== 'undefined') {
+          window.history.replaceState(null, '', targetHash);
+        }
+        if (target.selectionRestore) {
+          queueMicrotask(() => {
+            try {
+              target.selectionRestore?.();
+            } catch {
+              // ignore stale restore callback
+            }
+          });
+        }
+        return nextStack;
+      }
+
+      // No history stack left: step cleanly out of modals/drawers or return to Launchpad home
+      setActiveLocalLabel(null);
+      setRoute(prev => {
+        const fallback: RouteState =
+          prev.modal || prev.moId || prev.timelineMoId
+            ? { ...prev, modal: null, modalOrderId: null, modalPartId: null, moId: null, drawerTab: null, timelineMoId: null }
+            : { ...DEFAULT_ROUTE, tab: 'dashboard' };
+        const fallbackHash = serializeRouteToHash(fallback);
+        if (typeof window !== 'undefined') {
+          window.history.replaceState(null, '', fallbackHash);
+        }
+        return fallback;
+      });
+      return stack;
+    });
+  }, []);
+
+  const canGoBack = useMemo(
+    () =>
+      historyStack.length > 0 ||
+      route.tab !== 'dashboard' ||
+      Boolean(route.moId) ||
+      Boolean(route.timelineMoId) ||
+      Boolean(route.modal),
+    [historyStack.length, route],
+  );
+
+  const previousEntryLabel = useMemo(() => {
+    if (historyStack.length > 0) {
+      return historyStack[historyStack.length - 1].label;
+    }
+    if (route.moId || route.timelineMoId || route.modal) {
+      return TAB_LABELS[route.tab] || 'نمای قبلی';
+    }
+    return 'صفحه اصلی (لانچ‌پد SAP Fiori)';
+  }, [historyStack, route]);
+
+  const currentRouteLabel = useMemo(() => {
+    const base = formatRouteLabel(route);
+    return activeLocalLabel ? `${base} / ${activeLocalLabel}` : base;
+  }, [route, activeLocalLabel]);
+
+  const breadcrumbs = useMemo<BreadcrumbItem[]>(() => {
+    const items: BreadcrumbItem[] = [
+      {
+        label: 'صفحه اصلی',
+        onClick: () =>
+          navigate({
+            tab: 'dashboard',
+            moId: null,
+            timelineMoId: null,
+            modal: null,
+            docQuery: null,
+          }),
+      },
+    ];
+    if (route.tab !== 'dashboard') {
+      const tabTitle = TAB_LABELS[route.tab] || route.tab;
+      items.push({
+        label: tabTitle,
+        onClick: () => navigate({ tab: route.tab, moId: null, timelineMoId: null }),
+      });
+      const subLabel = formatRouteLabel(route);
+      if (subLabel !== tabTitle) {
+        items.push({ label: subLabel });
+      }
+    }
+    if (activeLocalLabel) {
+      items.push({ label: activeLocalLabel });
+    }
+    return items;
+  }, [route, activeLocalLabel, navigate]);
 
   const openCreateMoModal = useCallback((partId?: string) => {
     navigate({
@@ -517,6 +788,13 @@ export const ErpRouterProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const contextValue = useMemo<RouterContextType>(() => ({
     route,
     navigate,
+    goBack,
+    pushSelectionStep,
+    canGoBack,
+    previousEntryLabel,
+    currentRouteLabel,
+    historyDepth: historyStack.length,
+    breadcrumbs,
     openCreateMoModal,
     openWipCheckModal,
     closeModal,
@@ -531,6 +809,13 @@ export const ErpRouterProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   }), [
     route,
     navigate,
+    goBack,
+    pushSelectionStep,
+    canGoBack,
+    previousEntryLabel,
+    currentRouteLabel,
+    historyStack.length,
+    breadcrumbs,
     openCreateMoModal,
     openWipCheckModal,
     closeModal,

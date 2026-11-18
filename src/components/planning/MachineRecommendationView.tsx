@@ -395,50 +395,66 @@ export const MachineRecommendationView: React.FC<MachineRecommendationViewProps>
     });
   };
 
-  const handleApprove = async () => {
+  const handleApprove = () => {
     if (!activePlan) return;
-    setActionInProgress(true);
-    setFeedbackMsg(null);
-    try {
-      const res = await onApprovePlan(activePlan.id, 'مدیر برنامه‌ریزی تولید');
-      if (res.success) {
-        setFeedbackMsg({
-          type: 'success',
-          text:
-            res.message ||
-            'برنامه تولید با موفقیت تصویب شد و ظرفیت ماشین/ورق در سطح برنامه‌ریزی رزرو گردید (هنوز به کف سالن دیسپچ نشده است).',
-        });
-        await onRefresh();
-      } else {
-        setFeedbackMsg({ type: 'error', text: res.error || 'خطا در تصویب برنامه' });
-      }
-    } catch (err) {
-      setFeedbackMsg({ type: 'error', text: err instanceof Error ? err.message : 'خطای ارتباط' });
-    } finally {
-      setActionInProgress(false);
-    }
+    requestConfirm({
+      title: `تأیید و تصویب برنامه تولید ${activePlan.planNumber}`,
+      message: `آیا تصویب برنامه قطعه «${activePlan.partName} (${activePlan.partCode})» به تیراژ ${formatNumber(activePlan.proposedQuantity)} عدد و رزرو ظرفیت ماشین‌آلات و ورق را تأیید می‌کنید؟`,
+      confirmLabel: 'تأیید و تصویب برنامه',
+      variant: 'emerald',
+      onConfirm: async () => {
+        setActionInProgress(true);
+        setFeedbackMsg(null);
+        try {
+          const res = await onApprovePlan(activePlan.id, 'مدیر برنامه‌ریزی تولید');
+          if (res.success) {
+            setFeedbackMsg({
+              type: 'success',
+              text:
+                res.message ||
+                'برنامه تولید با موفقیت تصویب شد و ظرفیت ماشین/ورق در سطح برنامه‌ریزی رزرو گردید (هنوز به کف سالن دیسپچ نشده است).',
+            });
+            await onRefresh();
+          } else {
+            setFeedbackMsg({ type: 'error', text: res.error || 'خطا در تصویب برنامه' });
+          }
+        } catch (err) {
+          setFeedbackMsg({ type: 'error', text: err instanceof Error ? err.message : 'خطای ارتباط' });
+        } finally {
+          setActionInProgress(false);
+        }
+      },
+    });
   };
 
-  const handleRelease = async () => {
+  const handleRelease = () => {
     if (!activePlan) return;
-    setActionInProgress(true);
-    setFeedbackMsg(null);
-    try {
-      const res = await onReleaseMo(activePlan.id, 'سرپرست برنامه‌ریزی');
-      if (res.success) {
-        setFeedbackMsg({
-          type: 'success',
-          text: `دستور کار کارگاهی با شناسه ${res.moId || ''} ایجاد و به خط تولید صادر گردید.`,
-        });
-        await onRefresh();
-      } else {
-        setFeedbackMsg({ type: 'error', text: res.error || 'خطا در صدور دستور کار' });
-      }
-    } catch (err) {
-      setFeedbackMsg({ type: 'error', text: err instanceof Error ? err.message : 'خطای ارتباط' });
-    } finally {
-      setActionInProgress(false);
-    }
+    requestConfirm({
+      title: `صدور کد رسمی MO برای برنامه ${activePlan.planNumber}`,
+      message: `آیا صدور دستور کار ساخت (MO) در کارگاه WIP برای قطعه «${activePlan.partName}» به تیراژ ${formatNumber(activePlan.proposedQuantity)} عدد را تأیید می‌کنید؟`,
+      confirmLabel: 'تأیید و صدور MO',
+      variant: 'indigo',
+      onConfirm: async () => {
+        setActionInProgress(true);
+        setFeedbackMsg(null);
+        try {
+          const res = await onReleaseMo(activePlan.id, 'سرپرست برنامه‌ریزی');
+          if (res.success) {
+            setFeedbackMsg({
+              type: 'success',
+              text: `دستور کار کارگاهی با شناسه ${res.moId || ''} ایجاد و به خط تولید صادر گردید.`,
+            });
+            await onRefresh();
+          } else {
+            setFeedbackMsg({ type: 'error', text: res.error || 'خطا در صدور دستور کار' });
+          }
+        } catch (err) {
+          setFeedbackMsg({ type: 'error', text: err instanceof Error ? err.message : 'خطای ارتباط' });
+        } finally {
+          setActionInProgress(false);
+        }
+      },
+    });
   };
 
   const handleCreateRevision = async (e: React.FormEvent) => {

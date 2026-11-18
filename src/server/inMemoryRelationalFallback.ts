@@ -69,6 +69,19 @@ export function clearFallbackProposalsStore(): void {
   fallbackPlanProposalsStore.length = 0;
 }
 
+export function clearFallbackWipIdempotencyByMoIds(moIds: Set<string>, moNumbers: Set<string>): number {
+  let removed = 0;
+  for (const [key, entry] of fallbackWipProductionIdempotency.entries()) {
+    const entryMoId = entry?.mo?.id;
+    const entryMoNum = entry?.mo?.moNumber || entry?.log?.moNumber;
+    if ((entryMoId && moIds.has(entryMoId)) || (entryMoNum && moNumbers.has(entryMoNum))) {
+      fallbackWipProductionIdempotency.delete(key);
+      removed += 1;
+    }
+  }
+  return removed;
+}
+
 const getGrossWeightKgForPart = (partCode: string, parts: Part[] = [], fallbackWeight?: number): number => {
   const part = parts.find(p => p.code === partCode || p.id === partCode);
   const bom = getAllBoms().find(b => b.assemblyPartCode === partCode || b.assemblyPartId === part?.id);

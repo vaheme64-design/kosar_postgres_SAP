@@ -119,7 +119,7 @@ interface ProductStructureViewProps {
 const STORAGE_KEY_PRODUCT_STRUCTURES = 'kpims_product_structures_v3';
 
 export const ProductStructureView: React.FC<ProductStructureViewProps> = ({ parts }) => {
-  const { traceDocument } = useErpRouter();
+  const { traceDocument, pushSelectionStep } = useErpRouter();
   const { requestConfirm } = useEnterpriseUx();
   const [structures, setStructures] = useState<ProductStructureData[]>(() => {
     try {
@@ -614,7 +614,19 @@ export const ProductStructureView: React.FC<ProductStructureViewProps> = ({ part
             <span className="text-xs text-[#666666]">محصول:</span>
             <select
               value={selectedStructureId}
-              onChange={e => setSelectedStructureId(e.target.value)}
+              onChange={e => {
+                const nextId = e.target.value;
+                const prevId = selectedStructureId;
+                const nextStruct = structures.find(s => s.id === nextId);
+                if (nextId && nextId !== prevId) {
+                  pushSelectionStep(
+                    `ساختار ${nextStruct?.rootPartCode || nextId}`,
+                    () => setSelectedStructureId(prevId),
+                    `ps-${nextId}`,
+                  );
+                }
+                setSelectedStructureId(nextId);
+              }}
               className="bg-[#ffffff] border border-[#bfbfbf] rounded-sm px-3 py-1.5 text-xs font-medium text-[#333333] focus:outline-none focus:border-[#007cc0] cursor-pointer"
             >
               {structures.map(s => (

@@ -3,6 +3,7 @@ import { RefreshCw, Wand2, CheckCircle2, Send, AlertTriangle, Save, ExternalLink
 import { formatNumber, toPersianDigits } from '../../utils/formatters';
 import { formatToJalali } from '../../utils/jalali';
 import { useErpRouter } from '../../context/RouterContext';
+import { useEnterpriseUx } from '../../context/EnterpriseUxContext';
 
 type Proposal = {
   id: string;
@@ -33,7 +34,8 @@ async function api<T = any>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const RelationalPlanProposalView: React.FC<{ onReleased?: () => Promise<void> }> = ({ onReleased }) => {
-  const { route, navigate, traceDocument } = useErpRouter();
+  const { route, navigate, traceDocument, pushSelectionStep } = useErpRouter();
+  const { requestConfirm } = useEnterpriseUx();
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<any>(null);
@@ -85,6 +87,17 @@ export const RelationalPlanProposalView: React.FC<{ onReleased?: () => Promise<v
   }, [detail]);
 
   const selectProposal = async (id: string) => {
+    if (selectedId && selectedId !== id) {
+      const prevId = selectedId;
+      const matched = proposals.find(p => p.id === id);
+      pushSelectionStep(
+        `پیشنهاد ${matched?.proposalNumber || id}`,
+        () => {
+          void selectProposal(prevId);
+        },
+        `planning-proposal-${id}`,
+      );
+    }
     setSelectedId(id);
     setMessage(null);
     try {
@@ -121,10 +134,19 @@ export const RelationalPlanProposalView: React.FC<{ onReleased?: () => Promise<v
     }
   };
 
-  const regenerate = () => runAction(
-    () => api('/api/planning/proposals/regenerate', { method: 'POST', body: JSON.stringify({}) }),
-    'پیشنهاد جدید از اطلاعات جاری سفارش، موجودی و WIP ساخته شد.',
-  );
+  const regenerate = () => {
+    requestConfirm({
+      title: 'تولید پیشنهاد جدید برنامه از داده‌های جاری',
+      message: 'آیا مطمئن هستید که می‌خواهید پیشنهاد برنامه تولید جدید بر اساس سفارشات باز، موجودی انبار و WIP ساخته شود؟',
+      confirmLabel: 'تأیید و ساخت پیشنهاد جدید',
+      variant: 'warning',
+      onConfirm: () =>
+        runAction(
+          () => api('/api/planning/proposals/regenerate', { method: 'POST', body: JSON.stringify({}) }),
+          'پیشنهاد جدید از اطلاعات جاری سفارش، موجودی و WIP ساخته شد.',
+        ),
+    });
+  };
 
   const revise = () => {
     if (!detail) return;
@@ -143,28 +165,64 @@ export const RelationalPlanProposalView: React.FC<{ onReleased?: () => Promise<v
     );
   };
 
-  const approve = () => detail && runAction(
-    () => api(`/api/planning/proposals/${detail.id}/approve`, {
-      method: 'POST', body: JSON.stringify({ approvedBy: 'مدیر برنامه‌ریزی تولید' }),
-    }),
-    'پیشنهاد با موفقیت تأیید شد.',
-  );
+  const approve = () => {
+    if (!detail) return;
+    requestConfirm({
+      title: `تأیید پیشنهاد برنامه ${detail.proposalNumber}`,
+      message: `آیا تأیید پیشنهاد ${detail.proposalNumber} (نسخه ${toPersianDigits(detail.version)}) بدون صدور فوری MO را تأیید می‌کنید؟`,
+      confirmLabel: 'تأیید پیشنهاد',
+      variant: 'emerald',
+      onConfirm: () =>
+        runAction(
+          () =>
+            api(`/api/planning/proposals/${detail.id}/approve`, {
+              method: 'POST',
+              body: JSON.stringify({ approvedBy: 'مدیر برنامه‌ریزی تولید' }),
+            }),
+          'پیشنهاد با موفقیت تأیید شد.',
+        ),
+    });
+  };
 
-  const release = () => detail && runAction(
-    () => api(`/api/planning/proposals/${detail.id}/release`, {
-      method: 'POST', body: JSON.stringify({ releasedBy: 'سرپرست برنامه‌ریزی' }),
-    }),
-    'برنامه تولید و دستورهای ساخت به‌صورت پایدار در پایگاه داده ایجاد شدند.',
-    true,
-  );
+  const release = () => {
+    if (!detail) return;
+    requestConfirm({
+      title: `صدور دستورهای تولید (MO) از پیشنهاد ${detail.proposalNumber}`,
+      message: `آیا تبدیل ردیف‌های تأییدشده پیشنهاد ${detail.proposalNumber} به دستورهای کار واقعی در کارگاه WIP را تأیید می‌کنید؟`,
+      confirmLabel: 'تأیید و صدور MO',
+      variant: 'indigo',
+      onConfirm: () =>
+        runAction(
+          () =>
+            api(`/api/planning/proposals/${detail.id}/release`, {
+              method: 'POST',
+              body: JSON.stringify({ releasedBy: 'سرپرست برنامه‌ریزی' }),
+            }),
+          'برنامه تولید و دستورهای ساخت به‌صورت پایدار در پایگاه داده ایجاد شدند.',
+          true,
+        ),
+    });
+  };
 
-  const approveAndRelease = () => detail && runAction(
-    () => api(`/api/planning/proposals/${detail.id}/approve-and-release`, {
-      method: 'POST', body: JSON.stringify({ actor: 'مدیر برنامه‌ریزی تولید' }),
-    }),
-    'پیشنهاد تأیید و دستورهای کار (MO) بلافاصله به کارتابل WIP صادر شدند.',
-    true,
-  );
+  const approveAndRelease = () => {
+    if (!detail) return;
+    requestConfirm({
+      title: `تأیید و صدور فوری MO — ${detail.proposalNumber}`,
+      message: `با تأیید این عملیات، پیشنهاد ${detail.proposalNumber} نهایی شده و کلیه دستورهای تولید (MO) مرتبط فوراً وارد کارتابل WIP کارگاه می‌شوند.`,
+      confirmLabel: 'تأیید نهایی و صدور به کارگاه',
+      variant: 'emerald',
+      onConfirm: () =>
+        runAction(
+          () =>
+            api(`/api/planning/proposals/${detail.id}/approve-and-release`, {
+              method: 'POST',
+              body: JSON.stringify({ actor: 'مدیر برنامه‌ریزی تولید' }),
+            }),
+          'پیشنهاد تأیید و دستورهای کار (MO) بلافاصله به کارتابل WIP صادر شدند.',
+          true,
+        ),
+    });
+  };
 
   return (
     <div className="space-y-4" dir="rtl">

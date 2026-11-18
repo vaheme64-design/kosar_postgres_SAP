@@ -19,6 +19,8 @@ import {
   Gauge,
   AlertTriangle,
   ExternalLink,
+  Trash2,
+  ShieldAlert,
 } from 'lucide-react';
 import {
   Part,
@@ -48,7 +50,9 @@ import { InventoryReportView } from '../InventoryReportView';
 import { WipModuleSkeleton, Skeleton } from '../ui/Skeleton';
 import { TraceabilityInquiryView } from './TraceabilityInquiryView';
 import { useErpRouter } from '../../context/RouterContext';
+import { useEnterpriseUx } from '../../context/EnterpriseUxContext';
 import { InlinePageGuideButton } from '../common/PageGuideSystem';
+import { MoLifecycleGuideStrip } from '../common/WorkspaceNavigationBar';
 
 export type WipViewMode =
   | 'UNIFIED_DIRECTORY'
@@ -59,6 +63,59 @@ export type WipViewMode =
   | 'TRANSFERS'
   | 'STAGES';
 
+interface MoRollbackPreviewData {
+  rootMoId: string;
+  rootMoNumber: string;
+  canRollback: boolean;
+  blockingErrors: string[];
+  mosToDelete: Array<{
+    id: string;
+    moNumber: string;
+    partId: string;
+    partCode: string;
+    partName: string;
+    targetQuantity: number;
+    initialInputQuantity: number;
+    completedQuantity: number;
+    status: string;
+    isSubMo: boolean;
+    operationsCount: number;
+  }>;
+  materialsToReturn: Array<{
+    documentId: string;
+    documentNumber: string;
+    partId: string;
+    partCode: string;
+    partName: string;
+    quantity: number;
+    quantityKg: number;
+    unit: string;
+    warehouseId: string;
+    warehouseName: string;
+    lotNumber?: string;
+  }>;
+  outputsToDeduct: Array<{
+    documentId: string;
+    documentNumber: string;
+    partId: string;
+    partCode: string;
+    partName: string;
+    quantity: number;
+    quantityKg: number;
+    unit: string;
+    warehouseId: string;
+    warehouseName: string;
+    lotNumber?: string;
+    availableAfterIssueReturn: number;
+    shortage: number;
+  }>;
+  draftDocsToCancel: Array<{ id: string; documentNumber: string; documentType: string }>;
+  wipTransfersCount: number;
+  productionLogsCount: number;
+  reservationsCount: number;
+  kardexTransactionsCount: number;
+}
+
 interface ProductionWipModuleViewProps {
   parts: Part[];
   machines: Machine[];
@@ -66,6 +123,7 @@ interface ProductionWipModuleViewProps {
   stageBalances: StageInventorySummary[];
   initialView?: WipViewMode;
   initialTraceQuery?: string;
+  onViewChange?: (view: WipViewMode) => void;
   onGlobalRefresh?: () => Promise<void>;
 }
 
@@ -76,9 +134,11 @@ export const ProductionWipModuleView: React.FC<ProductionWipModuleViewProps> = (
   stageBalances,
   initialView,
   initialTraceQuery,
+  onViewChange,
   onGlobalRefresh,
 }) => {
   const router = useErpRouter();
+  const { requestConfirm } = useEnterpriseUx();
   const [activeView, setActiveView] = useState<WipViewMode>(initialView || 'UNIFIED_DIRECTORY');
   const [loading, setLoading] = useState(true);
   const [notification, setNotification] = useState<{
@@ -113,9 +173,13 @@ export const ProductionWipModuleView: React.FC<ProductionWipModuleViewProps> = (
   const handleChangeView = useCallback(
     (next: WipViewMode) => {
       setActiveView(next);
-      router.navigate({ wipSubTab: next });
+      if (onViewChange) {
+        onViewChange(next);
+      } else {
+        router.navigate({ wipSubTab: next });
+      }
     },
-    [router],
+    [onViewChange, router],
   );
 
   useEffect(() => {
@@ -138,6 +202,14 @@ export const ProductionWipModuleView: React.FC<ProductionWipModuleViewProps> = (
   const [loadMatQty, setLoadMatQty] = useState<number>(0);
   const [loadMatNotes, setLoadMatNotes] = useState<string>('');
   const [loadMatSubmitting, setLoadMatSubmitting] = useState<boolean>(false);
+
+  // Cascading MO Delete + Inventory Rollback Modal State
+  const [rollbackModalTarget, setRollbackModalTarget] = useState<ManufacturingOrder | null>(null);
+  const [rollbackPreview, setRollbackPreview] = useState<MoRollbackPreviewData | null>(null);
+  const [rollbackLoading, setRollbackLoading] = useState(false);
+  const [rollbackSubmitting, setRollbackSubmitting] = useState(false);
+  const [rollbackReason, setRollbackReason] = useState('');
+  const [rollbackError, setRollbackError] = useState<string | null>(null);
 
   useEffect(() => {
     if (notification) {
@@ -620,8 +692,100 @@ export const ProductionWipModuleView: React.FC<ProductionWipModuleViewProps> = (
     setExpandedGroups(prev => ({ ...prev, [key]: !prev[key] }));
   };
 
-  const toggleMoRow = (moId: string) => {
-    setExpandedMoIds(prev => ({ ...prev, [moId]: !prev[moId] }));
+  const toggleMoRow = (moId: string, moNumber?: string) => {
+    setExpandedMoIds(prev => {
+      const nextOpen = !prev[moId];
+      if (nextOpen && moNumber) {
+        router.pushSelectionStep(
+          `عملیات دستور ${moNumber}`,
+          () => setExpandedMoIds(p => ({ ...p, [moId]: false })),
+          `wip-mo-${moId}`,
+        );
+      }
+      return { ...prev, [moId]: nextOpen };
+    });
+  };
+
+  const selectBottleneckStage = (stageId: string | null, stageName?: string) => {
+    setSelectedBottleneckStageId(stageId);
+    if (stageId) {
+      router.pushSelectionStep(
+        `گلوگاه: ${stageName || stageId}`,
+        () => setSelectedBottleneckStageId(null),
+        `wip-stage-${stageId}`,
+      );
+    }
+  };
+
+  const openMoRollbackModal = async (mo: ManufacturingOrder) => {
+    setRollbackModalTarget(mo);
+    setRollbackPreview(null);
+    setRollbackReason('');
+    setRollbackError(null);
+    setRollbackLoading(true);
+    try {
+      const res = await fetch(
+        `/api/wip/manufacturing-orders/${encodeURIComponent(mo.id)}/rollback-preview?cascadeSubMos=true`,
+      );
+      const json = await res.json();
+      if (!res.ok || !json.success) {
+        setRollbackError(json.error || 'خطا در محاسبه تأثیر حذف و بازگشت موجودی');
+      } else {
+        setRollbackPreview(json.data);
+      }
+    } catch (err: any) {
+      setRollbackError(err.message || 'خطا در ارتباط با سرور');
+    } finally {
+      setRollbackLoading(false);
+    }
+  };
+
+  const handleConfirmMoDeleteRollback = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!rollbackModalTarget || !rollbackPreview) return;
+    if (rollbackReason.trim().length < 3) {
+      setRollbackError('لطفاً دلیل حذف و ابطال را حداقل با ۳ کاراکتر وارد نمایید.');
+      return;
+    }
+    if (!rollbackPreview.canRollback) {
+      setRollbackError(rollbackPreview.blockingErrors[0] || 'امکان بازگشت موجودی به دلیل کسری موجودی خروجی وجود ندارد.');
+      return;
+    }
+    setRollbackSubmitting(true);
+    setRollbackError(null);
+    try {
+      const res = await fetch(
+        `/api/wip/manufacturing-orders/${encodeURIComponent(rollbackModalTarget.id)}`,
+        {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            reason: rollbackReason.trim(),
+            cascadeSubMos: true,
+          }),
+        },
+      );
+      const json = await res.json();
+      if (!res.ok || !json.success) {
+        setRollbackError(json.error || 'خطا در حذف دستور تولید و بازگشت موجودی');
+        return;
+      }
+      setNotification({
+        type: 'success',
+        message:
+          json.message ||
+          `دستور تولید ${rollbackModalTarget.moNumber} و زیرمجموعه‌های آن با موفقیت حذف شد و موجودی انبار به حالت قبل بازگشت.`,
+      });
+      setRollbackModalTarget(null);
+      setRollbackPreview(null);
+      await loadWipData();
+      if (onGlobalRefresh) await onGlobalRefresh();
+      window.dispatchEvent(new CustomEvent('kpims-master-data-updated'));
+    } catch (err: any) {
+      setRollbackError(err.message || 'خطا در ارتباط با سرور');
+    } finally {
+      setRollbackSubmitting(false);
+    }
   };
 
   return (
@@ -776,6 +940,9 @@ export const ProductionWipModuleView: React.FC<ProductionWipModuleViewProps> = (
           </div>
         </div>
       </div>
+
+      {/* Interactive MO Lifecycle Guide Strip */}
+      <MoLifecycleGuideStrip compact />
 
       {/* Toast Notification */}
       {notification && (
@@ -963,73 +1130,72 @@ export const ProductionWipModuleView: React.FC<ProductionWipModuleViewProps> = (
                       شیفت کاری)
                     </span>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setSelectedBottleneckStageId(prev =>
-                        prev === bottleneckAnalysis.peakStage?.stageId
-                          ? null
-                          : bottleneckAnalysis.peakStage?.stageId || null,
-                      )
-                    }
-                    className="px-2.5 py-1 rounded bg-white/80 hover:bg-white border border-current text-[11px] font-semibold cursor-pointer shrink-0 whitespace-nowrap"
-                  >
-                    مشاهده قطعات متوقف در این گلوگاه
-                  </button>
-                </div>
-              )}
-
-              {/* Visual Color-Coded Throughput Bars Grid */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
-                {bottleneckAnalysis.stages.map(st => {
-                  const isSelected = selectedBottleneckStageId === st.stageId;
-                  const borderAccent =
-                    st.severity === 'CRITICAL'
-                      ? 'border-[#f5b8b8] border-r-4 border-r-[#bb0000] bg-[#fde8e8]/30'
-                      : st.severity === 'WARNING'
-                      ? 'border-[#f9d6a7] border-r-4 border-r-[#e9730c] bg-[#fff4e5]/40'
-                      : st.severity === 'NORMAL'
-                      ? 'border-[#d9d9d9] border-r-4 border-r-[#107e3e] bg-white'
-                      : 'border-[#e5e5e5] border-r-4 border-r-[#bfbfbf] bg-[#fafafa]';
-
-                  const barColor =
-                    st.severity === 'CRITICAL'
-                      ? 'bg-[#bb0000]'
-                      : st.severity === 'WARNING'
-                      ? 'bg-[#e9730c]'
-                      : st.severity === 'NORMAL'
-                      ? 'bg-[#107e3e]'
-                      : 'bg-[#cccccc]';
-
-                  const statusTextColor =
-                    st.severity === 'CRITICAL'
-                      ? 'text-[#bb0000]'
-                      : st.severity === 'WARNING'
-                      ? 'text-[#b85a00]'
-                      : st.severity === 'NORMAL'
-                      ? 'text-[#107e3e]'
-                      : 'text-[#777777]';
-
-                  const statusLabel =
-                    st.severity === 'CRITICAL'
-                      ? 'انباشت بحرانی'
-                      : st.severity === 'WARNING'
-                      ? 'تراکم بالا'
-                      : st.severity === 'NORMAL'
-                      ? 'جریان پایدار'
-                      : 'صف خالی';
-
-                  return (
                     <button
-                      key={st.stageId}
                       type="button"
-                      onClick={() =>
-                        setSelectedBottleneckStageId(prev => (prev === st.stageId ? null : st.stageId))
-                      }
-                      className={`p-3 rounded border text-right cursor-pointer transition-all flex flex-col justify-between gap-2 ${borderAccent} ${
-                        isSelected ? 'ring-2 ring-[#007cc0]' : 'hover:shadow-sm'
-                      }`}
+                      onClick={() => {
+                        const peak = bottleneckAnalysis.peakStage;
+                        if (!peak) return;
+                        const nextId = selectedBottleneckStageId === peak.stageId ? null : peak.stageId;
+                        selectBottleneckStage(nextId, peak.stageName);
+                      }}
+                      className="px-2.5 py-1 rounded bg-white/80 hover:bg-white border border-current text-[11px] font-semibold cursor-pointer shrink-0 whitespace-nowrap"
                     >
+                      مشاهده قطعات متوقف در این گلوگاه
+                    </button>
+                  </div>
+                )}
+
+                {/* Visual Color-Coded Throughput Bars Grid */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
+                  {bottleneckAnalysis.stages.map(st => {
+                    const isSelected = selectedBottleneckStageId === st.stageId;
+                    const borderAccent =
+                      st.severity === 'CRITICAL'
+                        ? 'border-[#f5b8b8] border-r-4 border-r-[#bb0000] bg-[#fde8e8]/30'
+                        : st.severity === 'WARNING'
+                        ? 'border-[#f9d6a7] border-r-4 border-r-[#e9730c] bg-[#fff4e5]/40'
+                        : st.severity === 'NORMAL'
+                        ? 'border-[#d9d9d9] border-r-4 border-r-[#107e3e] bg-white'
+                        : 'border-[#e5e5e5] border-r-4 border-r-[#bfbfbf] bg-[#fafafa]';
+
+                    const barColor =
+                      st.severity === 'CRITICAL'
+                        ? 'bg-[#bb0000]'
+                        : st.severity === 'WARNING'
+                        ? 'bg-[#e9730c]'
+                        : st.severity === 'NORMAL'
+                        ? 'bg-[#107e3e]'
+                        : 'bg-[#cccccc]';
+
+                    const statusTextColor =
+                      st.severity === 'CRITICAL'
+                        ? 'text-[#bb0000]'
+                        : st.severity === 'WARNING'
+                        ? 'text-[#b85a00]'
+                        : st.severity === 'NORMAL'
+                        ? 'text-[#107e3e]'
+                        : 'text-[#777777]';
+
+                    const statusLabel =
+                      st.severity === 'CRITICAL'
+                        ? 'انباشت بحرانی'
+                        : st.severity === 'WARNING'
+                        ? 'تراکم بالا'
+                        : st.severity === 'NORMAL'
+                        ? 'جریان پایدار'
+                        : 'صف خالی';
+
+                    return (
+                      <button
+                        key={st.stageId}
+                        type="button"
+                        onClick={() =>
+                          selectBottleneckStage(isSelected ? null : st.stageId, st.stageName)
+                        }
+                        className={`p-3 rounded border text-right cursor-pointer transition-all flex flex-col justify-between gap-2 ${borderAccent} ${
+                          isSelected ? 'ring-2 ring-[#007cc0]' : 'hover:shadow-sm'
+                        }`}
+                      >
                       <div className="space-y-1 w-full">
                         <div className="flex items-center justify-between gap-1 text-[10px]">
                           <span className={`font-bold ${statusTextColor}`}>{statusLabel}</span>
@@ -1173,7 +1339,7 @@ export const ProductionWipModuleView: React.FC<ProductionWipModuleViewProps> = (
                           {bottleneckAnalysis.stages.map(st => (
                             <tr
                               key={st.stageId}
-                              onClick={() => setSelectedBottleneckStageId(st.stageId)}
+                              onClick={() => selectBottleneckStage(st.stageId, st.stageName)}
                               className="hover:bg-[#f7fbfe] cursor-pointer"
                             >
                               <td className="py-2 px-3 font-sans font-semibold text-[#333333]">{st.stageName}</td>
@@ -1270,7 +1436,7 @@ export const ProductionWipModuleView: React.FC<ProductionWipModuleViewProps> = (
                         {/* MO Row */}
                         <div className="pr-7 pl-3.5 py-2 flex flex-col md:flex-row md:items-center justify-between gap-2 hover:bg-[#e5f3fa]/40 transition-colors">
                           <div
-                            onClick={() => toggleMoRow(mo.id)}
+                            onClick={() => toggleMoRow(mo.id, mo.moNumber)}
                             className="flex items-center gap-2 cursor-pointer flex-1"
                           >
                             {isExpanded ? (
@@ -1366,9 +1532,18 @@ export const ProductionWipModuleView: React.FC<ProductionWipModuleViewProps> = (
                             <button
                               type="button"
                               onClick={() => setReconciliationMoId(mo.id)}
-                              className="sap-btn-standard text-[11px] py-0.5 px-2 cursor-pointer"
+                              className="sap-btn-standard text-[11px] py-0.5 px-2 cursor-pointer whitespace-nowrap shrink-0"
                             >
                               تراز پایستگی
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => openMoRollbackModal(mo)}
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-[#fff0f0] hover:bg-[#fde0e0] text-[#bb0000] border border-[#f2b8b5] text-[11px] font-semibold cursor-pointer whitespace-nowrap shrink-0"
+                              title="حذف دستور تولید + زیرمجموعه‌ها و بازگشت کامل موجودی مصرفی به انبار"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                              <span>حذف کامل و بازگشت موجودی</span>
                             </button>
                           </div>
                         </div>
@@ -1512,8 +1687,18 @@ export const ProductionWipModuleView: React.FC<ProductionWipModuleViewProps> = (
                         {tr.status === 'PENDING_APPROVAL' && (
                           <button
                             type="button"
-                            onClick={() => handleApproveTransfer(tr.id)}
-                            className="px-2.5 py-0.5 rounded bg-[#107e3e] hover:bg-[#0d6832] text-white text-[11px] font-semibold cursor-pointer"
+                            onClick={() => {
+                              requestConfirm({
+                                title: `تأیید دریافت حواله انتقال ${tr.transferNumber}`,
+                                message: `آیا دریافت ${formatNumber(tr.quantity)} عدد «${tr.partName}» از «${tr.fromStepName}» به «${tr.toStepName}» را تأیید می‌کنید؟`,
+                                confirmLabel: 'تأیید دریافت',
+                                variant: 'emerald',
+                                onConfirm: async () => {
+                                  await handleApproveTransfer(tr.id);
+                                },
+                              });
+                            }}
+                            className="px-2.5 py-0.5 rounded bg-[#107e3e] hover:bg-[#0d6832] text-white text-[11px] font-semibold cursor-pointer whitespace-nowrap shrink-0"
                           >
                             تایید دریافت
                           </button>
@@ -1542,9 +1727,9 @@ export const ProductionWipModuleView: React.FC<ProductionWipModuleViewProps> = (
               setIsTransferModalOpen(true);
             }
           }}
-          onSelectMo={() => setActiveView('ORDERS')}
-          onNavigateToOrders={() => setActiveView('ORDERS')}
-          onNavigateToTransfers={() => setActiveView('TRANSFERS')}
+          onSelectMo={() => handleChangeView('ORDERS')}
+          onNavigateToOrders={() => handleChangeView('ORDERS')}
+          onNavigateToTransfers={() => handleChangeView('TRANSFERS')}
         />
       )}
 
@@ -1561,6 +1746,7 @@ export const ProductionWipModuleView: React.FC<ProductionWipModuleViewProps> = (
             setIsTransferModalOpen(true);
           }}
           onOpenReconciliation={moId => setReconciliationMoId(moId)}
+          onRequestDeleteRollback={openMoRollbackModal}
         />
       )}
 
@@ -1688,6 +1874,229 @@ export const ProductionWipModuleView: React.FC<ProductionWipModuleViewProps> = (
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+      {/* Cascading MO Delete & Inventory Rollback Preview Modal */}
+      {rollbackModalTarget && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" dir="rtl">
+          <div className="bg-white border border-[#d9d9d9] rounded-md shadow-xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]">
+            <div className="px-4 py-3 border-b border-[#e5e5e5] flex items-center justify-between bg-[#fff5f5]">
+              <div className="flex items-center gap-2">
+                <ShieldAlert className="w-5 h-5 text-[#bb0000] shrink-0" />
+                <div>
+                  <h3 className="text-sm font-bold text-[#990000]">
+                    تأیید حذف کامل دستور تولید ({rollbackModalTarget.moNumber}) و بازگشت موجودی انبار
+                  </h3>
+                  <p className="text-[11px] text-[#666666]">
+                    کلیه دستورات فرعی وابسته، حواله‌ها، گزارش‌های تولید و اسناد انبار مرتبط بررسی و به وضعیت قبل بازمی‌گردند
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => !rollbackSubmitting && setRollbackModalTarget(null)}
+                className="text-xs text-[#666666] hover:text-[#333333] cursor-pointer px-1.5 py-0.5"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="p-4 overflow-y-auto space-y-3.5 text-xs flex-1">
+              {rollbackLoading ? (
+                <div className="py-10 text-center text-[#556b82]">
+                  در حال شبیه‌سازی تأثیر حذف و محاسبه تراز موجودی انبارها...
+                </div>
+              ) : rollbackPreview ? (
+                <>
+                  {rollbackPreview.blockingErrors.length > 0 && (
+                    <div className="p-3 bg-[#fde8e8] border border-[#f5b8b8] rounded text-[#990000] space-y-1">
+                      <div className="font-bold flex items-center gap-1.5">
+                        <AlertTriangle className="w-4 h-4 shrink-0" />
+                        <span>موانع مسدودکننده بازگشت خودکار موجودی:</span>
+                      </div>
+                      <ul className="list-disc pr-5 space-y-1 text-[11px]">
+                        {rollbackPreview.blockingErrors.map((errMsg, idx) => (
+                          <li key={idx}>{errMsg}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {/* Summary metrics grid */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center font-mono tabular-nums">
+                    <div className="p-2.5 bg-[#fafafa] border border-[#e5e5e5] rounded">
+                      <div className="text-[10px] font-sans text-[#666666]">دستورات تولید (اصلی+فرعی)</div>
+                      <div className="text-sm font-bold text-[#bb0000] mt-0.5">
+                        {toPersianDigits(rollbackPreview.mosToDelete.length)}
+                      </div>
+                    </div>
+                    <div className="p-2.5 bg-[#fafafa] border border-[#e5e5e5] rounded">
+                      <div className="text-[10px] font-sans text-[#666666]">اسناد مواد برگشتی به انبار</div>
+                      <div className="text-sm font-bold text-[#107e3e] mt-0.5">
+                        {toPersianDigits(rollbackPreview.materialsToReturn.length)}
+                      </div>
+                    </div>
+                    <div className="p-2.5 bg-[#fafafa] border border-[#e5e5e5] rounded">
+                      <div className="text-[10px] font-sans text-[#666666]">رسیدهای محصول کسری</div>
+                      <div className="text-sm font-bold text-[#e9730c] mt-0.5">
+                        {toPersianDigits(rollbackPreview.outputsToDeduct.length)}
+                      </div>
+                    </div>
+                    <div className="p-2.5 bg-[#fafafa] border border-[#e5e5e5] rounded">
+                      <div className="text-[10px] font-sans text-[#666666]">حواله‌ها / رزرو / کاردکس</div>
+                      <div className="text-sm font-bold text-[#333333] mt-0.5">
+                        {toPersianDigits(
+                          rollbackPreview.wipTransfersCount +
+                            rollbackPreview.productionLogsCount +
+                            rollbackPreview.reservationsCount +
+                            rollbackPreview.kardexTransactionsCount,
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* MOs to Delete */}
+                  <div className="border border-[#e5e5e5] rounded overflow-hidden">
+                    <div className="px-3 py-1.5 bg-[#f5f5f5] border-b border-[#e5e5e5] font-bold text-[#333333]">
+                      ۱. دستورات تولید قابل حذف (اصلی و زیرمجموعه‌های فرعی):
+                    </div>
+                    <div className="divide-y divide-[#eeeeee] max-h-40 overflow-y-auto">
+                      {rollbackPreview.mosToDelete.map(m => (
+                        <div key={m.id} className="px-3 py-1.5 flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span className="font-mono font-bold text-[#007cc0]">{m.moNumber}</span>
+                            {m.isSubMo && (
+                              <span className="px-1.5 py-0.5 rounded bg-[#fff4e5] text-[#b85a00] border border-[#f9d6a7] text-[10px] font-semibold">
+                                زیرمجموعه فرعی
+                              </span>
+                            )}
+                            <span className="truncate text-[#333333]">
+                              {m.partName} ({m.partCode})
+                            </span>
+                          </div>
+                          <span className="font-mono tabular-nums text-[11px] text-[#666666] whitespace-nowrap">
+                            تیراژ: {formatNumber(m.targetQuantity)}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Materials returning to warehouse */}
+                  {rollbackPreview.materialsToReturn.length > 0 && (
+                    <div className="border border-[#b7dfc4] rounded overflow-hidden">
+                      <div className="px-3 py-1.5 bg-[#f1f8f3] border-b border-[#b7dfc4] font-bold text-[#107e3e]">
+                        ۲. مواد اولیه و کلاف‌های برگشتی به انبار:
+                      </div>
+                      <div className="divide-y divide-[#e8f3ec] max-h-36 overflow-y-auto">
+                        {rollbackPreview.materialsToReturn.map((mat, i) => (
+                          <div key={`${mat.documentId}-${i}`} className="px-3 py-1.5 flex items-center justify-between gap-2">
+                            <div className="min-w-0">
+                              <span className="font-semibold text-[#333333]">{mat.partName}</span>{' '}
+                              <span className="font-mono text-[10px] text-[#666666]">
+                                ({mat.partCode} • سند {mat.documentNumber})
+                              </span>
+                              <div className="text-[10px] text-[#666666]">
+                                بازگشت به: {mat.warehouseName}
+                                {mat.lotNumber ? ` • لات: ${mat.lotNumber}` : ''}
+                              </div>
+                            </div>
+                            <span className="font-mono tabular-nums font-bold text-[#107e3e] whitespace-nowrap">
+                              +{formatNumber(mat.quantity)} {mat.unit}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Produced outputs to deduct */}
+                  {rollbackPreview.outputsToDeduct.length > 0 && (
+                    <div className="border border-[#f9d6a7] rounded overflow-hidden">
+                      <div className="px-3 py-1.5 bg-[#fff8ed] border-b border-[#f9d6a7] font-bold text-[#b85a00]">
+                        ۳. محصولات رسیدشده قابل کسر از انبار:
+                      </div>
+                      <div className="divide-y divide-[#fbe8cc] max-h-36 overflow-y-auto">
+                        {rollbackPreview.outputsToDeduct.map((out, i) => (
+                          <div key={`${out.documentId}-${i}`} className="px-3 py-1.5 flex items-center justify-between gap-2">
+                            <div className="min-w-0">
+                              <span className="font-semibold text-[#333333]">{out.partName}</span>{' '}
+                              <span className="font-mono text-[10px] text-[#666666]">
+                                ({out.partCode} • سند {out.documentNumber})
+                              </span>
+                              <div className="text-[10px] text-[#666666]">
+                                انبار: {out.warehouseName} • قابل کسر: {formatNumber(out.availableAfterIssueReturn)}
+                                {out.shortage > 0 && (
+                                  <span className="text-[#bb0000] font-bold">
+                                    {' '}
+                                    • کسری: {formatNumber(out.shortage)}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                            <span className="font-mono tabular-nums font-bold text-[#bb0000] whitespace-nowrap">
+                              -{formatNumber(out.quantity)} {out.unit}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Audit Reason Input */}
+                  <form id="mo-rollback-delete-form" onSubmit={handleConfirmMoDeleteRollback} className="space-y-1.5">
+                    <label className="block font-bold text-[#333333]">
+                      دلیل حذف دستور تولید و ابطال اسناد انبار (ثبت در لاگ ممیزی) <span className="text-[#bb0000]">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      minLength={3}
+                      value={rollbackReason}
+                      onChange={e => setRollbackReason(e.target.value)}
+                      placeholder="مثال: اشتباه در تیراژ ابلاغی یا لغو برنامه برش توسط مشتری..."
+                      className="w-full bg-white border border-[#bfbfbf] rounded px-3 py-2 text-xs text-[#333333] focus:outline-none focus:border-[#007cc0]"
+                    />
+                  </form>
+                </>
+              ) : null}
+
+              {rollbackError && (
+                <div className="p-2.5 rounded bg-[#fde8e8] border border-[#f5b8b8] text-[#bb0000] text-xs font-semibold">
+                  {rollbackError}
+                </div>
+              )}
+            </div>
+
+            <div className="px-4 py-3 border-t border-[#e5e5e5] bg-[#fafafa] flex items-center justify-end gap-2">
+              <button
+                type="button"
+                disabled={rollbackSubmitting}
+                onClick={() => setRollbackModalTarget(null)}
+                className="sap-btn-standard text-xs px-3.5 py-1.5 cursor-pointer"
+              >
+                انصراف
+              </button>
+              <button
+                type="submit"
+                form="mo-rollback-delete-form"
+                disabled={
+                  rollbackLoading ||
+                  rollbackSubmitting ||
+                  !rollbackPreview?.canRollback ||
+                  rollbackReason.trim().length < 3
+                }
+                className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded bg-[#bb0000] hover:bg-[#990000] text-white text-xs font-bold cursor-pointer disabled:opacity-50"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>
+                  {rollbackSubmitting
+                    ? 'در حال حذف و بازگشت موجودی...'
+                    : 'تأیید نهایی حذف و بازگشت کامل موجودی به قبل'}
+                </span>
+              </button>
+            </div>
           </div>
         </div>
       )}

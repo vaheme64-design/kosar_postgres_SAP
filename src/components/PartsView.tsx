@@ -243,29 +243,91 @@ export const PartsView: React.FC<PartsViewProps> = ({ parts, onSavePart, onRefre
   };
 
   const handleDeletePart = async (p: Part) => {
+    setActionBanner(null);
+    let deps: {
+      bomsCount?: number;
+      routingsCount?: number;
+      structuresCount?: number;
+      manufacturingOrdersCount?: number;
+      manufacturingOrderNumbers?: string[];
+      totalStockOnHand?: number;
+    } = {};
+
+    try {
+      const depRes = await fetch(`/api/parts/${encodeURIComponent(p.id)}/dependencies`);
+      const depJson = await depRes.json().catch(() => ({}));
+      if (depRes.ok && depJson.success && depJson.data) {
+        deps = depJson.data;
+      }
+    } catch {
+      // Fall back cleanly if dependency pre-check fails
+    }
+
+    const moNums = deps.manufacturingOrderNumbers || [];
+    const consequences: string[] = [
+      `پاکسازی خودکار ارجاعات قطعه از ${toPersianDigits(deps.bomsCount || 0)} درخت محصول (BOM)، ${toPersianDigits(deps.routingsCount || 0)} مسیر تولید و ${toPersianDigits(deps.structuresCount || 0)} ساختار محصول.`,
+      moNums.length > 0
+        ? `ابطال و حذف آبشاری ${toPersianDigits(moNums.length)} دستور تولید وابسته (${moNums.slice(0, 4).join('، ')}) و بازگرداندن کامل مواد اولیه مصرف‌شده به موجودی انبار.`
+        : 'هیچ دستور تولید بازی برای این قطعه یافت نشد.',
+      `موجودی ثبتی فعلی قطعه در انبارها: ${formatNumber(deps.totalStockOnHand || 0)} ${p.unit}.`,
+    ];
+
     requestConfirm({
-      title: `حذف قطعه «${p.name}» (${p.code})`,
-      message: 'آیا از حذف این قطعه از کاتالوگ مرکزی اطمینان دارید؟ در صورت وجود اسناد وابسته، قطعه غیرفعال خواهد شد.',
-      confirmLabel: 'حذف قطعه',
+      title: `حذف کامل قطعه «${p.name}» (${p.code}) و وابستگی‌ها`,
+      message:
+        moNums.length > 0
+          ? 'این قطعه دارای دستور تولید ثبت‌شده است. با تأیید این عملیات، ابتدا دستورات تولید وابسته ابطال و موجودی مصرفی به انبار بازمی‌گردد و سپس قطعه به همراه BOM و مسیر تولید حذف می‌شود.'
+          : 'آیا از حذف این قطعه و پاکسازی کلیه وابستگی‌های BOM، ساختار محصول و مسیر تولید آن اطمینان دارید؟',
+      consequences,
+      confirmLabel: moNums.length > 0 ? 'تأیید ابطال MOها، بازگشت موجودی و حذف قطعه' : 'تأیید حذف کامل قطعه',
       cancelLabel: 'انصراف',
       variant: 'danger',
       onConfirm: async () => {
         setActionBanner(null);
         try {
-          const res = await fetch(`/api/parts/${p.id}`, { method: 'DELETE' });
+          for (const moNum of moNums) {
+            const moDelRes = await fetch(
+              `/api/wip/manufacturing-orders/${encodeURIComponent(moNum)}`,
+              {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  reason: `حذف آبشاری و بازگشت موجودی به دلیل حذف قطعه ${p.code}`,
+                  cascadeSubMos: true,
+                }),
+              },
+            );
+            const moDelJson = await moDelRes.json().catch(() => ({}));
+            if (!moDelRes.ok && moDelRes.status !== 404) {
+              throw new Error(
+                moDelJson.error ||
+                  `امکان ابطال دستور تولید وابسته ${moNum} و بازگشت موجودی آن وجود ندارد.`,
+              );
+            }
+          }
+
+          const res = await fetch(`/api/parts/${encodeURIComponent(p.id)}?cascade=true`, {
+            method: 'DELETE',
+          });
           const data = await res.json();
           if (!res.ok || !data.success) {
             throw new Error(data.error || 'خطا در حذف قطعه');
           }
           setActionBanner({
             type: 'success',
-            text: `قطعه «${p.name}» (${p.code}) با موفقیت حذف شد.`,
+            text:
+              data.message ||
+              `قطعه «${p.name}» (${p.code}) و کلیه وابستگی‌های مرتبط با موفقیت حذف و موجودی‌ها موازنه شد.`,
           });
           showUndoToast({
-            title: `قطعه «${p.name}» حذف شد`,
-            description: 'رکورد با موفقیت از کاتالوگ مرکزی پاک گردید.',
+            title: `قطعه «${p.name}» و وابستگی‌ها حذف شد`,
+            description:
+              moNums.length > 0
+                ? 'دستورات تولید وابسته ابطال و موجودی مواد مصرفی به انبار بازگشت.'
+                : 'رکورد به همراه ارجاعات BOM/Routing با موفقیت پاک گردید.',
             onUndo: () => {},
           });
+          window.dispatchEvent(new CustomEvent('kpims-master-data-updated'));
           if (onRefreshParts) {
             await onRefreshParts();
           }

@@ -16,6 +16,7 @@ import {
   AlertTriangle,
   RotateCcw,
   Check,
+  Trash2,
 } from 'lucide-react';
 import {
   ManufacturingOrder,
@@ -38,6 +39,7 @@ interface ManufacturingOrdersViewProps {
   onOpenProduction: (operation: ManufacturingOperation) => void;
   onOpenTransfer: (mo: ManufacturingOrder, operation: ManufacturingOperation) => void;
   onOpenReconciliation: (moId: string) => void;
+  onRequestDeleteRollback?: (mo: ManufacturingOrder) => void;
 }
 
 export const ManufacturingOrdersView: React.FC<ManufacturingOrdersViewProps> = ({
@@ -49,6 +51,7 @@ export const ManufacturingOrdersView: React.FC<ManufacturingOrdersViewProps> = (
   onOpenProduction,
   onOpenTransfer,
   onOpenReconciliation,
+  onRequestDeleteRollback,
 }) => {
   const { traceDocument } = useErpRouter();
   const [searchTerm, setSearchTerm] = useState('');
@@ -202,21 +205,33 @@ export const ManufacturingOrdersView: React.FC<ManufacturingOrdersViewProps> = (
                   </div>
 
                   {/* Top Right Action & Toggle */}
-                  <div className="flex items-center gap-2 self-end md:self-center">
+                  <div className="flex items-center gap-2 flex-wrap self-end md:self-center">
                     <button
                       type="button"
                       onClick={() => onOpenReconciliation(mo.id)}
-                      className="flex items-center gap-1.5 px-3 py-1 bg-[#ebf7ef] hover:bg-[#ddf1e4] text-[#107e3e] border border-[#a9dfbf] rounded-sm text-xs font-bold transition-all cursor-pointer"
+                      className="flex items-center gap-1.5 px-3 py-1 bg-[#ebf7ef] hover:bg-[#ddf1e4] text-[#107e3e] border border-[#a9dfbf] rounded-sm text-xs font-bold transition-all cursor-pointer whitespace-nowrap shrink-0"
                       title="مشاهده گواهی موازنه پایستگی قطعات"
                     >
                       <Scale className="w-3.5 h-3.5" />
                       <span>موازنه و بازرسی تراز</span>
                     </button>
 
+                    {onRequestDeleteRollback && (
+                      <button
+                        type="button"
+                        onClick={() => onRequestDeleteRollback(mo)}
+                        className="flex items-center gap-1.5 px-3 py-1 bg-[#fff0f0] hover:bg-[#fde0e0] text-[#bb0000] border border-[#f2b8b5] rounded-sm text-xs font-bold transition-all cursor-pointer whitespace-nowrap shrink-0"
+                        title="حذف دستور تولید به همراه زیرمجموعه‌ها و بازگشت کامل موجودی مصرفی به انبار"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>حذف کامل و بازگشت موجودی</span>
+                      </button>
+                    )}
+
                     <button
                       type="button"
                       onClick={() => setExpandedMoId(isExpanded ? null : mo.id)}
-                      className="sap-btn-standard flex items-center gap-1 px-3 py-1 text-xs"
+                      className="sap-btn-standard flex items-center gap-1 px-3 py-1 text-xs whitespace-nowrap shrink-0"
                     >
                       <span>{isExpanded ? 'بستن مراحل' : 'مشاهده مراحل'}</span>
                       {isExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}

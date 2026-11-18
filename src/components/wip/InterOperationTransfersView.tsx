@@ -19,6 +19,7 @@ import {
 } from '../../utils/formatters';
 import { TableSkeleton } from '../ui/Skeleton';
 import { useErpRouter } from '../../context/RouterContext';
+import { useEnterpriseUx } from '../../context/EnterpriseUxContext';
 
 interface InterOperationTransfersViewProps {
   transfers: WipTransfer[];
@@ -36,6 +37,7 @@ export const InterOperationTransfersView: React.FC<InterOperationTransfersViewPr
   onRejectTransfer,
 }) => {
   const { traceDocument } = useErpRouter();
+  const { requestConfirm } = useEnterpriseUx();
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('ALL');
   const [rejectingTransferId, setRejectingTransferId] = useState<string | null>(null);
@@ -63,17 +65,25 @@ export const InterOperationTransfersView: React.FC<InterOperationTransfersViewPr
     return true;
   });
 
-  const handleApprove = async (transferId: string) => {
-    setActionLoading(true);
-    setErrorMsg(null);
-    try {
-      const res = await onApproveTransfer(transferId);
-      if (!res.success) setErrorMsg(res.error || 'خطا در تأیید حواله');
-    } catch (err: any) {
-      setErrorMsg(err.message || 'خطا در ارتباط با سرور');
-    } finally {
-      setActionLoading(false);
-    }
+  const handleApprove = (trf: WipTransfer) => {
+    requestConfirm({
+      title: `تأیید دریافت حواله انتقال ${trf.transferNumber}`,
+      message: `آیا دریافت قطعی ${formatNumber(trf.quantity)} عدد «${trf.partName}» از ایستگاه «${trf.fromStepName}» به «${trf.toStepName}» را تأیید می‌کنید؟`,
+      confirmLabel: 'تأیید دریافت و انتقال موجودی',
+      variant: 'emerald',
+      onConfirm: async () => {
+        setActionLoading(true);
+        setErrorMsg(null);
+        try {
+          const res = await onApproveTransfer(trf.id);
+          if (!res.success) setErrorMsg(res.error || 'خطا در تأیید حواله');
+        } catch (err: any) {
+          setErrorMsg(err.message || 'خطا در ارتباط با سرور');
+        } finally {
+          setActionLoading(false);
+        }
+      },
+    });
   };
 
   const handleConfirmReject = async () => {
@@ -245,9 +255,9 @@ export const InterOperationTransfersView: React.FC<InterOperationTransfersViewPr
                           <div className="flex items-center justify-center gap-1.5">
                             <button
                               type="button"
-                              onClick={() => handleApprove(trf.id)}
+                              onClick={() => handleApprove(trf)}
                               disabled={actionLoading}
-                              className="px-2.5 py-1 bg-[#107e3e] hover:bg-[#0c6330] text-white rounded-sm text-[11px] font-bold transition-all cursor-pointer disabled:opacity-50"
+                              className="px-2.5 py-1 bg-[#107e3e] hover:bg-[#0c6330] text-white rounded-sm text-[11px] font-bold transition-all cursor-pointer disabled:opacity-50 whitespace-nowrap shrink-0"
                               title="تأیید رسید و افزودن به صف ورودی مقصد"
                             >
                               تأیید تحویل

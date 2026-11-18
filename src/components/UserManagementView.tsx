@@ -30,6 +30,7 @@ import { auth } from '../lib/firebase';
 import { GoogleAuthProvider, signInWithPopup, signOut } from 'firebase/auth';
 import { KpiCardsSkeleton } from './ui/Skeleton';
 import { InlinePageGuideButton } from './common/PageGuideSystem';
+import { useEnterpriseUx } from '../context/EnterpriseUxContext';
 import {
   clearSavedDbConnectionUrl,
   isMaskedDbUrl,
@@ -73,6 +74,7 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
   onCloudPull,
   onRefreshData,
 }) => {
+  const { requestConfirm } = useEnterpriseUx();
   const [activeSubTab, setActiveSubTab] = useState<'rbac' | 'db_architecture'>(initialSubTab);
   const [dbStatus, setDbStatus] = useState<any>(null);
   const [loadingDb, setLoadingDb] = useState<boolean>(true);
@@ -357,7 +359,7 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
     }
   };
 
-  const handleSyncToActiveDb = async () => {
+  const executeSyncToActiveDb = async () => {
     setSyncingDb(true);
     setDbFeedback(null);
     try {
@@ -376,7 +378,17 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
     }
   };
 
-  const handleGitAction = async (mode: 'CHECK' | 'PUSH' | 'PULL') => {
+  const handleSyncToActiveDb = () => {
+    requestConfirm({
+      title: 'ذخیره و همگام‌سازی داده‌ها در پایگاه داده فعال',
+      message: 'آیا مطمئن هستید که می‌خواهید داده‌های جاری برنامه در پایگاه داده فعال PostgreSQL نوشته شوند؟',
+      confirmLabel: 'تأیید و ذخیره در دیتابیس',
+      variant: 'warning',
+      onConfirm: executeSyncToActiveDb,
+    });
+  };
+
+  const executeGitAction = async (mode: 'CHECK' | 'PUSH' | 'PULL') => {
     setDbFeedback(null);
     if (mode === 'CHECK' && onCheckCloudUpdates) {
       await onCheckCloudUpdates(true);
@@ -429,6 +441,28 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
     } finally {
       setLocalGitBusy(null);
     }
+  };
+
+  const handleGitAction = (mode: 'CHECK' | 'PUSH' | 'PULL') => {
+    if (mode === 'CHECK') {
+      void executeGitAction('CHECK');
+      return;
+    }
+    requestConfirm({
+      title:
+        mode === 'PUSH'
+          ? 'تأیید آپلود کامل داده‌های این سیستم به دیتابیس آنلاین (Push ↑)'
+          : 'تأیید به‌روزرسانی دیتابیس محلی از نسخه آنلاین (Pull ↓)',
+      message:
+        mode === 'PUSH'
+          ? 'آیا مطمئن هستید که می‌خواهید داده‌های فعلی این سیستم روی دیتابیس آنلاین آپلود و به‌عنوان آخرین نسخه ثبت شود؟'
+          : 'آیا مطمئن هستید که می‌خواهید دیتابیس محلی این سیستم مطابق آخرین نسخه آنلاین بازنویسی و همگام‌سازی شود؟',
+      confirmLabel: mode === 'PUSH' ? 'تأیید و Push به آنلاین' : 'تأیید و Pull از آنلاین',
+      variant: mode === 'PULL' ? 'warning' : 'indigo',
+      onConfirm: async () => {
+        await executeGitAction(mode);
+      },
+    });
   };
 
   const activeSyncCheck = localCheckOverride || cloudSyncCheck || null;

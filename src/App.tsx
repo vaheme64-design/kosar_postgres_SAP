@@ -20,6 +20,7 @@ import { SystemHelpWalkthroughModal, HelpWizardLaunchParams } from './components
 import { AdvancedIndustrialScenarioWizardModal } from './components/common/AdvancedIndustrialScenarioWizardModal';
 import { ContextualActionMenu } from './components/common/ContextualActionMenu';
 import { PageGuideBar } from './components/common/PageGuideSystem';
+import { WorkspaceNavigationBar } from './components/common/WorkspaceNavigationBar';
 import { OfflineIndicator } from './components/pwa/PWAInstallButton';
 import { AiActionPayload } from './types/ai';
 import { ErpLayoutTemplate, ErpColorTheme } from './types/theme';
@@ -1161,6 +1162,9 @@ function AppContent() {
         </div>
       )}
 
+      {/* Universal In-App Back Button, Breadcrumbs & Production Lifecycle Ribbon */}
+      <WorkspaceNavigationBar />
+
       {/* Zero-Lag Contextual Page & Button Training Bar (All Site Views) */}
       <PageGuideBar
         context={{
@@ -1215,7 +1219,10 @@ function AppContent() {
           layoutTemplate={layoutTemplate}
           colorTheme={colorTheme}
           initialSection={activeMasterSubSection}
-          onSectionChange={setActiveMasterSubSection}
+          onSectionChange={sec => {
+            setActiveMasterSubSection(sec);
+            router.navigate({ tab: 'master_data', masterSubSection: sec });
+          }}
           parts={parts}
           routings={routings}
           machines={machines}
@@ -1293,7 +1300,10 @@ function AppContent() {
                 <div className="flex items-center gap-1">
                   <button
                     type="button"
-                    onClick={() => setProductionViewMode('ERP_WORKBENCH')}
+                    onClick={() => {
+                      setProductionViewMode('ERP_WORKBENCH');
+                      router.navigate({ tab: 'production', productionViewMode: 'ERP_WORKBENCH' });
+                    }}
                     className={`sap-icon-tab ${
                       productionViewMode === 'ERP_WORKBENCH' ? 'sap-icon-tab-active' : ''
                     }`}
@@ -1302,7 +1312,10 @@ function AppContent() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => setProductionViewMode('VOUCHERS')}
+                    onClick={() => {
+                      setProductionViewMode('VOUCHERS');
+                      router.navigate({ tab: 'production', productionViewMode: 'VOUCHERS' });
+                    }}
                     className={`sap-icon-tab ${
                       productionViewMode === 'VOUCHERS' ? 'sap-icon-tab-active' : ''
                     }`}
@@ -1358,6 +1371,7 @@ function AppContent() {
               stageBalances={summary?.stageBalances || []}
               initialView={router.route.wipSubTab}
               initialTraceQuery={router.route.docQuery || undefined}
+              onViewChange={subView => router.navigate({ tab: 'wip', wipSubTab: subView })}
               onGlobalRefresh={loadAllData}
             />
           )}

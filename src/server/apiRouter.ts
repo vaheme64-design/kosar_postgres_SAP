@@ -151,6 +151,8 @@ import {
   replaceProductionWipStateFromSync,
   cascadePartUpdateInWipEngine,
   reconcileWipEngineWithParts,
+  collectDependentMoTree,
+  deleteManufacturingOrdersFromWipEngine,
 } from './productionWipEngine';
 import {
   calculateNetRequirements,
@@ -220,6 +222,7 @@ import {
   setAllTraceabilityTags,
   cascadePartUpdateInBomEngine,
   reconcileBomEngineWithParts,
+  removePartReferencesFromBomEngine,
 } from './bomAndParallelEngine';
 import {
   getMachineUtilizationReport,
@@ -274,6 +277,7 @@ import {
   clearFallbackProposalsStore,
   cascadePartUpdateInFallbackProposals,
   reconcileFallbackProposalsWithParts,
+  clearFallbackWipIdempotencyByMoIds,
 } from './inMemoryRelationalFallback';
 import {
   getScenarioSelectors,
@@ -3025,18 +3029,122 @@ apiRouter.post('/parts', (req: Request, res: Response) => handleUpsertPart(req, 
 apiRouter.put('/parts/:id', (req: Request, res: Response) => handleUpsertPart(req, res, req.params.id));
 apiRouter.patch('/parts/:id', (req: Request, res: Response) => handleUpsertPart(req, res, req.params.id));
 
+function removePartFromProductStructureNodes(nodes: any[], partId: string, codeUpper: string): any[] {
+  if (!Array.isArray(nodes)) return [];
+  const next: any[] = [];
+  for (const node of nodes) {
+    if (!node || typeof node !== 'object') continue;
+    const nodeCodeUpper = String(node.partCode || '').trim().toUpperCase();
+    if (node.partId === partId || (codeUpper && nodeCodeUpper === codeUpper)) {
+      continue;
+    }
+    const children = Array.isArray(node.children)
+      ? removePartFromProductStructureNodes(node.children, partId, codeUpper)
+      : undefined;
+    next.push(children ? { ...node, children } : node);
+  }
+  return next;
+}
+
+function getPartDependenciesSummary(part: Part) {
+  const codeUpper = String(part.code || '').trim().toUpperCase();
+  const boms = getAllBoms().filter(
+    b =>
+      b.assemblyPartId === part.id ||
+      String(b.assemblyPartCode || '').trim().toUpperCase() === codeUpper ||
+      (b.components || []).some(
+        c => c.componentPartId === part.id || String(c.componentPartCode || '').trim().toUpperCase() === codeUpper,
+      ),
+  );
+  const routings = routingsStore.filter(
+    r => r.partId === part.id || String(r.partCode || '').trim().toUpperCase() === codeUpper,
+  );
+  const structures = (productStructuresStore || []).filter(ps => {
+    const matchRoot = ps.rootPartId === part.id || String(ps.rootPartCode || '').trim().toUpperCase() === codeUpper;
+    const stack = Array.isArray(ps.nodes) ? [...ps.nodes] : [];
+    let matchNode = false;
+    while (stack.length > 0 && !matchNode) {
+      const n = stack.pop();
+      if (n?.partId === part.id || String(n?.partCode || '').trim().toUpperCase() === codeUpper) {
+        matchNode = true;
+      } else if (Array.isArray(n?.children)) {
+        stack.push(...n.children);
+      }
+    }
+    return matchRoot || matchNode;
+  });
+  const manufacturingOrders = manufacturingOrdersStore.filter(
+    m => m.partId === part.id || String(m.partCode || '').trim().toUpperCase() === codeUpper,
+  );
+  const { balances } = calculateDetailedStockBalances(inventoryDocsStore, reservationsStore, partsStore, serverQcHoldStore);
+  const totalStock = balances
+    .filter(b => b.partId === part.id || String(b.partCode || '').trim().toUpperCase() === codeUpper)
+    .reduce((s, b) => s + Number(b.physicalQty || 0), 0);
+
+  return {
+    partId: part.id,
+    partCode: part.code,
+    partName: part.name,
+    bomsCount: boms.length,
+    routingsCount: routings.length,
+    structuresCount: structures.length,
+    manufacturingOrdersCount: manufacturingOrders.length,
+    manufacturingOrderNumbers: manufacturingOrders.map(m => m.moNumber),
+    totalStockOnHand: Number(totalStock.toFixed(3)),
+  };
+}
+
+apiRouter.get('/parts/:id/dependencies', (req: Request, res: Response) => {
+  const { id } = req.params;
+  const part = partsStore.find(p => p.id === id || p.code.toUpperCase() === id.toUpperCase());
+  if (!part) {
+    return res.status(404).json({ success: false, error: 'قطعه مورد نظر در کاتالوگ یافت نشد.' });
+  }
+  return res.json({ success: true, data: getPartDependenciesSummary(part) });
+});
+
 apiRouter.delete('/parts/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
+    const cascadeCleanup = req.query.cascade === 'true' || req.body?.cascade === true;
     const index = partsStore.findIndex(p => p.id === id || p.code.toUpperCase() === id.toUpperCase());
     if (index < 0) {
       return res.status(404).json({ success: false, error: 'قطعه مورد نظر در کاتالوگ یافت نشد.' });
     }
+    const targetPart = partsStore[index];
+    const deps = getPartDependenciesSummary(targetPart);
+    if (deps.manufacturingOrdersCount > 0 && !cascadeCleanup) {
+      return res.status(409).json({
+        success: false,
+        error: `این قطعه در ${deps.manufacturingOrdersCount} دستور تولید فعال/ثبت‌شده (${deps.manufacturingOrderNumbers.slice(0, 3).join('، ')}) استفاده شده است. ابتدا دستورات تولید را با بازگشت موجودی حذف کنید یا حذف آبشاری را تأیید نمایید.`,
+        dependencies: deps,
+      });
+    }
+
     const removed = partsStore[index];
+    const codeUpper = String(removed.code || '').trim().toUpperCase();
     partsStore.splice(index, 1);
     delete serverVipPartsStore[removed.id];
     delete serverVipPartsStore[removed.code];
-    delete serverVipPartsStore[removed.code.toUpperCase()];
+    delete serverVipPartsStore[codeUpper];
+
+    // Clean orphaned BOMs, ParallelFlows, Product Structures & Routings referencing this part
+    const bomClean = removePartReferencesFromBomEngine(removed.id, removed.code);
+    const beforeRoutings = routingsStore.length;
+    routingsStore = routingsStore.filter(
+      r => r.partId !== removed.id && String(r.partCode || '').trim().toUpperCase() !== codeUpper,
+    );
+    const routingsRemoved = beforeRoutings - routingsStore.length;
+
+    let structuresUpdated = 0;
+    productStructuresStore = (productStructuresStore || [])
+      .filter(ps => !(ps.rootPartId === removed.id || String(ps.rootPartCode || '').trim().toUpperCase() === codeUpper))
+      .map(ps => {
+        if (!Array.isArray(ps.nodes)) return ps;
+        const cleanedNodes = removePartFromProductStructureNodes(ps.nodes, removed.id, codeUpper);
+        structuresUpdated += 1;
+        return { ...ps, nodes: cleanedNodes };
+      });
 
     if (isDatabaseUrlConfigured()) {
       try {
@@ -3066,14 +3174,18 @@ apiRouter.delete('/parts/:id', async (req: Request, res: Response) => {
       entityName: 'Part',
       entityId: removed.id,
       user: { uid: 'SYSTEM', displayName: 'کاربر سامانه' },
-      details: `حذف قطعه «${removed.name}» (${removed.code}) از کاتالوگ مرکزی و غیرفعال‌سازی/پاکسازی در پایگاه داده.`,
+      details: `حذف قطعه «${removed.name}» (${removed.code}) و پاکسازی وابستگی‌ها (${bomClean.bomsRemoved} BOM، ${bomClean.componentsRemoved} ردیفBOM، ${routingsRemoved} مسیر تولید).`,
       timestamp: new Date().toISOString(),
     });
 
     skipDbPartsMergeAfterPull = false;
     lastLocalPartMutationMs = Date.now();
     await persistInventoryAppState();
-    return res.json({ success: true, message: `قطعه «${removed.name}» با موفقیت از کاتالوگ حذف گردید.` });
+    return res.json({
+      success: true,
+      message: `قطعه «${removed.name}» و ارجاعات وابسته (${bomClean.bomsRemoved} BOM، ${routingsRemoved} مسیر تولید) با موفقیت حذف و پاکسازی شدند.`,
+      cleanup: { ...bomClean, routingsRemoved, structuresUpdated },
+    });
   } catch (error) {
     return res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در حذف قطعه' });
   }
@@ -3256,49 +3368,162 @@ apiRouter.post('/production/product-structures', async (req: Request, res: Respo
 
 apiRouter.post('/production/boms/generate-sub-mos', async (req: Request, res: Response) => {
   try {
-    const { bomId, plannedQty = 500, masterMoNumber = `MO-${Date.now()}` } = req.body;
+    const {
+      bomId,
+      plannedQty = 500,
+      masterMoNumber = `MO-${Date.now()}`,
+      startDate,
+      dueDate,
+      componentIds,
+    } = req.body || {};
+
+    const numericPlannedQty = Number(plannedQty);
+    if (!Number.isFinite(numericPlannedQty) || numericPlannedQty <= 0) {
+      return res.status(400).json({ success: false, error: 'تیراژ برنامه‌ریزی‌شده باید عددی بزرگ‌تر از صفر باشد.' });
+    }
+
     const bom = getAllBoms().find(b => b.id === bomId);
     if (!bom) {
       return res.status(404).json({ success: false, error: 'BOM مورد نظر یافت نشد.' });
     }
 
-    const subComponents = bom.components.filter(c => c.subMoRequired);
-    const createdSubMos = subComponents.map((c, idx) => {
-      const subMoNumber = `SUB-${masterMoNumber}-${String.fromCharCode(65 + idx)}`;
-      const reqQty = Math.ceil(Number(plannedQty) * c.quantityPerAssembly * (1 + (c.scrapAllowancePercent || 0) / 100));
-      const matchedPart = partsStore.find(p => p.id === c.componentPartId || p.code === c.componentPartCode);
-      if (matchedPart) {
-        createManufacturingOrder({
-          partId: matchedPart.id,
-          targetQuantity: reqQty,
-          dueDate: new Date(Date.now() + 5 * 86400000).toISOString().slice(0, 10),
-          notes: `دستور ساخت فرعی (Sub-MO: ${subMoNumber}) منشعب از BOM «${bom.assemblyPartCode}» و دستور کار اصلی ${masterMoNumber}`,
-          createdBy: 'موتور انفجار BOM (SAP PP)',
+    let subComponents = bom.components.filter(c => c.subMoRequired);
+    if (Array.isArray(componentIds) && componentIds.length > 0) {
+      const allowedSet = new Set(componentIds.map(String));
+      subComponents = subComponents.filter(c => allowedSet.has(c.id) || allowedSet.has(c.componentPartCode));
+    }
+    if (subComponents.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'در این BOM هیچ زیرقطعه نیازمند صدور دستور ساخت فرعی (Sub-MO) انتخاب نشده است.',
+      });
+    }
+
+    // Strict pre-flight validation: no silent fallback or fake PLANNED status when a Part or Routing is missing
+    const missingComponents: Array<{
+      componentId: string;
+      componentPartCode: string;
+      componentPartName: string;
+      reason: string;
+    }> = [];
+
+    const resolvedPlans = subComponents.map(c => {
+      const codeUpper = String(c.componentPartCode || '').trim().toUpperCase();
+      const matchedPart = partsStore.find(
+        p => p.id === c.componentPartId || String(p.code || '').trim().toUpperCase() === codeUpper,
+      );
+      const routing =
+        (c.subRoutingId ? routingsStore.find(r => r.id === c.subRoutingId) : undefined) ||
+        (matchedPart
+          ? routingsStore.find(
+              r => r.partId === matchedPart.id || String(r.partCode || '').trim().toUpperCase() === matchedPart.code.toUpperCase(),
+            )
+          : undefined);
+
+      if (!matchedPart) {
+        missingComponents.push({
+          componentId: c.id,
+          componentPartCode: c.componentPartCode,
+          componentPartName: c.componentPartName,
+          reason: 'قطعه فرعی در کاتالوگ مرکزی قطعات (Parts) تعریف نشده است.',
+        });
+      } else if (!routing || !Array.isArray(routing.operations) || routing.operations.length === 0) {
+        missingComponents.push({
+          componentId: c.id,
+          componentPartCode: c.componentPartCode,
+          componentPartName: c.componentPartName,
+          reason: 'مسیر تولید مصوب (Routing) با ایستگاه‌های عملیاتی برای این زیرقطعه تعریف نشده است.',
         });
       }
-      return {
-        subMoNumber,
-        masterMoNumber,
-        componentPartCode: c.componentPartCode,
-        componentPartName: c.componentPartName,
+
+      return { component: c, matchedPart, routing };
+    });
+
+    if (missingComponents.length > 0) {
+      return res.status(400).json({
+        success: false,
+        error: `صدور دستور ساخت فرعی به دلیل ناقص بودن مسیر تولید (${missingComponents.length} مورد) متوقف شد. لطفاً ابتدا مسیر تولید را در بخش اطلاعات پایه / Routings تعریف کنید.`,
+        missingComponents,
+      });
+    }
+
+    const parentMo = manufacturingOrdersStore.find(
+      m => m.moNumber === String(masterMoNumber).trim() || m.id === String(masterMoNumber).trim(),
+    );
+
+    const createdMoIds = new Set<string>();
+    const createdMoNumbers = new Set<string>();
+    const createdSubMos: any[] = [];
+
+    for (const plan of resolvedPlans) {
+      const { component: c, matchedPart, routing } = plan;
+      const reqQty = Math.ceil(
+        numericPlannedQty * Number(c.quantityPerAssembly || 1) * (1 + (Number(c.scrapAllowancePercent) || 0) / 100),
+      );
+
+      const moResult = createManufacturingOrder({
+        partId: matchedPart!.id,
+        partCode: matchedPart!.code,
+        routingId: routing!.id,
+        parentMoId: parentMo?.id,
+        parentMoNumber: String(masterMoNumber).trim() || parentMo?.moNumber,
+        bomId: bom.id,
+        targetQuantity: reqQty,
+        initialInputQuantity: reqQty,
+        startDate: typeof startDate === 'string' && startDate ? startDate : undefined,
+        dueDate:
+          typeof dueDate === 'string' && dueDate
+            ? dueDate
+            : new Date(Date.now() + 5 * 86400000).toISOString().slice(0, 10),
+        notes: `دستور ساخت فرعی (Sub-MO) منشعب از BOM «${bom.assemblyPartCode}» و دستور کار اصلی ${masterMoNumber}`,
+        createdBy: 'موتور انفجار BOM (SAP PP)',
+      });
+
+      if (!moResult.success || !moResult.data) {
+        if (createdMoIds.size > 0) {
+          deleteManufacturingOrdersFromWipEngine({ moIds: createdMoIds, moNumbers: createdMoNumbers });
+        }
+        return res.status(400).json({
+          success: false,
+          error: moResult.error || `خطا در ایجاد دستور ساخت فرعی برای «${c.componentPartCode}»`,
+        });
+      }
+
+      createdMoIds.add(moResult.data.id);
+      createdMoNumbers.add(moResult.data.moNumber);
+      createdSubMos.push({
+        moId: moResult.data.id,
+        subMoNumber: moResult.data.moNumber,
+        masterMoNumber: String(masterMoNumber).trim(),
+        componentPartCode: matchedPart!.code,
+        componentPartName: matchedPart!.name,
         requiredQty: reqQty,
         unit: c.unit,
         stageJoined: c.stageJoinedStepNumber || 30,
-        status: 'PLANNED',
-        createdAt: new Date().toISOString(),
-      };
-    });
+        routingId: routing!.id,
+        routingVersion: routing!.version,
+        operationsCount: moResult.data.operations.length,
+        operations: moResult.data.operations.map(op => ({
+          stepNumber: op.stepNumber,
+          stepCode: op.stepCode,
+          stepName: op.stepName,
+          machineName: op.machineName,
+        })),
+        status: moResult.data.status,
+        createdAt: moResult.data.createdAt,
+      });
+    }
 
     await persistProductionWipState();
     await persistInventoryAppState();
 
-    res.json({
+    return res.status(201).json({
       success: true,
-      message: `تعداد ${createdSubMos.length} دستور ساخت فرعی (Sub-MO) متناظر با قطعات درخت محصول در سالن تولید صادر و ذخیره گردید.`,
+      message: `تعداد ${createdSubMos.length} دستور ساخت فرعی (Sub-MO) واقعی مبتنی بر مسیر تولید مصوب در کارگاه ایجاد و ذخیره گردید.`,
       data: createdSubMos,
     });
   } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
+    return res.status(500).json({ success: false, error: err?.message || 'خطا در صدور دستورات ساخت فرعی' });
   }
 });
 
@@ -11374,6 +11599,410 @@ apiRouter.post('/wip/manufacturing-orders', async (req: Request, res: Response) 
     res.status(500).json({
       success: false,
       error: error instanceof Error ? error.message : 'خطا در ایجاد دستور ساخت',
+    });
+  }
+});
+
+/**
+ * 17.4a. Analyze Cascading MO Delete + Full Inventory Rollback Impact
+ */
+function analyzeMoRollbackImpact(moIdOrNumber: string, cascadeSubMos = true) {
+  const root = getManufacturingOrderById(moIdOrNumber);
+  if (!root) return null;
+
+  const tree = cascadeSubMos ? collectDependentMoTree(root.id) : [root];
+  const moIds = new Set(tree.map(m => m.id));
+  const moNumbers = new Set(tree.map(m => m.moNumber));
+
+  const docMatchesMo = (doc: InventoryDocument) => {
+    if (doc.documentType === 'REVERSAL' || doc.documentStatus === 'CANCELLED' || doc.postingStatus === 'REVERSED') {
+      return false;
+    }
+    const legacyProdOrderId = (doc as unknown as { productionOrderId?: string }).productionOrderId;
+    if (legacyProdOrderId && moIds.has(legacyProdOrderId)) return true;
+    if (doc.referenceNumber && (moNumbers.has(doc.referenceNumber) || moIds.has(doc.referenceNumber))) return true;
+    if (
+      Array.isArray(doc.documentFlowLinks) &&
+      doc.documentFlowLinks.some(fl => moNumbers.has(fl.docNumber) || moIds.has(fl.docNumber))
+    ) {
+      return true;
+    }
+    const note = String(doc.auditNote || '');
+    for (const num of moNumbers) {
+      if (num && note.includes(num)) return true;
+    }
+    return (doc.lines || []).some(l => {
+      const ln = String(l.notes || '');
+      for (const num of moNumbers) {
+        if (num && ln.includes(num)) return true;
+      }
+      return false;
+    });
+  };
+
+  const linkedDocs = inventoryDocsStore.filter(docMatchesMo);
+  const postedIssues = linkedDocs.filter(
+    d => d.postingStatus === 'POSTED' && !['RECEIPT_FINISHED_GOODS', 'RECEIPT_RAW_MATERIAL', 'OPENING_BALANCE'].includes(d.documentType),
+  );
+  const postedReceipts = linkedDocs.filter(
+    d => d.postingStatus === 'POSTED' && ['RECEIPT_FINISHED_GOODS', 'RECEIPT_RAW_MATERIAL'].includes(d.documentType),
+  );
+  const draftDocs = linkedDocs.filter(d => d.postingStatus !== 'POSTED');
+
+  const { balances } = calculateDetailedStockBalances(inventoryDocsStore, reservationsStore, partsStore, serverQcHoldStore);
+
+  // Sum quantities that will be restored back into warehouse FIRST (when issues are reversed)
+  const restoredByKey = new Map<string, number>();
+  const materialsToReturn: Array<{
+    documentId: string;
+    documentNumber: string;
+    partId: string;
+    partCode: string;
+    partName: string;
+    quantity: number;
+    quantityKg: number;
+    unit: string;
+    warehouseId: string;
+    warehouseName: string;
+    lotNumber?: string;
+  }> = [];
+
+  for (const doc of postedIssues) {
+    for (const line of doc.lines || []) {
+      const qty = Number(line.quantity || 0);
+      if (qty <= 0) continue;
+      materialsToReturn.push({
+        documentId: doc.id,
+        documentNumber: doc.documentNumber,
+        partId: line.partId,
+        partCode: line.partCode,
+        partName: line.partName,
+        quantity: qty,
+        quantityKg: Number(line.quantityKg || qty),
+        unit: line.unit || 'PCS',
+        warehouseId: doc.warehouseId,
+        warehouseName: doc.warehouseName,
+        lotNumber: line.lotNumber,
+      });
+      const k = `${line.partId}::${doc.warehouseId}`;
+      restoredByKey.set(k, (restoredByKey.get(k) || 0) + qty);
+    }
+  }
+
+  const outputsToDeduct: Array<{
+    documentId: string;
+    documentNumber: string;
+    partId: string;
+    partCode: string;
+    partName: string;
+    quantity: number;
+    quantityKg: number;
+    unit: string;
+    warehouseId: string;
+    warehouseName: string;
+    lotNumber?: string;
+    availableAfterIssueReturn: number;
+    shortage: number;
+  }> = [];
+  const blockingErrors: string[] = [];
+
+  for (const doc of postedReceipts) {
+    for (const line of doc.lines || []) {
+      const qty = Number(line.quantity || 0);
+      if (qty <= 0) continue;
+      const whMatches = balances.filter(b => b.partId === line.partId && b.warehouseId === doc.warehouseId);
+      const currentWhQty = whMatches.reduce((s, b) => s + Number(b.physicalQty || 0), 0);
+      const restoredForWh = restoredByKey.get(`${line.partId}::${doc.warehouseId}`) || 0;
+      const available = Number((currentWhQty + restoredForWh).toFixed(3));
+      const shortage = Math.max(0, Number((qty - available).toFixed(3)));
+      outputsToDeduct.push({
+        documentId: doc.id,
+        documentNumber: doc.documentNumber,
+        partId: line.partId,
+        partCode: line.partCode,
+        partName: line.partName,
+        quantity: qty,
+        quantityKg: Number(line.quantityKg || qty),
+        unit: line.unit || 'PCS',
+        warehouseId: doc.warehouseId,
+        warehouseName: doc.warehouseName,
+        lotNumber: line.lotNumber,
+        availableAfterIssueReturn: available,
+        shortage,
+      });
+      if (shortage > 0.001) {
+        blockingErrors.push(
+          `کالای «${line.partName} (${line.partCode})» به مقدار ${qty} ${line.unit || 'PCS'} پس از تولید (سند ${doc.documentNumber}) از انبار «${doc.warehouseName}» خارج یا ارسال شده است (موجودی قابل کسر: ${available}). ابتدا سند ارسال/خروج متناظر را ابطال کنید.`,
+        );
+      }
+    }
+  }
+
+  const matchingTransfers = wipTransfersStore.filter(t => moIds.has(t.moId) || moNumbers.has(t.moNumber));
+  const matchingLogs = productionLogsStore.filter(l => moIds.has(l.moId) || moNumbers.has(l.moNumber));
+  const matchingReservations = reservationsStore.filter(
+    r => (r.reservedFor && (moNumbers.has(r.reservedFor) || moIds.has(r.reservedFor))) || moIds.has((r as unknown as { moId?: string }).moId || ''),
+  );
+  const matchingTransactions = transactionsStore.filter(tx => {
+    const ref = String(tx.referenceDoc || '');
+    const note = String(tx.notes || '');
+    for (const num of moNumbers) {
+      if (num && (ref.includes(num) || note.includes(num))) return true;
+    }
+    return false;
+  });
+
+  return {
+    rootMo: root,
+    tree,
+    moIds,
+    moNumbers,
+    postedIssues,
+    postedReceipts,
+    draftDocs,
+    materialsToReturn,
+    outputsToDeduct,
+    matchingTransfers,
+    matchingLogs,
+    matchingReservations,
+    matchingTransactions,
+    blockingErrors,
+  };
+}
+
+apiRouter.get('/wip/manufacturing-orders/:id/rollback-preview', (req: Request, res: Response) => {
+  try {
+    const cascadeSubMos = req.query.cascadeSubMos !== 'false';
+    const impact = analyzeMoRollbackImpact(req.params.id, cascadeSubMos);
+    if (!impact) {
+      return res.status(404).json({ success: false, error: 'دستور تولید مورد نظر یافت نشد.' });
+    }
+    return res.json({
+      success: true,
+      data: {
+        rootMoId: impact.rootMo.id,
+        rootMoNumber: impact.rootMo.moNumber,
+        canRollback: impact.blockingErrors.length === 0,
+        blockingErrors: impact.blockingErrors,
+        mosToDelete: impact.tree.map((m, idx) => ({
+          id: m.id,
+          moNumber: m.moNumber,
+          partId: m.partId,
+          partCode: m.partCode,
+          partName: m.partName,
+          targetQuantity: m.targetQuantity,
+          initialInputQuantity: m.initialInputQuantity,
+          completedQuantity: m.completedQuantity,
+          status: m.status,
+          isSubMo: idx > 0 || Boolean(m.parentMoId || m.parentMoNumber),
+          operationsCount: (m.operations || []).length,
+        })),
+        materialsToReturn: impact.materialsToReturn,
+        outputsToDeduct: impact.outputsToDeduct,
+        draftDocsToCancel: impact.draftDocs.map(d => ({
+          id: d.id,
+          documentNumber: d.documentNumber,
+          documentType: d.documentType,
+        })),
+        wipTransfersCount: impact.matchingTransfers.length,
+        productionLogsCount: impact.matchingLogs.length,
+        reservationsCount: impact.matchingReservations.length,
+        kardexTransactionsCount: impact.matchingTransactions.length,
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'خطا در پیش‌بینی بازگشت موجودی و حذف دستور تولید',
+    });
+  }
+});
+
+/**
+ * 17.4c. Cascading Delete Manufacturing Order + Reversal of Consumed/Produced Inventory
+ */
+apiRouter.delete('/wip/manufacturing-orders/:id', async (req: Request, res: Response) => {
+  try {
+    if (!assertAuthorizedRole(req, res, ['ADMIN', 'PRODUCTION_MANAGER'], 'حذف کامل دستور تولید و بازگشت موجودی به انبار')) {
+      return;
+    }
+
+    const reasonRaw = req.body?.reason ?? req.query.reason;
+    const reason = typeof reasonRaw === 'string' ? reasonRaw.trim() : '';
+    if (!reason || reason.length < 3) {
+      return res.status(400).json({
+        success: false,
+        error: 'ذکر دلیل ممیزی (حداقل ۳ کاراکتر) برای حذف دستور تولید و ابطال اسناد انبار الزامی است.',
+      });
+    }
+
+    const cascadeSubMos = req.body?.cascadeSubMos !== false && req.query.cascadeSubMos !== 'false';
+    const impact = analyzeMoRollbackImpact(req.params.id, cascadeSubMos);
+    if (!impact) {
+      return res.status(404).json({ success: false, error: 'دستور تولید مورد نظر جهت حذف یافت نشد.' });
+    }
+
+    if (impact.blockingErrors.length > 0) {
+      return res.status(409).json({
+        success: false,
+        error: impact.blockingErrors[0],
+        blockingErrors: impact.blockingErrors,
+      });
+    }
+
+    const revUser = {
+      uid: req.body?.user?.uid || 'USR-ADMIN',
+      displayName: req.body?.user?.displayName || 'مدیر تولید / سیستم',
+    };
+
+    const reversalDocsCreated: InventoryDocument[] = [];
+    // Order matters: reverse issues FIRST so any WIP sub-assemblies return to WH-WIP-WELD before reversing WIP receipts
+    const docsToReverse = [...impact.postedIssues, ...impact.postedReceipts];
+
+    for (const targetDoc of docsToReverse) {
+      if (targetDoc.postingStatus === 'REVERSED') continue;
+      const { balances } = calculateDetailedStockBalances(inventoryDocsStore, reservationsStore, partsStore, serverQcHoldStore);
+      const revRes = createReversalDocument(
+        targetDoc,
+        `بازگشت خودکار موجودی بابت حذف دستور تولید ${impact.rootMo.moNumber}: ${reason}`,
+        revUser,
+        balances,
+      );
+      if (!revRes.success || !revRes.reversalDocument) {
+        return res.status(409).json({
+          success: false,
+          error: revRes.error || `خطا در ابطال و بازگشت سند «${targetDoc.documentNumber}»`,
+        });
+      }
+
+      if (isDatabaseUrlConfigured()) {
+        const dbRes = await postDocumentInDbTransaction(revRes.reversalDocument, revUser);
+        if (!dbRes.success) {
+          targetDoc.postingStatus = 'POSTED';
+          return res.status(409).json({
+            success: false,
+            error: dbRes.error || `ثبت سند برگشتی «${targetDoc.documentNumber}» در PostgreSQL ناموفق بود.`,
+          });
+        }
+      }
+
+      reverseDocumentSideEffects(targetDoc);
+      inventoryDocsStore.unshift(revRes.reversalDocument);
+      reversalDocsCreated.push(revRes.reversalDocument);
+      if (revRes.auditRecord) {
+        auditLogsStore.unshift(revRes.auditRecord);
+      }
+    }
+
+    // Cancel non-posted draft inventory documents linked to deleted MOs
+    let draftsCancelled = 0;
+    for (const draftDoc of impact.draftDocs) {
+      draftDoc.documentStatus = 'CANCELLED';
+      draftDoc.auditNote = `${draftDoc.auditNote ? draftDoc.auditNote + ' | ' : ''}لغو بابت حذف ${impact.rootMo.moNumber}: ${reason}`;
+      draftDoc.updatedAt = new Date().toISOString();
+      draftsCancelled += 1;
+    }
+
+    // Clean reservations & legacy transaction ledger entries tied to the deleted MO tree
+    const beforeReservations = reservationsStore.length;
+    reservationsStore = reservationsStore.filter(
+      r => !((r.reservedFor && (impact.moNumbers.has(r.reservedFor) || impact.moIds.has(r.reservedFor))) || impact.moIds.has((r as unknown as { moId?: string }).moId || '')),
+    );
+    const reservationsRemoved = beforeReservations - reservationsStore.length;
+
+    const beforeTxs = transactionsStore.length;
+    transactionsStore = transactionsStore.filter(tx => {
+      const ref = String(tx.referenceDoc || '');
+      const note = String(tx.notes || '');
+      for (const num of impact.moNumbers) {
+        if (num && (ref.includes(num) || note.includes(num))) return false;
+      }
+      return true;
+    });
+    const transactionsRemoved = beforeTxs - transactionsStore.length;
+
+    // Clean relational links & tables if PostgreSQL is connected
+    if (isDatabaseUrlConfigured()) {
+      try {
+        const prisma = getPrismaClient();
+        const moIdArray = Array.from(impact.moIds);
+        const moNumArray = Array.from(impact.moNumbers);
+        const links = await prisma.wipManufacturingOrderLink.findMany({
+          where: { wipManufacturingOrderId: { in: moIdArray } },
+          select: { id: true, manufacturingOrderId: true },
+        }).catch(() => []);
+        const relMoIds = Array.from(new Set(links.map(l => l.manufacturingOrderId)));
+        if (relMoIds.length > 0) {
+          await prisma.wipOperationLink.deleteMany({
+            where: { manufacturingOrderLinkId: { in: links.map(l => l.id) } },
+          }).catch(() => {});
+          await prisma.wipManufacturingOrderLink.deleteMany({
+            where: { id: { in: links.map(l => l.id) } },
+          }).catch(() => {});
+        }
+        const matchedRelMos = await prisma.manufacturingOrder.findMany({
+          where: {
+            OR: [
+              { id: { in: relMoIds } },
+              { moNumber: { in: moNumArray } },
+            ],
+          },
+          select: { id: true },
+        }).catch(() => []);
+        const allRelMoIds = Array.from(new Set([...relMoIds, ...matchedRelMos.map(m => m.id)]));
+        if (allRelMoIds.length > 0) {
+          await prisma.productionReport.deleteMany({ where: { manufacturingOrderId: { in: allRelMoIds } } }).catch(() => {});
+          await prisma.inventoryReservation.deleteMany({ where: { reservedForMOId: { in: allRelMoIds } } }).catch(() => {});
+          await prisma.productionOperation.deleteMany({ where: { manufacturingOrderId: { in: allRelMoIds } } }).catch(() => {});
+          await prisma.manufacturingOrder.deleteMany({ where: { id: { in: allRelMoIds } } }).catch(() => {});
+        }
+        await syncCoilsToPostgres(physicalCoilsStore);
+      } catch (dbErr) {
+        console.warn('[KPIMS /wip/manufacturing-orders DELETE] DB cleanup warning:', dbErr);
+      }
+    }
+
+    // Delete MOs, WIP transfers, WIP logs, and clear fallback idempotency entries
+    const wipRemoved = deleteManufacturingOrdersFromWipEngine({
+      moIds: impact.moIds,
+      moNumbers: impact.moNumbers,
+    });
+    clearFallbackWipIdempotencyByMoIds(impact.moIds, impact.moNumbers);
+
+    auditLogsStore.unshift({
+      id: `AUD-MO-ROLLBACK-${Date.now()}`,
+      action: 'CASCADE_DELETE_MO_ROLLBACK',
+      entityName: 'ManufacturingOrder',
+      entityId: impact.rootMo.id,
+      user: revUser,
+      details: `حذف کامل دستور تولید «${impact.rootMo.moNumber}» به همراه ${wipRemoved.deletedMoCount - 1} زیرمجموعه و ابطال جبرانی ${reversalDocsCreated.length} سند انبار (${impact.materialsToReturn.length} قلم بازگشت ماده/زیرمجموعه به انبار). دلیل: ${reason}`,
+      timestamp: new Date().toISOString(),
+    });
+
+    await persistProductionWipState();
+    await persistInventoryAppState();
+
+    return res.json({
+      success: true,
+      message: `دستور تولید «${impact.rootMo.moNumber}» و ${Math.max(0, wipRemoved.deletedMoCount - 1)} زیرمجموعه وابسته با موفقیت حذف و کلیه موجودی‌های انبار به وضعیت قبل بازگردانده شدند.`,
+      summary: {
+        deletedMoNumbers: Array.from(impact.moNumbers),
+        deletedMoCount: wipRemoved.deletedMoCount,
+        deletedTransfersCount: wipRemoved.deletedTransfersCount,
+        deletedLogsCount: wipRemoved.deletedLogsCount,
+        reversalDocumentsCount: reversalDocsCreated.length,
+        reversalDocumentNumbers: reversalDocsCreated.map(d => d.documentNumber),
+        draftsCancelled,
+        reservationsRemoved,
+        transactionsRemoved,
+        materialsReturnedCount: impact.materialsToReturn.length,
+        outputsDeductedCount: impact.outputsToDeduct.length,
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'خطا در حذف کامل دستور تولید و بازگشت موجودی',
     });
   }
 });

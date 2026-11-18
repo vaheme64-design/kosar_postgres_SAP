@@ -249,7 +249,7 @@ export const ProductionPlanningModuleView: React.FC<ProductionPlanningModuleView
     return () => window.removeEventListener('kpims-master-data-updated', handler);
   }, []);
 
-  const handleRegenerate = async () => {
+  const executeRegenerate = async () => {
     setLoading(true);
     try {
       const res = await fetch('/api/planning/proposals/regenerate', {
@@ -270,6 +270,17 @@ export const ProductionPlanningModuleView: React.FC<ProductionPlanningModuleView
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleRegenerate = async () => {
+    requestConfirm({
+      title: 'بازتولید پیشنهاد برنامه تولید از داده‌های جاری',
+      message:
+        'آیا می‌خواهید موتور برنامه‌ریزی مجدداً با بررسی سفارشات باز، موجودی انبار، BOM، مسیرهای تولید و ظرفیت پرس‌ها پیشنهاد جدید بسازد؟',
+      confirmLabel: 'تأیید و محاسبه مجدد برنامه',
+      variant: 'warning',
+      onConfirm: executeRegenerate,
+    });
   };
 
   const handleCreateCustomerOrder = async (payload: any) => {
@@ -686,7 +697,17 @@ export const ProductionPlanningModuleView: React.FC<ProductionPlanningModuleView
                   return (
                     <div
                       key={order.id}
-                      onClick={() => setSelectedOrderId(order.id)}
+                      onClick={() => {
+                        if (selectedOrderId && selectedOrderId !== order.id) {
+                          const prevId = selectedOrderId;
+                          router.pushSelectionStep(
+                            `سفارش ${order.orderNumber}`,
+                            () => setSelectedOrderId(prevId),
+                            `planning-order-${order.id}`,
+                          );
+                        }
+                        setSelectedOrderId(order.id);
+                      }}
                       className={`p-3 rounded border cursor-pointer transition-all ${
                         isSelected
                           ? 'bg-[#e5f3fa] border-[#007cc0] shadow-sm'
@@ -914,11 +935,19 @@ export const ProductionPlanningModuleView: React.FC<ProductionPlanningModuleView
                     {plan.approvalStatus === 'APPROVED' && (
                       <button
                         type="button"
-                        onClick={async () => {
-                          const res = await handleReleaseMo(plan.id, 'سرپرست برنامه‌ریزی');
-                          if (res.success) {
-                            setPlanToast('دستور کار کارگاهی (MO) با موفقیت صادر و به واحد WIP ارسال شد.');
-                          }
+                        onClick={() => {
+                          requestConfirm({
+                            title: `صدور رسمی دستور کار ساخت (MO) از برنامه ${plan.planNumber}`,
+                            message: `آیا صدور دستور کار برای قطعه «${plan.partName} (${plan.partCode})» به تیراژ ${formatNumber(plan.proposedQuantity)} عدد را تأیید می‌کنید؟`,
+                            confirmLabel: 'تأیید و صدور MO',
+                            variant: 'emerald',
+                            onConfirm: async () => {
+                              const res = await handleReleaseMo(plan.id, 'سرپرست برنامه‌ریزی');
+                              if (res.success) {
+                                setPlanToast('دستور کار کارگاهی (MO) با موفقیت صادر و به واحد WIP ارسال شد.');
+                              }
+                            },
+                          });
                         }}
                         className="sap-btn-emphasized flex items-center gap-1.5 px-3 py-1.5 text-xs cursor-pointer whitespace-nowrap"
                       >

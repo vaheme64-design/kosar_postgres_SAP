@@ -39,7 +39,8 @@ import {
   FastForward,
   Info,
 } from 'lucide-react';
-import { Part, Routing, DetailedStockBalance, Machine } from '../../types/inventory';
+import { Part, Routing, DetailedStockBalance, Machine, OperationDefinition } from '../../types/inventory';
+import { AdvancedBomDefinition } from '../../types/bomAndParallelFlow';
 import { formatNumber, toPersianDigits, exportToCsv } from '../../utils/formatters';
 import { SearchableSelect } from '../common/SearchableSelect';
 import { ComprehensiveProductionReportView } from '../reports/ComprehensiveProductionReportView';
@@ -50,6 +51,7 @@ import { EmptyState } from '../common/EmptyState';
 import { MetricTooltip } from '../common/MetricTooltip';
 import { getDynamicWorkDays, getCurrentJalaliDate, getJalaliMonthDays, getTodayWorkDayIndex } from '../../utils/jalali';
 import { useErpRouter } from '../../context/RouterContext';
+import { useEnterpriseUx } from '../../context/EnterpriseUxContext';
 import { PreMoWipInspectionModal } from '../workflow/PreMoWipInspectionModal';
 import { HighwayPartScenario } from '../workflow/FactoryHighwayWorkbench';
 import { AuditConfirmationModal } from '../common/AuditConfirmationModal';
@@ -314,6 +316,76 @@ export const ErpProductionWorkbenchView: React.FC<ErpProductionWorkbenchViewProp
   // Major Operational Sub-Modules
   const router = useErpRouter();
   const auditAction = useAuditAction();
+  const { requestConfirm } = useEnterpriseUx();
+  const [liveBoms, setLiveBoms] = useState<AdvancedBomDefinition[]>([]);
+  const [liveStdOperations, setLiveStdOperations] = useState<OperationDefinition[]>([]);
+  const [customNewOps, setCustomNewOps] = useState<
+    Array<{
+      opNo: number;
+      code: string;
+      name: string;
+      hall: string;
+      machineCode: string;
+      machineName: string;
+      ratePerHour: number;
+      dayIndex: number;
+      enabled: boolean;
+    }>
+  >([]);
+
+  useEffect(() => {
+    const loadDynamicConfigs = async () => {
+      try {
+        const [bomRes, opRes] = await Promise.all([fetch('/api/production/boms'), fetch('/api/operations')]);
+        const [bomJson, opJson] = await Promise.all([bomRes.json(), opRes.json()]);
+        if (bomJson.success && Array.isArray(bomJson.data)) {
+          setLiveBoms(bomJson.data);
+        }
+        if (opJson.success && Array.isArray(opJson.data)) {
+          const opsList: OperationDefinition[] = opJson.data;
+          setLiveStdOperations(opsList);
+          setCustomNewOps(prev =>
+            prev.length > 0
+              ? prev
+              : opsList.slice(0, 6).map((op, idx) => ({
+                  opNo: (idx + 1) * 10,
+                  code: op.code || `OP${(idx + 1) * 10}`,
+                  name: op.name,
+                  hall: 'سالن تولید',
+                  machineCode: machines[0]?.code || 'PRS-250T-01',
+                  machineName: machines[0]?.name || 'ماشین اختصاصی',
+                  ratePerHour: op.cycleTimeSec > 0 ? Math.round(3600 / op.cycleTimeSec) : 350,
+                  dayIndex: Math.min(5, idx + 1),
+                  enabled: idx < 3,
+                })),
+          );
+        }
+      } catch {
+        // fallback cleanly
+      }
+    };
+    loadDynamicConfigs();
+    window.addEventListener('kpims-master-data-updated', loadDynamicConfigs);
+    return () => window.removeEventListener('kpims-master-data-updated', loadDynamicConfigs);
+  }, []);
+
+  const resolveBomSubComponents = (partId?: string, partCode?: string) => {
+    const codeUpper = String(partCode || '').trim().toUpperCase();
+    const matchedBom = liveBoms.find(
+      b =>
+        b.assemblyPartId === partId ||
+        String(b.assemblyPartCode || '').trim().toUpperCase() === codeUpper,
+    );
+    if (!matchedBom || !matchedBom.components?.length) return [];
+    return matchedBom.components
+      .filter(c => c.subMoRequired || c.componentType === 'WIP_SUB_PART' || c.componentType === 'RAW_SHEET')
+      .map(c => ({
+        name: c.componentPartName,
+        qtyPerParent: c.quantityPerAssembly || 1,
+        unit: c.unit === 'PCS' ? 'عدد' : c.unit,
+        stage: `مرحله ${c.stageJoinedStepNumber || 30}`,
+      }));
+  };
   const [activeModuleTab, setActiveModuleTab] = useState<ProductionWorkbenchSubTab>(() => {
     if (router.route.tab === 'production' && router.route.productionModuleTab) {
       return router.route.productionModuleTab;
@@ -913,10 +985,7 @@ export const ErpProductionWorkbenchView: React.FC<ErpProductionWorkbenchViewProp
             rawMaterialCode: targetMo.rawMaterialCode,
             rawMaterialName: targetMo.rawMaterialName,
             warehouseAvailableKg: 1200,
-            bomSubComponents: [
-              { name: 'صفحه براکت اصلی ضدسرقت', qtyPerParent: 1, unit: 'عدد', stage: 'پرس‌کاری و فرم‌دهی' },
-              { name: 'مکمل تقویتی براکت (گوشواره)', qtyPerParent: 1, unit: 'عدد', stage: 'پانچ و خم' },
-            ],
+            bomSubComponents: resolveBomSubComponents(targetMo.partId, targetMo.partCode),
             operations: targetMo.ops.map(o => ({
               stepCode: o.opCode,
               stepName: o.opTitle,
@@ -1149,52 +1218,63 @@ export const ErpProductionWorkbenchView: React.FC<ErpProductionWorkbenchViewProp
   };
 
   // Issue Raw Material from Warehouse to Line OP10 (`POST /api/inventory/documents`)
-  const handleIssueRawMaterialToLine = async (item: MultiPartScheduleItem) => {
+  const handleIssueRawMaterialToLine = (item: MultiPartScheduleItem) => {
     const requiredKg = Math.round(item.weeklyTargetQty * item.unitWeightKg);
-    try {
-      const res = await fetch('/api/inventory/documents', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          documentType: 'ISSUE_RAW_MATERIAL',
-          warehouseId: 'WH-RAW',
-          warehouseName: 'انبار مرکزی رول و ورق ساپکو',
-          targetWarehouseId: 'WH-WIP-STAMP',
-          targetWarehouseName: 'انبار پای کار سالن پرس (WIP)',
-          referenceType: 'MANUFACTURING_ORDER',
-          referenceNumber: item.orderCode,
-          autoPost: true,
-          auditNote: `حواله تغذیه ورق جهت دستور ساخت ${item.orderCode} (${item.partName})`,
-          lines: [
-            {
-              partId: item.partId,
-              partCode: item.rawMaterialCode,
-              partName: item.rawMaterialName,
-              quantity: requiredKg,
-              unit: 'KG',
-              quantityKg: requiredKg,
-              lotNumber: 'COIL-DC01A-101',
-              locationCode: 'LOC-RAW-A1',
-            },
-          ],
-        }),
-      });
-      const data = await res.json();
-      setToastNotice({
-        type: 'success',
-        title: `حواله ورق از انبار به ایستگاه OP10 برای «${item.partName}» صادر شد`,
-        detail: data.data?.documentNumber
-          ? `شماره سند حواله انبار: ${data.data.documentNumber} به مقدار ${formatNumber(requiredKg)} کیلوگرم`
-          : `مقدار ${formatNumber(requiredKg)} کیلوگرم ورق ${item.rawMaterialCode} در پای خط شارژ گردید.`,
-      });
-      if (onRefreshData) onRefreshData();
-    } catch {
-      setToastNotice({
-        type: 'info',
-        title: `تغذیه ورق پای خط برای «${item.partName}» ثبت شد`,
-        detail: `مقدار ${formatNumber(requiredKg)} کیلوگرم ورق به ایستگاه OP10 اختصاص یافت.`,
-      });
-    }
+    requestConfirm({
+      title: `تایید حواله ورق از انبار به ایستگاه OP10`,
+      message: `آیا از صدور و قطعی‌سازی سند خروج ${formatNumber(requiredKg)} کیلوگرم ماده «${item.rawMaterialName}» برای دستور کار ${item.orderCode} (${item.partName}) اطمینان دارید؟`,
+      confirmLabel: 'تایید و صدور حواله مواد',
+      variant: 'warning',
+      onConfirm: async () => {
+        try {
+          const res = await fetch('/api/inventory/documents', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              documentType: 'ISSUE_RAW_MATERIAL',
+              warehouseId: 'WH-RAW',
+              warehouseName: 'انبار مرکزی رول و ورق ساپکو',
+              targetWarehouseId: 'WH-WIP-STAMP',
+              targetWarehouseName: 'انبار پای کار سالن پرس (WIP)',
+              referenceType: 'MANUFACTURING_ORDER',
+              referenceNumber: item.orderCode,
+              autoPost: true,
+              auditNote: `حواله تغذیه ورق جهت دستور ساخت ${item.orderCode} (${item.partName})`,
+              lines: [
+                {
+                  partId: item.partId,
+                  partCode: item.rawMaterialCode,
+                  partName: item.rawMaterialName,
+                  quantity: requiredKg,
+                  unit: 'KG',
+                  quantityKg: requiredKg,
+                  lotNumber: 'COIL-DC01A-101',
+                  locationCode: 'LOC-RAW-A1',
+                },
+              ],
+            }),
+          });
+          const data = await res.json();
+          if (!res.ok || !data.success) {
+            throw new Error(data.error || 'خطا در ثبت حواله انبار');
+          }
+          setToastNotice({
+            type: 'success',
+            title: `حواله ورق از انبار به ایستگاه OP10 برای «${item.partName}» صادر شد`,
+            detail: data.data?.documentNumber
+              ? `شماره سند حواله انبار: ${data.data.documentNumber} به مقدار ${formatNumber(requiredKg)} کیلوگرم`
+              : `مقدار ${formatNumber(requiredKg)} کیلوگرم ورق ${item.rawMaterialCode} در پای خط شارژ گردید.`,
+          });
+          if (onRefreshData) onRefreshData();
+        } catch (err: any) {
+          setToastNotice({
+            type: 'warning',
+            title: 'خطا در صدور حواله مواد',
+            detail: err?.message || 'بررسی موجودی انبار یا ارتباط با سرور با خطا مواجه شد.',
+          });
+        }
+      },
+    });
   };
 
   // Open Modal to Record OP Production, Calculate WIP & Auto-Receive into Warehouse if Final OP
@@ -1437,97 +1517,37 @@ export const ErpProductionWorkbenchView: React.FC<ErpProductionWorkbenchViewProp
         };
       });
     } else {
-      // Fallback only if no routing was ever defined for the part
-      ops = [
-        {
-          opId: `OP-${Date.now()}-10`,
-          opNo: 10,
-          opCode: 'OP10',
-          opTitle: 'برش ورق و گیوتین اولیه',
-          stationHall: 'سالن برش',
-          machineCode: 'SHR-GUI-01',
-          machineName: 'قیچی گیوتین ۱',
-          dieCode: 'BLD-SHR-01',
-          standardRatePerHour: 500,
-          scheduledDayIndex: newPartOp1Day,
-          shiftName: 'شیفت صبح',
-          basePlannedQty: newPartTargetQty,
-          carriedOverQty: 0,
-          effectiveTargetQty: newPartTargetQty,
-          completedGoodQty: 0,
-          scrapQty: 0,
-          wipBufferBeforeOp: newPartTargetQty,
-          wipBufferAfterOp: 0,
-          isFinalOp: false,
-          status: 'PLANNED',
-        },
-        {
-          opId: `OP-${Date.now()}-20`,
-          opNo: 20,
-          opCode: 'OP20',
-          opTitle: 'بلنک‌زنی و فرم‌دهی پرس',
-          stationHall: 'سالن پرس',
-          machineCode: 'PRS-250T-01',
-          machineName: 'پرس ۲۵۰ تن ۱',
-          dieCode: 'DIE-STD-20',
-          standardRatePerHour: 350,
-          scheduledDayIndex: newPartOp2Day,
-          shiftName: 'شیفت عصر',
-          basePlannedQty: newPartTargetQty,
-          carriedOverQty: 0,
-          effectiveTargetQty: newPartTargetQty,
-          completedGoodQty: 0,
-          scrapQty: 0,
-          wipBufferBeforeOp: 0,
-          wipBufferAfterOp: 0,
-          isFinalOp: false,
-          status: 'PLANNED',
-        },
-        {
-          opId: `OP-${Date.now()}-30`,
-          opNo: 30,
-          opCode: 'OP30',
-          opTitle: 'پانچ و سوراخ‌کاری',
-          stationHall: 'سالن پرس',
-          machineCode: 'PRS-160T-01',
-          machineName: 'پرس ۱۶۰ تن ۱',
-          dieCode: 'DIE-STD-30',
-          standardRatePerHour: 350,
-          scheduledDayIndex: newPartOp3Day,
-          shiftName: 'شیفت صبح',
-          basePlannedQty: newPartTargetQty,
-          carriedOverQty: 0,
-          effectiveTargetQty: newPartTargetQty,
-          completedGoodQty: 0,
-          scrapQty: 0,
-          wipBufferBeforeOp: 0,
-          wipBufferAfterOp: 0,
-          isFinalOp: false,
-          status: 'PLANNED',
-        },
-        {
-          opId: `OP-${Date.now()}-40`,
-          opNo: 40,
-          opCode: 'OP40',
-          opTitle: 'پرس‌جوش / مونتاژ نهایی و تحویل به انبار',
-          stationHall: 'سالن جوشکاری',
-          machineCode: 'WLD-SPOT-01',
-          machineName: 'پرس‌جوش مقاومتی ۱',
-          dieCode: 'JIG-STD-40',
-          standardRatePerHour: 240,
-          scheduledDayIndex: newPartOp4Day,
-          shiftName: 'شیفت عصر',
-          basePlannedQty: newPartTargetQty,
-          carriedOverQty: 0,
-          effectiveTargetQty: newPartTargetQty,
-          completedGoodQty: 0,
-          scrapQty: 0,
-          wipBufferBeforeOp: 0,
-          wipBufferAfterOp: 0,
-          isFinalOp: true,
-          status: 'PLANNED',
-        },
-      ];
+      const enabledCustomOps = customNewOps.filter(o => o.enabled);
+      if (enabledCustomOps.length === 0) {
+        setToastNotice({
+          type: 'warning',
+          title: 'مسیر تولید یا عملیات انتخاب نشده است',
+          detail: 'برای این قطعه مسیر تولید مصوب (Routing) وجود ندارد. حداقل یک عملیات را از فهرست عملیات استاندارد انتخاب و شخصی‌سازی کنید یا ابتدا در «مسیرهای تولید» تعریف نمایید.',
+        });
+        return;
+      }
+      ops = enabledCustomOps.map((op, idx) => ({
+        opId: `OP-${Date.now()}-${op.opNo || (idx + 1) * 10}`,
+        opNo: op.opNo || (idx + 1) * 10,
+        opCode: op.code || `OP${(idx + 1) * 10}`,
+        opTitle: op.name,
+        stationHall: op.hall || 'سالن تولید',
+        machineCode: op.machineCode || machines[0]?.code || 'PRS-250T-01',
+        machineName: op.machineName || machines[0]?.name || 'ماشین تولید',
+        dieCode: 'قابل انتخاب در مسیر',
+        standardRatePerHour: op.ratePerHour || 350,
+        scheduledDayIndex: op.dayIndex || 1,
+        shiftName: idx % 2 === 0 ? 'شیفت صبح' : 'شیفت عصر',
+        basePlannedQty: newPartTargetQty,
+        carriedOverQty: 0,
+        effectiveTargetQty: newPartTargetQty,
+        completedGoodQty: 0,
+        scrapQty: 0,
+        wipBufferBeforeOp: idx === 0 ? newPartTargetQty : 0,
+        wipBufferAfterOp: 0,
+        isFinalOp: idx === enabledCustomOps.length - 1,
+        status: 'PLANNED',
+      }));
     }
 
     const newItem: MultiPartScheduleItem = {
@@ -1559,7 +1579,6 @@ export const ErpProductionWorkbenchView: React.FC<ErpProductionWorkbenchViewProp
       );
 
     if (isMultiLevelAssembly) {
-      // Intercept before final issue: open PreMoWipInspectionModal for hierarchical BOM & inter-stage WIP pre-flight check!
       const preflightScenario: HighwayPartScenario = {
         id: newItem.id,
         orderCode: newItem.orderCode,
@@ -1575,10 +1594,7 @@ export const ErpProductionWorkbenchView: React.FC<ErpProductionWorkbenchViewProp
         rawMaterialCode: newItem.rawMaterialCode,
         rawMaterialName: newItem.rawMaterialName,
         warehouseAvailableKg: 1200,
-        bomSubComponents: [
-          { name: 'صفحه براکت اصلی ضدسرقت', qtyPerParent: 1, unit: 'عدد', stage: 'پرس‌کاری و فرم‌دهی' },
-          { name: 'مکمل تقویتی براکت (گوشواره)', qtyPerParent: 1, unit: 'عدد', stage: 'پانچ و خم' },
-        ],
+        bomSubComponents: resolveBomSubComponents(newItem.partId, newItem.partCode),
         operations: ops.map(o => ({
           stepCode: o.opCode,
           stepName: o.opTitle,
@@ -1606,13 +1622,13 @@ export const ErpProductionWorkbenchView: React.FC<ErpProductionWorkbenchViewProp
     setToastNotice({
       type: 'success',
       title: `قطعه «${name}» با ${ops.length} مرحله عملیاتی ${
-        matchingRouting ? '(برگرفته از مسیر تولید قطعه)' : '(توالی پیش‌فرض)'
+        matchingRouting ? '(برگرفته از مسیر تولید مصوب)' : '(سفارشی‌شده از عملیات استاندارد)'
       } زمان‌بندی شد`,
       detail: `کد دستور کار: ${newItem.orderCode} | تیراژ هدف: ${formatNumber(newPartTargetQty)} عدد`,
     });
   };
 
-  // Fast action: Issue Sub-MO directly from Tree View when shortage is detected
+  // Action: Issue Sub-MO ONLY after operator confirmation, driven strictly by live Routing (or customizable standard operations)
   const handleIssueSubMo = (subMoData: {
     parentMoId: string;
     parentOrderCode: string;
@@ -1622,96 +1638,115 @@ export const ErpProductionWorkbenchView: React.FC<ErpProductionWorkbenchViewProp
     requiredQty: number;
     subRoutingId?: string;
   }) => {
-    const subMoCode = `SUB-MO-1404-${Math.floor(4000 + Math.random() * 5000)}`;
-    const subItem: MultiPartScheduleItem = {
-      id: `MPS-SUB-${Date.now()}`,
-      orderCode: subMoCode,
-      partId: subMoData.componentPartId || `PRT-SUB-${Date.now()}`,
-      partCode: subMoData.componentPartCode,
-      partName: subMoData.componentPartName,
-      carModel: inspectingPreflightOrder?.carModel || 'پژو ۲۰۶',
-      partType: 'SUB_ASSEMBLY',
-      rawMaterialCode: 'RM-COIL-DC01A-1.5-320',
-      rawMaterialName: 'نوار ورق DC01A ضخامت 1.5 عرض 320',
-      unitWeightKg: 0.65,
-      weeklyTargetQty: subMoData.requiredQty,
-      rawMaterialIssuedKg: Math.round(subMoData.requiredQty * 0.7),
-      warehouseReceivedQty: 0,
-      ops: [
-        {
-          opId: `OP-SUB-${Date.now()}-10`,
-          opNo: 10,
-          opCode: 'OP10',
-          opTitle: `برش و تغذیه نوار ورق (${subMoData.componentPartName})`,
-          stationHall: 'سالن برش',
-          machineCode: 'SHR-SLT-01',
-          machineName: 'خط نواربری ورق',
-          dieCode: 'SLT-BLD-01',
-          standardRatePerHour: 600,
-          scheduledDayIndex: 1,
-          shiftName: 'شیفت صبح',
-          basePlannedQty: subMoData.requiredQty,
-          carriedOverQty: 0,
-          effectiveTargetQty: subMoData.requiredQty,
-          completedGoodQty: 0,
-          scrapQty: 0,
-          wipBufferBeforeOp: subMoData.requiredQty,
-          wipBufferAfterOp: 0,
-          isFinalOp: false,
-          status: 'PLANNED',
-        },
-        {
-          opId: `OP-SUB-${Date.now()}-20`,
-          opNo: 20,
-          opCode: 'OP20',
-          opTitle: `بلنک‌زنی و فرم‌دهی قطعه فرعی (${subMoData.componentPartName})`,
-          stationHall: 'سالن پرس',
-          machineCode: 'PRS-160T-02',
-          machineName: 'پرس ۱۶۰ تن ضربه‌ای',
-          dieCode: 'DIE-SUB-01',
-          standardRatePerHour: 400,
-          scheduledDayIndex: 1,
-          shiftName: 'شیفت عصر',
-          basePlannedQty: subMoData.requiredQty,
-          carriedOverQty: 0,
-          effectiveTargetQty: subMoData.requiredQty,
-          completedGoodQty: 0,
-          scrapQty: 0,
-          wipBufferBeforeOp: 0,
-          wipBufferAfterOp: 0,
-          isFinalOp: false,
-          status: 'PLANNED',
-        },
-        {
-          opId: `OP-SUB-${Date.now()}-30`,
-          opNo: 30,
-          opCode: 'OP30',
-          opTitle: 'پانچ نهایی و آماده‌سازی برای مونتاژ',
-          stationHall: 'سالن پرس',
-          machineCode: 'PRS-100T-01',
-          machineName: 'پرس ۱۰۰ تن ضربه‌ای',
-          dieCode: 'DIE-SUB-02',
-          standardRatePerHour: 450,
-          scheduledDayIndex: 2,
-          shiftName: 'شیفت صبح',
-          basePlannedQty: subMoData.requiredQty,
-          carriedOverQty: 0,
-          effectiveTargetQty: subMoData.requiredQty,
-          completedGoodQty: 0,
-          scrapQty: 0,
-          wipBufferBeforeOp: 0,
-          wipBufferAfterOp: 0,
-          isFinalOp: true,
-          status: 'PLANNED',
-        },
-      ],
-    };
+    const compCodeUpper = String(subMoData.componentPartCode || '').trim().toUpperCase();
+    const matchedPart = parts.find(
+      p => p.id === subMoData.componentPartId || p.code.trim().toUpperCase() === compCodeUpper,
+    );
+    const liveRouting =
+      (subMoData.subRoutingId ? routings.find(r => r.id === subMoData.subRoutingId) : undefined) ||
+      routings.find(
+        r =>
+          r.partId === subMoData.componentPartId ||
+          String(r.partCode || '').trim().toUpperCase() === compCodeUpper ||
+          (matchedPart && r.partId === matchedPart.id),
+      );
 
-    saveSchedule([subItem, ...scheduleItems]);
-    setToastNotice({
-      type: 'success',
-      title: `دستور کار فرعی ${subMoCode} صادر شد`,
-      detail: `تولید قطعه پیش‌ساخته «${subMoData.componentPartName}» به تیراژ ${formatNumber(subMoData.requiredQty)} عدد در سالن پرس زمان‌بندی گردید.`,
+    if (!liveRouting || !liveRouting.operations || liveRouting.operations.length === 0) {
+      setToastNotice({
+        type: 'warning',
+        title: `مسیر تولید (Routing) برای زیرقطعه «${subMoData.componentPartName}» تعریف نشده است`,
+        detail: 'برای جلوگیری از عملیات فرضی، ابتدا در بخش «اطلاعات پایه > مسیرهای تولید (Routings)» ایستگاه‌های این قطعه را تعریف نمایید.',
+      });
+      return;
+    }
+
+    requestConfirm({
+      title: 'تایید صدور دستور ساخت فرعی (Sub-MO)',
+      message: `آیا از صدور دستور ساخت فرعی برای «${subMoData.componentPartName} (${subMoData.componentPartCode})» به تیراژ ${formatNumber(subMoData.requiredQty)} عدد مطابق مسیر تولید مصوب «${liveRouting.version}» (${liveRouting.operations.length} ایستگاه) اطمینان دارید؟`,
+      confirmLabel: 'تایید و صدور Sub-MO',
+      variant: 'info',
+      onConfirm: async () => {
+        let issuedMoNumber = `SUB-MO-${Math.floor(4000 + Math.random() * 5000)}`;
+        try {
+          const res = await fetch('/api/wip/manufacturing-orders', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              partId: matchedPart?.id || subMoData.componentPartId,
+              partCode: matchedPart?.code || subMoData.componentPartCode,
+              routingId: liveRouting.id,
+              targetQuantity: subMoData.requiredQty,
+              initialInputQuantity: subMoData.requiredQty,
+              parentMoId: subMoData.parentMoId,
+              parentMoNumber: subMoData.parentOrderCode,
+              notes: `دستور کار فرعی منشعب از دستور کار اصلی ${subMoData.parentOrderCode}`,
+              createdBy: 'میز کار زمان‌بندی تولید',
+            }),
+          });
+          const data = await res.json();
+          if (res.ok && data.success && data.data?.moNumber) {
+            issuedMoNumber = data.data.moNumber;
+          }
+        } catch {
+          // keep local scheduler sync if offline
+        }
+
+        const subOps: ScheduledOpStep[] = liveRouting.operations.map((op, idx) => ({
+          opId: `OP-SUB-${Date.now()}-${op.stepNumber || (idx + 1) * 10}`,
+          opNo: op.stepNumber || (idx + 1) * 10,
+          opCode: op.stepCode || `OP${op.stepNumber || (idx + 1) * 10}`,
+          opTitle: op.stepName,
+          stationHall:
+            op.processType === 'SHEARING'
+              ? 'سالن برش'
+              : op.processType === 'SPOT_WELD' || op.processType === 'CO2_WELD' || op.processType === 'ASSEMBLY'
+              ? 'سالن جوشکاری'
+              : op.processType === 'PAINT'
+              ? 'سالن رنگ'
+              : 'سالن پرس',
+          machineCode: op.machineId || 'PRS-160T-01',
+          machineName: op.machineName || 'ماشین ایستگاه',
+          dieCode: op.dieMoldName || op.dieMoldId || 'قالب ایستگاه',
+          standardRatePerHour: op.standardCycleTimeSec > 0 ? Math.round(3600 / op.standardCycleTimeSec) : 350,
+          scheduledDayIndex: idx < 2 ? 1 : 2,
+          shiftName: idx % 2 === 0 ? 'شیفت صبح' : 'شیفت عصر',
+          basePlannedQty: subMoData.requiredQty,
+          carriedOverQty: 0,
+          effectiveTargetQty: subMoData.requiredQty,
+          completedGoodQty: 0,
+          scrapQty: 0,
+          wipBufferBeforeOp: idx === 0 ? subMoData.requiredQty : 0,
+          wipBufferAfterOp: 0,
+          isFinalOp: idx === liveRouting.operations.length - 1,
+          status: 'PLANNED',
+        }));
+
+        const subItem: MultiPartScheduleItem = {
+          id: `MPS-SUB-${Date.now()}`,
+          orderCode: issuedMoNumber,
+          partId: matchedPart?.id || subMoData.componentPartId,
+          partCode: matchedPart?.code || subMoData.componentPartCode,
+          partName: matchedPart?.name || subMoData.componentPartName,
+          carModel: matchedPart?.carModel || inspectingPreflightOrder?.carModel || 'مشترک',
+          partType: 'SUB_ASSEMBLY',
+          parentProductCode: inspectingPreflightOrder?.partCode,
+          rawMaterialCode: 'RM-COIL-DC01A-2.0-1140',
+          rawMaterialName: 'ماده اولیه تخصیصی بر اساس BOM',
+          unitWeightKg: matchedPart?.weightPerUnitKg || 0.65,
+          weeklyTargetQty: subMoData.requiredQty,
+          rawMaterialIssuedKg: Math.round(subMoData.requiredQty * (matchedPart?.weightPerUnitKg || 0.65)),
+          warehouseReceivedQty: 0,
+          ops: subOps,
+        };
+
+        saveSchedule([subItem, ...scheduleItems]);
+        if (onRefreshData) onRefreshData();
+        setToastNotice({
+          type: 'success',
+          title: `دستور کار فرعی واقعی ${issuedMoNumber} بر اساس مسیر «${liveRouting.version}» صادر شد`,
+          detail: `تولید «${subItem.partName}» به تیراژ ${formatNumber(subMoData.requiredQty)} عدد با ${subOps.length} مرحله واقعی ثبت گردید.`,
+        });
+      },
     });
   };
 
@@ -1963,12 +1998,20 @@ export const ErpProductionWorkbenchView: React.FC<ErpProductionWorkbenchViewProp
             <button
               type="button"
               onClick={() => {
-                const fresh = buildInitial20PartsSchedule();
-                saveSchedule(fresh);
-                setToastNotice({
-                  type: 'info',
-                  title: 'برنامه تولید بازنشانی شد',
-                  detail: 'فهرست استاندارد قطعات بارگذاری گردید.',
+                requestConfirm({
+                  title: 'تایید بازنشانی ماتریس زمان‌بندی',
+                  message: 'آیا مطمئن هستید که می‌خواهید برنامه زمان‌بندی فعلی را به چیدمان استاندارد کارخانه بازنشانی کنید؟ تغییرات دستی ذخیره‌نشده بازنویسی خواهند شد.',
+                  confirmLabel: 'تایید بازنشانی',
+                  variant: 'warning',
+                  onConfirm: async () => {
+                    const fresh = buildInitial20PartsSchedule();
+                    saveSchedule(fresh);
+                    setToastNotice({
+                      type: 'info',
+                      title: 'برنامه تولید بازنشانی شد',
+                      detail: 'فهرست استاندارد قطعات بارگذاری گردید.',
+                    });
+                  },
                 });
               }}
               className="sap-btn-standard flex items-center gap-1.5 px-2.5 py-1.5 text-xs cursor-pointer whitespace-nowrap"
@@ -4505,36 +4548,75 @@ export const ErpProductionWorkbenchView: React.FC<ErpProductionWorkbenchViewProp
                 </div>
               ) : (
                 <div className="bg-[#f7f7f7] p-3 rounded-sm border border-[#d9d9d9] space-y-2.5">
-                  <div className="font-bold text-[#333333] flex items-center justify-between">
-                    <span>تعیین روز اجرای هر عملیات:</span>
-                    <span className="text-[10px] text-[#e9730c] bg-[#fff4e5] px-2 py-0.5 rounded-sm border border-[#f5cba7]">
-                      فاقد مسیر اختصاصی (توالی پیش‌فرض ۴ مرحله‌ای)
-                    </span>
+                  <div className="font-bold text-[#333333] flex flex-wrap items-center justify-between gap-2">
+                    <span>عملیات قابل شخصی‌سازی از کتابخانه استاندارد:</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsAddPartModalOpen(false);
+                        router.navigate({
+                          tab: 'master_data',
+                          masterSubSection: 'ROUTINGS',
+                          docQuery: newPartCode || undefined,
+                        });
+                      }}
+                      className="text-[11px] font-bold text-[#0070f2] bg-[#e8f2fc] px-2.5 py-1 rounded-sm border border-[#b3d4fc] hover:bg-[#d8e9fb] cursor-pointer"
+                    >
+                      تعریف مسیر تولید اختصاصی در Routings
+                    </button>
                   </div>
-                  <p className="text-[10px] text-[#666666]">
-                    برای این قطعه هنوز مسیر تولید اختصاصی ثبت نشده؛ می‌توانید از توالی استاندارد زیر استفاده کنید یا در منوی «اطلاعات پایه › مسیر تولید» برای آن فرآیند دقیق تعریف نمایید.
+                  <p className="text-[11px] text-[#bb0000] bg-[#ffecec] border border-[#f5b7b1] rounded-sm px-2.5 py-1.5">
+                    برای این قطعه مسیر تولید اختصاصی ثبت نشده است. هیچ مرحله از پیش فرض‌شده‌ای به صورت پنهان اعمال نمی‌شود؛ می‌توانید مراحل را مستقیماً از کتابخانه عملیات استاندارد زیر انتخاب و سفارشی کنید:
                   </p>
-                  {[
-                    { label: 'OP10: برش ورق اولیه', val: newPartOp1Day, set: setNewPartOp1Day },
-                    { label: 'OP20: بلنک‌زنی و فرم', val: newPartOp2Day, set: setNewPartOp2Day },
-                    { label: 'OP30: پانچ و سوراخ‌کاری', val: newPartOp3Day, set: setNewPartOp3Day },
-                    { label: 'OP40: پرس‌جوش / مرحله آخر (رسید انبار)', val: newPartOp4Day, set: setNewPartOp4Day },
-                  ].map((st, idx) => (
-                    <div key={idx} className="flex items-center justify-between">
-                      <span className="text-[#333333]">{st.label}</span>
-                      <select
-                        value={st.val}
-                        onChange={e => st.set(Number(e.target.value))}
-                        className="bg-[#ffffff] border border-[#bfbfbf] rounded-sm px-2.5 py-1 font-bold text-[#333333] text-xs focus:outline-none focus:border-[#007cc0]"
-                      >
-                        {WORK_DAYS.map(d => (
-                          <option key={d.index} value={d.index}>
-                            {d.name}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  ))}
+                  <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1">
+                    {customNewOps.length === 0 ? (
+                      <div className="text-[11px] text-[#666666] py-2">
+                        عملیات استانداردی یافت نشد. ابتدا از منوی اطلاعات پایه › عملیات استاندارد یا مسیرهای تولید، ایستگاه‌ها را تعریف کنید.
+                      </div>
+                    ) : (
+                      customNewOps.map((st, idx) => (
+                        <div key={`${st.code}-${idx}`} className="flex items-center justify-between gap-2 bg-white p-2 rounded-sm border border-[#e0e0e0]">
+                          <label className="flex items-center gap-2 cursor-pointer flex-1 min-w-0">
+                            <input
+                              type="checkbox"
+                              checked={st.enabled}
+                              onChange={e =>
+                                setCustomNewOps(prev =>
+                                  prev.map((row, rIdx) => (rIdx === idx ? { ...row, enabled: e.target.checked } : row)),
+                                )
+                              }
+                              className="w-4 h-4 rounded-sm shrink-0"
+                            />
+                            <input
+                              type="text"
+                              value={st.name}
+                              onChange={e =>
+                                setCustomNewOps(prev =>
+                                  prev.map((row, rIdx) => (rIdx === idx ? { ...row, name: e.target.value } : row)),
+                                )
+                              }
+                              className="flex-1 min-w-0 bg-transparent border-b border-transparent focus:border-[#007cc0] text-xs font-medium text-[#333333] focus:outline-none"
+                            />
+                          </label>
+                          <select
+                            value={st.dayIndex}
+                            onChange={e =>
+                              setCustomNewOps(prev =>
+                                prev.map((row, rIdx) => (rIdx === idx ? { ...row, dayIndex: Number(e.target.value) } : row)),
+                              )
+                            }
+                            className="bg-[#ffffff] border border-[#bfbfbf] rounded-sm px-2 py-1 font-bold text-[#333333] text-xs focus:outline-none focus:border-[#007cc0]"
+                          >
+                            {WORK_DAYS.map(d => (
+                              <option key={d.index} value={d.index}>
+                                {d.name}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      ))
+                    )}
+                  </div>
                 </div>
               )}
 

@@ -567,6 +567,10 @@ export function createManufacturingOrder(params: {
   targetQuantity: number;
   initialInputQuantity?: number;
   routingId?: string;
+  parentMoId?: string;
+  parentMoNumber?: string;
+  bomId?: string;
+  moNumber?: string;
   startDate?: string;
   dueDate?: string;
   notes?: string;
@@ -603,11 +607,14 @@ export function createManufacturingOrder(params: {
     return { success: false, error: `مسیر تولید مصوب (Routing) برای قطعه «${part.code}» تعریف نشده است.` };
   }
 
-  let seqNum = manufacturingOrdersStore.length + 1;
-  let moId = `MO-2026-${String(seqNum).padStart(3, '0')}`;
-  while (manufacturingOrdersStore.some(m => m.id === moId || m.moNumber === moId)) {
-    seqNum += 1;
+  let moId = params.moNumber ? String(params.moNumber).trim() : '';
+  if (!moId || manufacturingOrdersStore.some(m => m.id === moId || m.moNumber === moId)) {
+    let seqNum = manufacturingOrdersStore.length + 1;
     moId = `MO-2026-${String(seqNum).padStart(3, '0')}`;
+    while (manufacturingOrdersStore.some(m => m.id === moId || m.moNumber === moId)) {
+      seqNum += 1;
+      moId = `MO-2026-${String(seqNum).padStart(3, '0')}`;
+    }
   }
   const now = new Date().toISOString();
 
@@ -653,6 +660,9 @@ export function createManufacturingOrder(params: {
     totalRejectedQuantity: 0,
     routingId: routing.id,
     routingVersion: routing.version,
+    parentMoId: params.parentMoId,
+    parentMoNumber: params.parentMoNumber,
+    bomId: params.bomId,
     status: 'RELEASED',
     startDate: params.startDate || now.slice(0, 10),
     dueDate: params.dueDate || new Date(Date.now() + 5 * 24 * 3600 * 1000).toISOString().slice(0, 10),
@@ -1533,5 +1543,70 @@ export function reconcileWipEngineWithParts(parts: Part[]): number {
   return changes;
 }
 
+export function collectDependentMoTree(moIdOrNumber: string): ManufacturingOrder[] {
+  const root = getManufacturingOrderById(moIdOrNumber);
+  if (!root) return [];
 
+  const collected: ManufacturingOrder[] = [root];
+  const seenIds = new Set<string>([root.id]);
+  const queue: ManufacturingOrder[] = [root];
 
+  while (queue.length > 0) {
+    const parent = queue.shift()!;
+    for (const candidate of manufacturingOrdersStore) {
+      if (seenIds.has(candidate.id)) continue;
+      const matchesParentId = candidate.parentMoId && candidate.parentMoId === parent.id;
+      const matchesParentNumber =
+        candidate.parentMoNumber &&
+        (candidate.parentMoNumber === parent.moNumber || candidate.parentMoNumber === parent.id);
+      const notesStr = String(candidate.notes || '');
+      const mentionsInSubNotes =
+        notesStr.includes(`دستور کار اصلی ${parent.moNumber}`) ||
+        notesStr.includes(`دستور اصلی ${parent.moNumber}`) ||
+        notesStr.includes(`منشعب از دستور ${parent.moNumber}`) ||
+        notesStr.includes(`Sub-MO از ${parent.moNumber}`);
+
+      if (matchesParentId || matchesParentNumber || mentionsInSubNotes) {
+        seenIds.add(candidate.id);
+        collected.push(candidate);
+        queue.push(candidate);
+      }
+    }
+  }
+
+  return collected;
+}
+
+export function deleteManufacturingOrdersFromWipEngine(params: {
+  moIds: Set<string>;
+  moNumbers: Set<string>;
+}): {
+  deletedMoCount: number;
+  deletedTransfersCount: number;
+  deletedLogsCount: number;
+} {
+  const { moIds, moNumbers } = params;
+  const beforeMos = manufacturingOrdersStore.length;
+  const remainingMos = manufacturingOrdersStore.filter(
+    m => !moIds.has(m.id) && !moNumbers.has(m.moNumber),
+  );
+  manufacturingOrdersStore.splice(0, manufacturingOrdersStore.length, ...remainingMos);
+
+  const beforeTransfers = wipTransfersStore.length;
+  const remainingTransfers = wipTransfersStore.filter(
+    t => !moIds.has(t.moId) && !moNumbers.has(t.moNumber),
+  );
+  wipTransfersStore.splice(0, wipTransfersStore.length, ...remainingTransfers);
+
+  const beforeLogs = productionLogsStore.length;
+  const remainingLogs = productionLogsStore.filter(
+    l => !moIds.has(l.moId) && !moNumbers.has(l.moNumber),
+  );
+  productionLogsStore.splice(0, productionLogsStore.length, ...remainingLogs);
+
+  return {
+    deletedMoCount: beforeMos - remainingMos.length,
+    deletedTransfersCount: beforeTransfers - remainingTransfers.length,
+    deletedLogsCount: beforeLogs - remainingLogs.length,
+  };
+}

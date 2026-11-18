@@ -25,7 +25,7 @@ import {
   Filter,
   X,
 } from 'lucide-react';
-import { Part } from '../../types/inventory';
+import { Part, Routing } from '../../types/inventory';
 import {
   AdvancedBomDefinition,
   BomComponentItem,
@@ -49,9 +49,10 @@ export const AdvancedBomModuleView: React.FC<AdvancedBomModuleViewProps> = ({
   onOpenTraceabilityModal,
   onNavigateToParallelFlow,
 }) => {
-  const { traceDocument, route, clearDocQuery } = useErpRouter();
+  const { traceDocument, route, clearDocQuery, navigate, pushSelectionStep } = useErpRouter();
   const { requestConfirm, showUndoToast } = useEnterpriseUx();
   const [boms, setBoms] = useState<AdvancedBomDefinition[]>([]);
+  const [routings, setRoutings] = useState<Routing[]>([]);
   const [selectedBomId, setSelectedBomId] = useState<string>('');
   const [bomSearchQuery, setBomSearchQuery] = useState<string>(route.docQuery || '');
   const [loading, setLoading] = useState(false);
@@ -70,8 +71,10 @@ export const AdvancedBomModuleView: React.FC<AdvancedBomModuleViewProps> = ({
   const [editBomCarModel, setEditBomCarModel] = useState('');
   const [editBomNotes, setEditBomNotes] = useState('');
 
-  // Sub-MO generation modal & status
+  // Sub-MO Pre-Flight Confirmation & Result Modals
   const [isGeneratingSubMos, setIsGeneratingSubMos] = useState(false);
+  const [subMoPreflightOpen, setSubMoPreflightOpen] = useState(false);
+  const [selectedSubCompIds, setSelectedSubCompIds] = useState<string[]>([]);
   const [subMoModalOpen, setSubMoModalOpen] = useState(false);
   const [plannedQty, setPlannedQty] = useState(500);
   const [masterMoNumber, setMasterMoNumber] = useState('MO-1403-1082');
@@ -98,8 +101,14 @@ export const AdvancedBomModuleView: React.FC<AdvancedBomModuleViewProps> = ({
   const loadBoms = async () => {
     try {
       setLoading(true);
-      const res = await fetch('/api/production/boms');
-      const data = await res.json();
+      const [bomRes, rtgRes] = await Promise.all([
+        fetch('/api/production/boms'),
+        fetch('/api/routings'),
+      ]);
+      const [data, rtgData] = await Promise.all([bomRes.json(), rtgRes.json()]);
+      if (rtgData.success && Array.isArray(rtgData.data)) {
+        setRoutings(rtgData.data);
+      }
       if (data.success && data.data) {
         const byPartId = new Map(parts.map(p => [p.id, p]));
         const list: AdvancedBomDefinition[] = (data.data as AdvancedBomDefinition[]).map(b => {
@@ -144,6 +153,18 @@ export const AdvancedBomModuleView: React.FC<AdvancedBomModuleViewProps> = ({
     } finally {
       setLoading(false);
     }
+  };
+
+  const resolveComponentRouting = (comp: BomComponentItem): Routing | undefined => {
+    const codeUpper = String(comp.componentPartCode || '').trim().toUpperCase();
+    return (
+      (comp.subRoutingId ? routings.find(r => r.id === comp.subRoutingId) : undefined) ||
+      routings.find(
+        r =>
+          r.partId === comp.componentPartId ||
+          String(r.partCode || '').trim().toUpperCase() === codeUpper,
+      )
+    );
   };
 
   useEffect(() => {
@@ -462,8 +483,23 @@ export const AdvancedBomModuleView: React.FC<AdvancedBomModuleViewProps> = ({
     }
   };
 
-  // Generate Sub-MOs
-  const handleGenerateSubMos = async () => {
+  // Open Pre-Flight Sub-MO Configuration & Confirmation Modal (never fire silently without operator sign-off)
+  const handleOpenSubMoPreflight = () => {
+    if (!activeBom) return;
+    const subComps = activeBom.components.filter(c => c.subMoRequired);
+    if (subComps.length === 0) {
+      showUndoToast({
+        title: 'هیچ جزئی با وضعیت «نیاز به دستور ساخت فرعی (Sub-MO)» در این BOM علامت نخورده است.',
+        variant: 'warning',
+      });
+      return;
+    }
+    setSelectedSubCompIds(subComps.map(c => c.id));
+    setSubMoPreflightOpen(true);
+  };
+
+  // Execute Sub-MOs ONLY after operator reviews quantities, parent MO, and Routings in Pre-Flight modal
+  const handleConfirmGenerateSubMos = async () => {
     if (!activeBom) return;
     setIsGeneratingSubMos(true);
     try {
@@ -472,18 +508,25 @@ export const AdvancedBomModuleView: React.FC<AdvancedBomModuleViewProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           bomId: activeBom.id,
-          plannedQty,
-          masterMoNumber,
+          plannedQty: Number(plannedQty) || 1,
+          masterMoNumber: masterMoNumber.trim() || `MO-${Date.now()}`,
+          componentIds: selectedSubCompIds,
         }),
       });
       const data = await res.json();
       if (!res.ok || !data.success) {
         throw new Error(data.error || 'خطا در صدور دستورهای ساخت فرعی');
       }
-      setGeneratedSubMos(data.data);
+      setSubMoPreflightOpen(false);
+      setGeneratedSubMos(data.data || []);
       setSubMoModalOpen(true);
+      showUndoToast({
+        title: data.message || 'دستورات ساخت فرعی واقعی در کارگاه ایجاد شدند.',
+        variant: 'success',
+      });
+      window.dispatchEvent(new CustomEvent('kpims-master-data-updated'));
     } catch (err: any) {
-      showUndoToast({ title: err.message || 'خطای سرور', variant: 'danger' });
+      showUndoToast({ title: err.message || 'خطای سرور در صدور Sub-MO', variant: 'danger' });
     } finally {
       setIsGeneratingSubMos(false);
     }
@@ -562,7 +605,19 @@ export const AdvancedBomModuleView: React.FC<AdvancedBomModuleViewProps> = ({
             <span className="text-[#666666] font-medium">انتخاب درخت محصول جاری:</span>
             <select
               value={activeBom?.id || ''}
-              onChange={e => setSelectedBomId(e.target.value)}
+              onChange={e => {
+                const nextId = e.target.value;
+                const prevId = activeBom?.id || '';
+                if (prevId && nextId !== prevId) {
+                  const nextBom = boms.find(b => b.id === nextId);
+                  pushSelectionStep(
+                    `BOM: ${nextBom?.assemblyPartCode || nextId}`,
+                    () => setSelectedBomId(prevId),
+                    `bom:${nextId}`,
+                  );
+                }
+                setSelectedBomId(nextId);
+              }}
               className="bg-[#ffffff] border border-[#bfbfbf] rounded-sm px-3 py-1.5 text-xs text-[#333333] font-bold focus:outline-none focus:border-[#007cc0] cursor-pointer"
             >
               {filteredBoms.map(b => (
@@ -711,12 +766,12 @@ export const AdvancedBomModuleView: React.FC<AdvancedBomModuleViewProps> = ({
 
               <button
                 type="button"
-                onClick={handleGenerateSubMos}
+                onClick={handleOpenSubMoPreflight}
                 disabled={isGeneratingSubMos}
                 className="sap-btn-standard px-3 py-1.5 text-xs flex items-center gap-1 text-[#007cc0] border-[#b3ddf2] disabled:opacity-50"
               >
                 <Sparkles className="w-3.5 h-3.5 text-[#007cc0]" />
-                <span>صدور دستورات ساخت فرعی (Sub-MO)</span>
+                <span>بررسی و صدور دستورات ساخت فرعی (Sub-MO)</span>
               </button>
             </div>
           </div>
@@ -898,13 +953,58 @@ export const AdvancedBomModuleView: React.FC<AdvancedBomModuleViewProps> = ({
                           </span>
                         </td>
 
-                        {/* Sub-MO Required */}
+                        {/* Sub-MO Required & Live Routing Readiness */}
                         <td className="whitespace-nowrap">
                           {comp.subMoRequired ? (
-                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-sm text-[10px] font-bold bg-[#e5f3fa] text-[#007cc0] border border-[#b3ddf2]">
-                              <CheckCircle2 className="w-3 h-3 text-[#007cc0]" />
-                              <span>دستور ساخت مجزا</span>
-                            </span>
+                            (() => {
+                              const compRouting = resolveComponentRouting(comp);
+                              return (
+                                <div className="space-y-1">
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-sm text-[10px] font-bold bg-[#e5f3fa] text-[#007cc0] border border-[#b3ddf2]">
+                                    <CheckCircle2 className="w-3 h-3 text-[#007cc0]" />
+                                    <span>دستور ساخت مجزا</span>
+                                  </span>
+                                  {compRouting && compRouting.operations.length > 0 ? (
+                                    <div className="text-[10px] text-[#107e3e] flex items-center gap-1">
+                                      <span>
+                                        مسیر تعریف‌شده: {toPersianDigits(compRouting.operations.length)} ایستگاه
+                                      </span>
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          navigate({
+                                            tab: 'master_data',
+                                            masterSubSection: 'ROUTINGS',
+                                            docQuery: comp.componentPartCode,
+                                          })
+                                        }
+                                        className="text-[#007cc0] hover:underline font-bold cursor-pointer"
+                                        title="مشاهده و سفارشی‌سازی ایستگاه‌ها در مسیر تولید"
+                                      >
+                                        (شخصی‌سازی)
+                                      </button>
+                                    </div>
+                                  ) : (
+                                    <div className="text-[10px] text-[#bb0000] flex items-center gap-1">
+                                      <span>فاقد مسیر تولید (Routing)</span>
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          navigate({
+                                            tab: 'master_data',
+                                            masterSubSection: 'ROUTINGS',
+                                            docQuery: comp.componentPartCode,
+                                          })
+                                        }
+                                        className="text-[#007cc0] underline font-bold cursor-pointer"
+                                      >
+                                        تعریف مسیر
+                                      </button>
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })()
                           ) : (
                             <span className="text-[11px] text-[#666666]">تغذیه مستقیم خط</span>
                           )}
@@ -1377,6 +1477,179 @@ export const AdvancedBomModuleView: React.FC<AdvancedBomModuleViewProps> = ({
         </div>
       )}
 
+      {/* Pre-Flight Sub-MO Configuration & Confirmation Modal */}
+      {subMoPreflightOpen && activeBom && (() => {
+        const subComps = activeBom.components.filter(c => c.subMoRequired);
+        const evaluated = subComps.map(c => {
+          const matchedPart = parts.find(
+            p =>
+              p.id === c.componentPartId ||
+              p.code.trim().toUpperCase() === String(c.componentPartCode || '').trim().toUpperCase(),
+          );
+          const compRouting = resolveComponentRouting(c);
+          const reqQty = Math.ceil(
+            (Number(plannedQty) || 0) * Number(c.quantityPerAssembly || 1) * (1 + (Number(c.scrapAllowancePercent) || 0) / 100),
+          );
+          const isReady = Boolean(matchedPart && compRouting && compRouting.operations.length > 0);
+          return { comp: c, matchedPart, compRouting, reqQty, isReady };
+        });
+        const selectedEvaluated = evaluated.filter(e => selectedSubCompIds.includes(e.comp.id));
+        const hasBlocking = selectedEvaluated.length === 0 || selectedEvaluated.some(e => !e.isReady);
+
+        return (
+          <div className="fixed inset-0 z-50 bg-[#333333]/40 flex items-center justify-center p-4">
+            <div className="bg-[#ffffff] border border-[#d9d9d9] rounded-sm max-w-3xl w-full p-5 shadow-md space-y-4 text-right">
+              <div className="flex items-center justify-between pb-3 border-b border-[#e8e8e8]">
+                <div className="flex items-center gap-2 text-[#007cc0] font-bold text-sm">
+                  <Sparkles className="w-5 h-5 text-[#007cc0]" />
+                  <span>پیش‌بازبینی و تایید صدور دستورات ساخت فرعی (Sub-MO Confirmation)</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setSubMoPreflightOpen(false)}
+                  className="text-[#666666] hover:text-[#333333] cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <div className="bg-[#f7f7f7] border border-[#d9d9d9] rounded-sm p-3 grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                <div>
+                  <label className="block font-bold text-[#333333] mb-1">
+                    تیراژ برنامه‌ریزی‌شده محصول اصلی ({activeBom.assemblyPartCode}):
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    value={plannedQty}
+                    onChange={e => setPlannedQty(Math.max(1, Number(e.target.value) || 1))}
+                    className="w-full bg-white border border-[#bfbfbf] rounded-sm px-3 py-1.5 font-mono font-bold text-[#333333] focus:outline-none focus:border-[#007cc0]"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-[#333333] mb-1">
+                    شماره دستور کار مادر (Master MO Reference):
+                  </label>
+                  <input
+                    type="text"
+                    value={masterMoNumber}
+                    onChange={e => setMasterMoNumber(e.target.value)}
+                    placeholder="مثلاً MO-ECU-ASY-01"
+                    className="w-full bg-white border border-[#bfbfbf] rounded-sm px-3 py-1.5 font-mono text-[#333333] focus:outline-none focus:border-[#007cc0]"
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-2 max-h-72 overflow-y-auto">
+                {evaluated.map(({ comp, compRouting, reqQty, isReady, matchedPart }) => {
+                  const checked = selectedSubCompIds.includes(comp.id);
+                  return (
+                    <div
+                      key={comp.id}
+                      className={`p-3 rounded-sm border text-xs flex flex-col gap-2 ${
+                        isReady ? 'bg-white border-[#d9d9d9]' : 'bg-[#fff4e5] border-[#f9d6a7]'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-2 flex-wrap">
+                        <label className="flex items-start gap-2 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={e => {
+                              if (e.target.checked) {
+                                setSelectedSubCompIds(prev => [...prev, comp.id]);
+                              } else {
+                                setSelectedSubCompIds(prev => prev.filter(id => id !== comp.id));
+                              }
+                            }}
+                            className="mt-0.5 w-4 h-4 rounded-sm"
+                          />
+                          <span>
+                            <span className="font-bold text-[#333333] block">{comp.componentPartName}</span>
+                            <span className="font-mono text-[11px] text-[#666666]">{comp.componentPartCode}</span>
+                          </span>
+                        </label>
+                        <div className="font-mono font-bold text-[#007cc0] tabular-nums">
+                          تیراژ محاسبه‌شده: {toPersianDigits(reqQty)} {comp.unit === 'PCS' ? 'عدد' : comp.unit}
+                        </div>
+                      </div>
+
+                      {isReady && compRouting ? (
+                        <div className="text-[11px] text-[#107e3e] bg-[#ebf7ef] border border-[#a9dfbf] rounded-sm px-2.5 py-1.5 flex flex-wrap items-center justify-between gap-2">
+                          <span>
+                            مسیر تولید مصوب ({compRouting.version}): {toPersianDigits(compRouting.operations.length)} ایستگاه —{' '}
+                            {compRouting.operations.map(op => `${op.stepCode} (${op.stepName})`).join(' ← ')}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSubMoPreflightOpen(false);
+                              navigate({
+                                tab: 'master_data',
+                                masterSubSection: 'ROUTINGS',
+                                docQuery: comp.componentPartCode,
+                              });
+                            }}
+                            className="text-[#007cc0] hover:underline font-bold cursor-pointer shrink-0"
+                          >
+                            ویرایش ایستگاه‌ها
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="text-[11px] text-[#bb0000] bg-[#ffecec] border border-[#f5b7b1] rounded-sm px-2.5 py-1.5 flex flex-wrap items-center justify-between gap-2">
+                          <span>
+                            {!matchedPart
+                              ? 'قطعه در کاتالوگ قطعات یافت نشد؛ امکان صدور دستور بدون تعریف قطعه وجود ندارد.'
+                              : 'این زیرقطعه فاقد مسیر تولید تعریف‌شده (Routing) است؛ عملیات کارگاهی بدون مسیر واقعی تولید نخواهد شد.'}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSubMoPreflightOpen(false);
+                              navigate({
+                                tab: 'master_data',
+                                masterSubSection: matchedPart ? 'ROUTINGS' : 'PARTS',
+                                docQuery: comp.componentPartCode,
+                              });
+                            }}
+                            className="px-2 py-0.5 bg-white border border-[#bb0000] rounded-sm text-[#bb0000] font-bold hover:bg-[#fff5f5] cursor-pointer shrink-0"
+                          >
+                            {matchedPart ? 'تعریف مسیر تولید در Routings' : 'تعریف در کاتالوگ قطعات'}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="flex items-center justify-between gap-2 pt-3 border-t border-[#e8e8e8] text-xs">
+                <span className="text-[#666666]">
+                  پس از تایید، دستورات واقعی کارگاهی در ماژول WIP ایجاد و با دستور مادر و انبار متصل می‌شوند.
+                </span>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setSubMoPreflightOpen(false)}
+                    className="sap-btn-standard px-4 py-1.5"
+                  >
+                    انصراف
+                  </button>
+                  <button
+                    type="button"
+                    disabled={hasBlocking || isGeneratingSubMos}
+                    onClick={handleConfirmGenerateSubMos}
+                    className="sap-btn-emphasized px-5 py-1.5 disabled:opacity-50"
+                  >
+                    {isGeneratingSubMos ? 'در حال صدور دستورات...' : 'تایید قطعی و صدور دستورات ساخت فرعی'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {/* Generated Sub-MOs Modal */}
       {subMoModalOpen && (
         <div className="fixed inset-0 z-50 bg-[#333333]/40 flex items-center justify-center p-4">
@@ -1396,43 +1669,60 @@ export const AdvancedBomModuleView: React.FC<AdvancedBomModuleViewProps> = ({
             </div>
 
             <p className="text-xs text-[#666666] leading-relaxed">
-              بر اساس تیراژ مصوب <strong>{toPersianDigits(plannedQty)} عدد</strong> از مجموعه {activeBom?.assemblyPartName}، دستورهای ساخت قطعات زیر برای ایستگاه‌های پرس و برش فعال شدند:
+              بر اساس تیراژ مصوب <strong>{toPersianDigits(plannedQty)} عدد</strong> از مجموعه {activeBom?.assemblyPartName}، دستورهای ساخت واقعی زیر در ماژول کارگاهی (WIP) ثبت و قابل پیگیری/ابطال هستند:
             </p>
 
             <div className="space-y-2 max-h-60 overflow-y-auto divide-y divide-[#e8e8e8]">
               {generatedSubMos.map((sub, i) => (
-                <div key={i} className="flex items-center justify-between py-2 text-xs">
-                  <div className="flex items-center gap-1.5 flex-wrap">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSubMoModalOpen(false);
-                        traceDocument(sub.subMoNumber, 'WIP_TRACEABILITY');
-                      }}
-                      className="sap-doc-link font-bold font-mono"
-                    >
-                      {sub.subMoNumber}
-                    </button>
-                    <span className="text-[#333333] font-medium">{sub.componentPartName}</span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSubMoModalOpen(false);
-                        traceDocument(sub.componentPartCode, 'INVENTORY_LEDGER');
-                      }}
-                      className="sap-doc-link text-[11px] font-mono"
-                    >
-                      ({sub.componentPartCode})
-                    </button>
+                <div key={i} className="flex items-center justify-between py-2 text-xs gap-2">
+                  <div>
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSubMoModalOpen(false);
+                          traceDocument(sub.subMoNumber, 'WIP_TRACEABILITY');
+                        }}
+                        className="sap-doc-link font-bold font-mono"
+                      >
+                        {sub.subMoNumber}
+                      </button>
+                      <span className="text-[#333333] font-medium">{sub.componentPartName}</span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSubMoModalOpen(false);
+                          traceDocument(sub.componentPartCode, 'INVENTORY_LEDGER');
+                        }}
+                        className="sap-doc-link text-[11px] font-mono"
+                      >
+                        ({sub.componentPartCode})
+                      </button>
+                    </div>
+                    {Array.isArray(sub.operations) && sub.operations.length > 0 && (
+                      <div className="text-[10px] text-[#556b82] mt-1">
+                        مراحل ایستگاه: {sub.operations.map((o: any) => `${o.stepCode} (${o.stepName})`).join(' ← ')}
+                      </div>
+                    )}
                   </div>
-                  <div className="font-mono font-bold text-[#333333] tabular-nums">
+                  <div className="font-mono font-bold text-[#333333] tabular-nums shrink-0">
                     {toPersianDigits(sub.requiredQty)} {sub.unit === 'PCS' ? 'عدد' : 'kg'}
                   </div>
                 </div>
               ))}
             </div>
 
-            <div className="flex justify-end pt-3 border-t border-[#e8e8e8]">
+            <div className="flex justify-between items-center pt-3 border-t border-[#e8e8e8]">
+              <button
+                type="button"
+                onClick={() => {
+                  setSubMoModalOpen(false);
+                  navigate({ tab: 'wip', wipSubTab: 'UNIFIED_DIRECTORY' });
+                }}
+                className="sap-btn-standard px-4 py-1.5 text-xs text-[#007cc0] border-[#b3ddf2]"
+              >
+                مشاهده و پیگیری در میز کار WIP
+              </button>
               <button
                 type="button"
                 onClick={() => setSubMoModalOpen(false)}

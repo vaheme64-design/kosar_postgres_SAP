@@ -707,3 +707,45 @@ export function reconcileBomEngineWithParts(
 
   return changes;
 }
+
+export function removePartReferencesFromBomEngine(partId: string, partCode: string): {
+  bomsRemoved: number;
+  componentsRemoved: number;
+  flowsUpdated: number;
+} {
+  const codeUpper = String(partCode || '').trim().toUpperCase();
+  let bomsRemoved = 0;
+  let componentsRemoved = 0;
+  let flowsUpdated = 0;
+
+  for (let i = advancedBomsStore.length - 1; i >= 0; i--) {
+    const bom = advancedBomsStore[i];
+    if (bom.assemblyPartId === partId || String(bom.assemblyPartCode || '').trim().toUpperCase() === codeUpper) {
+      advancedBomsStore.splice(i, 1);
+      bomsRemoved++;
+      continue;
+    }
+    const before = bom.components.length;
+    bom.components = bom.components.filter(
+      c => c.componentPartId !== partId && String(c.componentPartCode || '').trim().toUpperCase() !== codeUpper,
+    );
+    const diff = before - bom.components.length;
+    if (diff > 0) {
+      componentsRemoved += diff;
+      bom.subMoLinkedCount = bom.components.filter(c => c.subMoRequired).length;
+    }
+  }
+
+  for (const flow of parallelFlowsStore) {
+    const beforeOut = (flow.linkedOutputs || []).length;
+    flow.linkedOutputs = (flow.linkedOutputs || []).filter(
+      o => String(o.partCode || '').trim().toUpperCase() !== codeUpper,
+    );
+    if (flow.linkedOutputs.length < beforeOut) {
+      flowsUpdated++;
+    }
+  }
+
+  return { bomsRemoved, componentsRemoved, flowsUpdated };
+}
+
