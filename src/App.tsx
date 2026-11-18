@@ -38,6 +38,17 @@ import {
   ProductionPlan,
   SapcoCoilReceipt,
 } from './types/inventory';
+import { CloudSyncCheckResult } from './types/dbSync';
+import { toPersianDigits } from './utils/formatters';
+import {
+  CloudDownload,
+  CloudUpload,
+  RefreshCw,
+  GitBranch,
+  CheckCircle2,
+  AlertTriangle,
+  X,
+} from 'lucide-react';
 import { auth } from './lib/firebase';
 import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
 
@@ -128,6 +139,14 @@ function AppContent() {
   const [isAdvancedWizardOpen, setIsAdvancedWizardOpen] = useState(false);
   const [wizardLaunchParams, setWizardLaunchParams] = useState<HelpWizardLaunchParams | undefined>(undefined);
   const [loading, setLoading] = useState(false);
+
+  // Git-Like Opt-In Cloud DB Update Checker & Cross-Machine Push/Pull Sync State
+  const [autoCheckCloudUpdates, setAutoCheckCloudUpdates] = useState(false);
+  const [cloudCheckIntervalSec, setCloudCheckIntervalSec] = useState(120);
+  const [cloudSyncCheck, setCloudSyncCheck] = useState<CloudSyncCheckResult | null>(null);
+  const [cloudSyncBusy, setCloudSyncBusy] = useState<'CHECK' | 'PUSH' | 'PULL' | null>(null);
+  const [dismissedRemoteHash, setDismissedRemoteHash] = useState<string | null>(null);
+  const [cloudSyncToast, setCloudSyncToast] = useState<{ ok: boolean; text: string } | null>(null);
 
   // Core Data
   const [parts, setParts] = useState<Part[]>([]);
@@ -311,6 +330,142 @@ function AppContent() {
     };
     window.addEventListener('kpims-parts-imported', handlePartsImported);
     return () => window.removeEventListener('kpims-parts-imported', handlePartsImported);
+  }, [loadAllData]);
+
+  // Read lightweight local sync preference on mount (zero remote DB queries unless opted in)
+  useEffect(() => {
+    fetch('/api/db/config')
+      .then(r => r.json())
+      .then(json => {
+        if (json?.success && json.data) {
+          setAutoCheckCloudUpdates(Boolean(json.data.autoCheckCloudUpdates));
+          if (typeof json.data.cloudCheckIntervalSec === 'number') {
+            setCloudCheckIntervalSec(json.data.cloudCheckIntervalSec);
+          }
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const handleCheckCloudUpdates = useCallback(async (force = false) => {
+    setCloudSyncBusy('CHECK');
+    try {
+      const res = await fetch(`/api/db/sync/check${force ? '?force=true' : ''}`);
+      const json = await res.json();
+      if (json?.success && json.data) {
+        setCloudSyncCheck(json.data);
+        if (force && json.data.state === 'IN_SYNC') {
+          setCloudSyncToast({ ok: true, text: json.data.messageFa });
+        }
+      }
+    } catch {
+      // Keep UI responsive silently on transient offline failures
+    } finally {
+      setCloudSyncBusy(null);
+    }
+  }, []);
+
+  // Periodic background manifest check ONLY when user opted-in with checkbox
+  useEffect(() => {
+    if (!autoCheckCloudUpdates) return;
+
+    const initialTimer = window.setTimeout(() => {
+      if (!document.hidden) {
+        handleCheckCloudUpdates(false);
+      }
+    }, 1500);
+
+    const intervalMs = Math.max(30, cloudCheckIntervalSec) * 1000;
+    const intervalId = window.setInterval(() => {
+      if (!document.hidden) {
+        handleCheckCloudUpdates(false);
+      }
+    }, intervalMs);
+
+    return () => {
+      window.clearTimeout(initialTimer);
+      window.clearInterval(intervalId);
+    };
+  }, [autoCheckCloudUpdates, cloudCheckIntervalSec, handleCheckCloudUpdates]);
+
+  // Auto-dismiss transient toast banner after 7s
+  useEffect(() => {
+    if (!cloudSyncToast) return;
+    const timer = window.setTimeout(() => setCloudSyncToast(null), 7000);
+    return () => window.clearTimeout(timer);
+  }, [cloudSyncToast]);
+
+  const handleToggleAutoCloudCheck = useCallback(
+    async (enabled: boolean, intervalSec?: number) => {
+      setAutoCheckCloudUpdates(enabled);
+      if (typeof intervalSec === 'number') {
+        setCloudCheckIntervalSec(intervalSec);
+      }
+      try {
+        const res = await fetch('/api/db/config', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            autoCheckCloudUpdates: enabled,
+            cloudCheckIntervalSec: intervalSec ?? cloudCheckIntervalSec,
+          }),
+        });
+        const json = await res.json();
+        if (json?.success && enabled) {
+          await handleCheckCloudUpdates(true);
+        }
+      } catch {
+        // ignore transient save error
+      }
+    },
+    [cloudCheckIntervalSec, handleCheckCloudUpdates]
+  );
+
+  const handleCloudPush = useCallback(async (customDeviceLabel?: string) => {
+    setCloudSyncBusy('PUSH');
+    try {
+      const res = await fetch('/api/db/sync/push', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(customDeviceLabel ? { deviceLabel: customDeviceLabel } : {}),
+      });
+      const json = await res.json();
+      if (!res.ok || !json.success) {
+        throw new Error(json.error || 'خطا در آپلود اطلاعات به دیتابیس آنلاین');
+      }
+      if (json.checkResult) setCloudSyncCheck(json.checkResult);
+      setDismissedRemoteHash(null);
+      setCloudSyncToast({ ok: true, text: json.message });
+    } catch (err) {
+      setCloudSyncToast({
+        ok: false,
+        text: err instanceof Error ? err.message : 'خطا در آپلود به دیتابیس آنلاین (Push)',
+      });
+    } finally {
+      setCloudSyncBusy(null);
+    }
+  }, []);
+
+  const handleCloudPull = useCallback(async () => {
+    setCloudSyncBusy('PULL');
+    try {
+      const res = await fetch('/api/db/sync/pull', { method: 'POST' });
+      const json = await res.json();
+      if (!res.ok || !json.success) {
+        throw new Error(json.error || 'خطا در دریافت نسخه آنلاین');
+      }
+      if (json.checkResult) setCloudSyncCheck(json.checkResult);
+      setDismissedRemoteHash(null);
+      await loadAllData();
+      setCloudSyncToast({ ok: true, text: json.message });
+    } catch (err) {
+      setCloudSyncToast({
+        ok: false,
+        text: err instanceof Error ? err.message : 'خطا در به‌روزرسانی دیتابیس محلی از آنلاین (Pull)',
+      });
+    } finally {
+      setCloudSyncBusy(null);
+    }
   }, [loadAllData]);
 
   // Global Ctrl+Space Shortcut for Context-Aware AI Assistant (Upgrade 5)
@@ -844,11 +999,137 @@ function AppContent() {
       onOpenErpModal={() => setIsErpModalOpen(true)}
       onOpenHelpModal={() => setIsHelpModalOpen(true)}
       loading={loading}
+      cloudSyncCheck={cloudSyncCheck}
+      autoCheckCloudUpdates={autoCheckCloudUpdates}
+      cloudSyncBusy={cloudSyncBusy}
+      onToggleAutoCloudCheck={handleToggleAutoCloudCheck}
+      onCheckCloudUpdates={handleCheckCloudUpdates}
+      onCloudPull={handleCloudPull}
+      onCloudPush={() => handleCloudPush()}
     />
   );
 
+  const remoteAlertKey = cloudSyncCheck?.cloudManifest?.contentHash || 'legacy';
+  const showCloudUpdateBanner =
+    cloudSyncCheck &&
+    (cloudSyncCheck.state === 'REMOTE_AHEAD' || cloudSyncCheck.state === 'DIVERGED') &&
+    dismissedRemoteHash !== remoteAlertKey;
+
   const mainContentElement = (
     <main className="flex-1 px-4 py-4 md:px-6 md:py-5 overflow-y-auto max-w-[1440px] mx-auto w-full space-y-4">
+      {/* Git-Style Online Database Update Alert Bar */}
+      {showCloudUpdateBanner && cloudSyncCheck && (
+        <div
+          className={`rounded-md border px-4 py-3 flex flex-wrap items-center justify-between gap-3 shadow-xs ${
+            cloudSyncCheck.state === 'DIVERGED'
+              ? 'bg-[#ffecec] border-[#f5b7b1] text-[#8b0000]'
+              : 'bg-[#fff8ec] border-[#f5cba7] text-[#6d4506]'
+          }`}
+        >
+          <div className="flex items-start gap-2.5 min-w-0">
+            <GitBranch className="w-5 h-5 shrink-0 mt-0.5 text-[#b45309]" />
+            <div className="text-xs space-y-0.5">
+              <div className="font-bold flex flex-wrap items-center gap-2">
+                <span>
+                  {cloudSyncCheck.state === 'DIVERGED'
+                    ? 'تضاد بین نسخه محلی و نسخه آنلاین (هر دو تغییر کرده‌اند)'
+                    : 'نسخه جدیدتر پایگاه داده در سیستم آنلاین موجود است (Git Update)'}
+                </span>
+                {cloudSyncCheck.cloudManifest && (
+                  <span className="px-2 py-0.5 rounded bg-white/80 border border-[#e6c280] font-mono text-[10px]">
+                    Rev #{toPersianDigits(cloudSyncCheck.cloudManifest.revision)} · آپلود از «{cloudSyncCheck.cloudManifest.deviceLabel}»
+                  </span>
+                )}
+              </div>
+              <div className="text-[11px] opacity-90">
+                {cloudSyncCheck.messageFa}
+                {cloudSyncCheck.cloudManifest && (
+                  <span className="mr-2 font-medium">
+                    ({toPersianDigits(cloudSyncCheck.cloudManifest.counts.parts)} قطعه،{' '}
+                    {toPersianDigits(cloudSyncCheck.cloudManifest.counts.manufacturingOrders)} دستور تولید ·{' '}
+                    {new Date(cloudSyncCheck.cloudManifest.updatedAt).toLocaleString('fa-IR')})
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={handleCloudPull}
+              disabled={Boolean(cloudSyncBusy)}
+              className="sap-btn-emphasized text-xs px-3.5 py-1.5 flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+            >
+              <CloudDownload className="w-3.5 h-3.5" />
+              <span>{cloudSyncBusy === 'PULL' ? 'در حال به‌روزرسانی...' : 'به‌روزرسانی دیتابیس محلی (Pull)'}</span>
+            </button>
+
+            {cloudSyncCheck.state === 'DIVERGED' && (
+              <button
+                type="button"
+                onClick={() => handleCloudPush()}
+                disabled={Boolean(cloudSyncBusy)}
+                className="sap-btn-standard text-xs px-3 py-1.5 flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+              >
+                <CloudUpload className="w-3.5 h-3.5" />
+                <span>{cloudSyncBusy === 'PUSH' ? 'در حال آپلود...' : 'ارسال نسخه محلی (Push)'}</span>
+              </button>
+            )}
+
+            <button
+              type="button"
+              onClick={() => handleCheckCloudUpdates(true)}
+              disabled={Boolean(cloudSyncBusy)}
+              className="sap-btn-standard text-xs px-2.5 py-1.5 flex items-center gap-1 cursor-pointer disabled:opacity-50"
+              title="بررسی مجدد نسخه آنلاین"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${cloudSyncBusy === 'CHECK' ? 'animate-spin' : ''}`} />
+              <span>چک مجدد</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => handleDeepNavigate('settings', 'db_architecture')}
+              className="text-[11px] underline font-bold px-1.5 cursor-pointer"
+            >
+              تنظیمات همگام‌سازی
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setDismissedRemoteHash(remoteAlertKey)}
+              className="p-1 rounded hover:bg-black/10 cursor-pointer"
+              title="بستن موقت این اعلان"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Sync Result Toast Notification */}
+      {cloudSyncToast && (
+        <div
+          className={`rounded-md border px-4 py-2.5 text-xs flex items-center justify-between gap-3 ${
+            cloudSyncToast.ok
+              ? 'bg-[#ebf7ef] border-[#a9dfbf] text-[#107e3e]'
+              : 'bg-[#ffecec] border-[#f5b7b1] text-[#bb0000]'
+          }`}
+        >
+          <div className="flex items-center gap-2">
+            {cloudSyncToast.ok ? <CheckCircle2 className="w-4 h-4 shrink-0" /> : <AlertTriangle className="w-4 h-4 shrink-0" />}
+            <span className="font-semibold">{cloudSyncToast.text}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setCloudSyncToast(null)}
+            className="p-1 hover:bg-black/5 rounded cursor-pointer"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
       {/* 1. SAP Fiori Launchpad Home */}
       {activeTab === 'dashboard' && (
         <FioriLaunchpadView
@@ -1104,6 +1385,15 @@ function AppContent() {
                 setActiveSettingsSubTab(sub);
                 router.navigate({ settingsSubTab: sub });
               }}
+              cloudSyncCheck={cloudSyncCheck}
+              autoCheckCloudUpdates={autoCheckCloudUpdates}
+              cloudCheckIntervalSec={cloudCheckIntervalSec}
+              cloudSyncBusy={cloudSyncBusy}
+              onToggleAutoCloudCheck={handleToggleAutoCloudCheck}
+              onCheckCloudUpdates={handleCheckCloudUpdates}
+              onCloudPush={handleCloudPush}
+              onCloudPull={handleCloudPull}
+              onRefreshData={loadAllData}
             />
           )}
     </main>
@@ -1140,6 +1430,13 @@ function AppContent() {
           setIsErpModalOpen(false);
           handleDeepNavigate('settings', 'db_architecture');
         }}
+        cloudSyncCheck={cloudSyncCheck}
+        autoCheckCloudUpdates={autoCheckCloudUpdates}
+        cloudSyncBusy={cloudSyncBusy}
+        onToggleAutoCloudCheck={enabled => handleToggleAutoCloudCheck(enabled)}
+        onCheckCloudUpdates={handleCheckCloudUpdates}
+        onCloudPush={() => handleCloudPush()}
+        onCloudPull={handleCloudPull}
       />
 
       {/* AI Assistant Modal (Context-Aware Voice & Text with Ctrl+Space) */}

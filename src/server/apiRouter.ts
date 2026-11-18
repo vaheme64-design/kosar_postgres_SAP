@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { Router, Request, Response } from 'express';
 import {
   calculateInventoryLedger,
@@ -42,6 +43,20 @@ import {
   ensurePostgresSchemaReady,
   isMissingRelationError,
   DbTargetMode,
+  CLOUD_SYNC_MANIFEST_ID,
+  CloudSyncManifest,
+  CloudSyncCheckResult,
+  SyncEntityCounts,
+  GitSyncStatusCode,
+  clearCloudManifestCache,
+  recordLocalStateFingerprint,
+  recordCloudSyncCompleted,
+  withScopedPgClient,
+  ensureTargetSnapshotTables,
+  ensureTargetFullSchemaBestEffort,
+  fetchCloudSyncManifestLightweight,
+  isValidPostgresUrlSyntax,
+  getDefaultDeviceLabel,
 } from './db/prisma';
 import { CreateProductionPlanSchema, CreateSapcoReceiptSchema } from './validation/index';
 import { formatToJalali } from '../utils/jalali';
@@ -128,6 +143,8 @@ import {
   advanceProductionWipSnapshotVersion,
   registerWipRuntimeProvider,
   loadMaterialIntoManufacturingOrder,
+  exportProductionWipSnapshotPayload,
+  replaceProductionWipStateFromSync,
 } from './productionWipEngine';
 import {
   calculateNetRequirements,
@@ -1141,47 +1158,80 @@ function applyHydratedInventoryPayload(payload: any): void {
   }
 }
 
+export function buildInventoryAppStatePayload(): any {
+  return JSON.parse(
+    JSON.stringify({
+      parts: partsStore,
+      units: unitsStore,
+      warehouses: warehousesStore,
+      customers: customersStore,
+      machines: machinesStore,
+      routings: routingsStore,
+      dies: diesStore,
+      operators: operatorsStore,
+      halls: hallsStore,
+      processes: processesStore,
+      materialGrades: materialGradesStore,
+      shifts: shiftsStore,
+      carModels: carModelsStore,
+      operations: operationsStore,
+      plans: plansStore,
+      coils: coilsStore,
+      advancedBoms: getAllBoms(),
+      parallelFlows: getAllParallelFlows(),
+      traceabilityTags: getAllTraceabilityTags(),
+      vipParts: serverVipPartsStore,
+      contracts: contractsStore,
+      physicalCoils: physicalCoilsStore,
+      coilIssueRecords: coilIssueRecordsStore,
+      reservations: reservationsStore,
+      inventoryDocuments: inventoryDocsStore,
+      auditLogs: auditLogsStore,
+      qcHolds: serverQcHoldStore,
+      purchaseRequisitions: mrpPurchaseRequisitionsStore,
+      customerOrders: customerOrdersStore,
+      planSuggestions: planSuggestionsStore,
+      machineWorkloadHours: machineWorkloadHoursMap,
+      transactions: transactionsStore,
+      maintenanceRequests: maintenanceRequestsStore,
+      pmPlans: pmPlansStore,
+      spareParts: sparePartsStore,
+      oeeConsumablesState: exportOeeConsumablesSnapshot(),
+      productStructures: productStructuresStore,
+      fallbackPlanProposals: exportFallbackProposalsSnapshot(),
+    })
+  );
+}
+
+export function computeLocalSyncSnapshotInfo(): {
+  inventoryPayload: any;
+  wipPayload: ReturnType<typeof exportProductionWipSnapshotPayload>;
+  counts: SyncEntityCounts;
+  hash: string;
+} {
+  const inventoryPayload = buildInventoryAppStatePayload();
+  const wipPayload = exportProductionWipSnapshotPayload();
+  const counts: SyncEntityCounts = {
+    parts: partsStore.length,
+    contracts: contractsStore.length,
+    coils: physicalCoilsStore.length,
+    orders: customerOrdersStore.length,
+    manufacturingOrders: manufacturingOrdersStore.length,
+    inventoryDocs: inventoryDocsStore.length,
+    transactions: transactionsStore.length,
+    boms: getAllBoms().length,
+    routings: routingsStore.length,
+  };
+  const hash = crypto
+    .createHash('sha256')
+    .update(JSON.stringify({ inventory: inventoryPayload, wip: wipPayload }))
+    .digest('hex')
+    .slice(0, 24);
+  return { inventoryPayload, wipPayload, counts, hash };
+}
+
 export async function persistInventoryAppState(): Promise<void> {
-  const payload = JSON.parse(JSON.stringify({
-    parts: partsStore,
-    units: unitsStore,
-    warehouses: warehousesStore,
-    customers: customersStore,
-    machines: machinesStore,
-    routings: routingsStore,
-    dies: diesStore,
-    operators: operatorsStore,
-    halls: hallsStore,
-    processes: processesStore,
-    materialGrades: materialGradesStore,
-    shifts: shiftsStore,
-    carModels: carModelsStore,
-    operations: operationsStore,
-    plans: plansStore,
-    coils: coilsStore,
-    advancedBoms: getAllBoms(),
-    parallelFlows: getAllParallelFlows(),
-    traceabilityTags: getAllTraceabilityTags(),
-    vipParts: serverVipPartsStore,
-    contracts: contractsStore,
-    physicalCoils: physicalCoilsStore,
-    coilIssueRecords: coilIssueRecordsStore,
-    reservations: reservationsStore,
-    inventoryDocuments: inventoryDocsStore,
-    auditLogs: auditLogsStore,
-    qcHolds: serverQcHoldStore,
-    purchaseRequisitions: mrpPurchaseRequisitionsStore,
-    customerOrders: customerOrdersStore,
-    planSuggestions: planSuggestionsStore,
-    machineWorkloadHours: machineWorkloadHoursMap,
-    transactions: transactionsStore,
-    maintenanceRequests: maintenanceRequestsStore,
-    pmPlans: pmPlansStore,
-    spareParts: sparePartsStore,
-    oeeConsumablesState: exportOeeConsumablesSnapshot(),
-    productStructures: productStructuresStore,
-    fallbackPlanProposals: exportFallbackProposalsSnapshot(),
-  }));
+  const payload = buildInventoryAppStatePayload();
 
   // Always persist to durable local disk first so zero data is ever lost across restarts
   writeInventoryDiskSnapshot(payload);
@@ -3147,7 +3197,14 @@ apiRouter.get('/db/config', async (req: Request, res: Response) => {
 
 apiRouter.put('/db/config', async (req: Request, res: Response) => {
   try {
-    const { localDbUrl, cloudDbUrl, activeTarget } = req.body || {};
+    const {
+      localDbUrl,
+      cloudDbUrl,
+      activeTarget,
+      autoCheckCloudUpdates,
+      cloudCheckIntervalSec,
+      deviceLabel,
+    } = req.body || {};
     const validTargets: DbTargetMode[] = ['AUTO', 'LOCAL', 'CLOUD', 'HYBRID_DISK'];
     if (activeTarget !== undefined && !validTargets.includes(activeTarget)) {
       return res.status(400).json({ success: false, error: 'حالت انتخاب‌شده برای پایگاه داده فعال معتبر نیست.' });
@@ -3156,13 +3213,16 @@ apiRouter.put('/db/config', async (req: Request, res: Response) => {
       localDbUrl: typeof localDbUrl === 'string' ? localDbUrl : undefined,
       cloudDbUrl: typeof cloudDbUrl === 'string' ? cloudDbUrl : undefined,
       activeTarget,
+      autoCheckCloudUpdates: typeof autoCheckCloudUpdates === 'boolean' ? autoCheckCloudUpdates : undefined,
+      cloudCheckIntervalSec: typeof cloudCheckIntervalSec === 'number' ? cloudCheckIntervalSec : undefined,
+      deviceLabel: typeof deviceLabel === 'string' ? deviceLabel : undefined,
     });
     const status = await checkDatabaseConnection(false);
     res.json({
       success: true,
       message: status.isConnected
         ? `تنظیمات دو پایگاه داده ذخیره و اتصال به ${status.dualLinks?.resolvedTarget === 'LOCAL' ? 'پایگاه داده محلی (Local)' : 'پایگاه داده ابری (Cloud)'} برقرار شد.`
-        : 'تنظیمات دو پایگاه داده ذخیره شد؛ اکنون سیستم روی موتور پایدار دیسک محلی (Hybrid Durable) فعال است.',
+        : 'تنظیمات دو پایگاه داده و همگام‌سازی ذخیره شد؛ موتور پایدار دیسک محلی فعال است.',
       data: updated,
       status,
     });
@@ -3194,6 +3254,460 @@ apiRouter.post('/db/test', async (req: Request, res: Response) => {
     res.status(500).json({
       success: false,
       error: error instanceof Error ? error.message : 'خطا در تست اتصال پایگاه داده',
+    });
+  }
+});
+
+async function evaluateCloudSyncStatus(force = false): Promise<CloudSyncCheckResult> {
+  const cfg = readDualDbStoredConfig();
+  const localInfo = computeLocalSyncSnapshotInfo();
+  const localRevision = recordLocalStateFingerprint(localInfo.hash);
+  const refreshedCfg = readDualDbStoredConfig();
+  const deviceLabel = refreshedCfg.deviceLabel || getDefaultDeviceLabel();
+  const autoCheckEnabled = Boolean(refreshedCfg.autoCheckCloudUpdates);
+  const checkIntervalSec = refreshedCfg.cloudCheckIntervalSec || 120;
+
+  const remote = await fetchCloudSyncManifestLightweight(force, 2800);
+  if (!remote.cloudConfigured) {
+    return {
+      state: 'CLOUD_NOT_CONFIGURED',
+      checkedAt: remote.checkedAt,
+      cached: remote.cached,
+      autoCheckEnabled,
+      checkIntervalSec,
+      deviceLabel,
+      cloudConfigured: false,
+      cloudReachable: false,
+      localHash: localInfo.hash,
+      localRevision,
+      localUpdatedAt: refreshedCfg.lastLocalUpdatedAt,
+      localCounts: localInfo.counts,
+      lastSyncedCloudHash: refreshedCfg.lastSyncedCloudHash,
+      lastSyncedCloudRevision: refreshedCfg.lastSyncedCloudRevision,
+      lastSyncedCloudAt: refreshedCfg.lastSyncedCloudAt,
+      cloudManifest: null,
+      messageFa: 'لینک پایگاه داده آنلاین (Cloud) هنوز تنظیم نشده است.',
+    };
+  }
+
+  if (!remote.cloudReachable) {
+    return {
+      state: 'CLOUD_UNREACHABLE',
+      checkedAt: remote.checkedAt,
+      cached: remote.cached,
+      autoCheckEnabled,
+      checkIntervalSec,
+      deviceLabel,
+      cloudConfigured: true,
+      cloudReachable: false,
+      latencyMs: remote.latencyMs,
+      localHash: localInfo.hash,
+      localRevision,
+      localUpdatedAt: refreshedCfg.lastLocalUpdatedAt,
+      localCounts: localInfo.counts,
+      lastSyncedCloudHash: refreshedCfg.lastSyncedCloudHash,
+      lastSyncedCloudRevision: refreshedCfg.lastSyncedCloudRevision,
+      lastSyncedCloudAt: refreshedCfg.lastSyncedCloudAt,
+      cloudManifest: null,
+      error: remote.error,
+      messageFa: 'امکان اتصال به پایگاه داده آنلاین در این لحظه وجود ندارد (بررسی بدون افت سرعت متوقف شد).',
+    };
+  }
+
+  if (!remote.manifest && !remote.hasLegacySnapshot) {
+    return {
+      state: 'CLOUD_EMPTY',
+      checkedAt: remote.checkedAt,
+      cached: remote.cached,
+      autoCheckEnabled,
+      checkIntervalSec,
+      deviceLabel,
+      cloudConfigured: true,
+      cloudReachable: true,
+      latencyMs: remote.latencyMs,
+      localHash: localInfo.hash,
+      localRevision,
+      localUpdatedAt: refreshedCfg.lastLocalUpdatedAt,
+      localCounts: localInfo.counts,
+      lastSyncedCloudHash: refreshedCfg.lastSyncedCloudHash,
+      lastSyncedCloudRevision: refreshedCfg.lastSyncedCloudRevision,
+      lastSyncedCloudAt: refreshedCfg.lastSyncedCloudAt,
+      cloudManifest: null,
+      messageFa: 'پایگاه داده آنلاین خالی است؛ می‌توانید با دکمه Push نسخه فعلی را آپلود کنید.',
+    };
+  }
+
+  const cloudManifest: CloudSyncManifest = remote.manifest || {
+    schemaVersion: 1,
+    revision: 1,
+    contentHash: `legacy-${remote.legacyUpdatedAt || 'snapshot'}`,
+    updatedAt: remote.legacyUpdatedAt || remote.checkedAt,
+    deviceLabel: 'سرور آنلاین (نسخه قبلی)',
+    counts: localInfo.counts,
+  };
+
+  let state: GitSyncStatusCode = 'IN_SYNC';
+  let messageFa = 'نسخه محلی و پایگاه داده آنلاین کاملاً همگام هستند.';
+
+  if (localInfo.hash === cloudManifest.contentHash) {
+    state = 'IN_SYNC';
+    messageFa = `پایگاه داده این سیستم با نسخه آنلاین (Rev #${cloudManifest.revision}) کاملاً همگام است.`;
+  } else if (!refreshedCfg.lastSyncedCloudHash) {
+    state = 'REMOTE_AHEAD';
+    messageFa = `نسخه آنلاین جدید (Rev #${cloudManifest.revision} از «${cloudManifest.deviceLabel}») یافت شد. برای همگام‌سازی این سیستم، Pull را بزنید.`;
+  } else {
+    const cloudChangedSinceSync = cloudManifest.contentHash !== refreshedCfg.lastSyncedCloudHash;
+    const baseLocalHash = refreshedCfg.lastSyncedLocalHash || refreshedCfg.lastSyncedCloudHash;
+    const localChangedSinceSync = localInfo.hash !== baseLocalHash;
+
+    if (cloudChangedSinceSync && !localChangedSinceSync) {
+      state = 'REMOTE_AHEAD';
+      messageFa = `نسخه جدیدتر (Rev #${cloudManifest.revision}) از «${cloudManifest.deviceLabel}» در دیتابیس آنلاین ثبت شده است. دیتابیس خود را آپدیت (Pull) کنید.`;
+    } else if (!cloudChangedSinceSync && localChangedSinceSync) {
+      state = 'LOCAL_AHEAD';
+      messageFa = `تغییرات جدیدی روی این سیستم («${deviceLabel}») ایجاد شده که هنوز به دیتابیس آنلاین آپلود (Push) نشده است.`;
+    } else if (cloudChangedSinceSync && localChangedSinceSync) {
+      state = 'DIVERGED';
+      messageFa = `هم در این سیستم و هم در دیتابیس آنلاین (توسط «${cloudManifest.deviceLabel}») تغییرات جدیدی وجود دارد. دریافت آنلاین (Pull) یا ارسال محلی (Push) را انتخاب کنید.`;
+    } else {
+      state = 'REMOTE_AHEAD';
+      messageFa = `تفاوت بین دیتابیس محلی و نسخه آنلاین (Rev #${cloudManifest.revision}) شناسایی شد.`;
+    }
+  }
+
+  return {
+    state,
+    checkedAt: remote.checkedAt,
+    cached: remote.cached,
+    autoCheckEnabled,
+    checkIntervalSec,
+    deviceLabel,
+    cloudConfigured: true,
+    cloudReachable: true,
+    latencyMs: remote.latencyMs,
+    localHash: localInfo.hash,
+    localRevision,
+    localUpdatedAt: refreshedCfg.lastLocalUpdatedAt,
+    localCounts: localInfo.counts,
+    lastSyncedCloudHash: refreshedCfg.lastSyncedCloudHash,
+    lastSyncedCloudRevision: refreshedCfg.lastSyncedCloudRevision,
+    lastSyncedCloudAt: refreshedCfg.lastSyncedCloudAt,
+    cloudManifest,
+    messageFa,
+  };
+}
+
+async function writeFullSnapshotBundleToPgUrl(
+  targetUrl: string,
+  inventoryPayload: any,
+  wipPayload: ReturnType<typeof exportProductionWipSnapshotPayload>,
+  manifest: CloudSyncManifest,
+  alsoSyncRelationalParts = true,
+): Promise<{ relationalPartsSynced: number }> {
+  return withScopedPgClient(targetUrl, 25_000, async (client, enrichedUrl) => {
+    const schemaReady = await ensureTargetFullSchemaBestEffort(client, enrichedUrl);
+    await ensureTargetSnapshotTables(client);
+
+    await client.$executeRawUnsafe(
+      `INSERT INTO "inventory_app_state_snapshots" ("id", "payload", "updatedAt")
+       VALUES ($1, $2::jsonb, CURRENT_TIMESTAMP)
+       ON CONFLICT ("id") DO UPDATE SET "payload" = EXCLUDED."payload", "updatedAt" = CURRENT_TIMESTAMP`,
+      INVENTORY_APP_SNAPSHOT_ID,
+      JSON.stringify(inventoryPayload),
+    );
+
+    await client.$executeRawUnsafe(
+      `INSERT INTO "wip_state_snapshots" ("id", "payload", "version", "updatedAt")
+       VALUES ($1, $2::jsonb, $3, CURRENT_TIMESTAMP)
+       ON CONFLICT ("id") DO UPDATE SET "payload" = EXCLUDED."payload", "version" = EXCLUDED."version", "updatedAt" = CURRENT_TIMESTAMP`,
+      'production-wip-state',
+      JSON.stringify(wipPayload),
+      manifest.revision,
+    );
+
+    await client.$executeRawUnsafe(
+      `INSERT INTO "inventory_app_state_snapshots" ("id", "payload", "updatedAt")
+       VALUES ($1, $2::jsonb, CURRENT_TIMESTAMP)
+       ON CONFLICT ("id") DO UPDATE SET "payload" = EXCLUDED."payload", "updatedAt" = CURRENT_TIMESTAMP`,
+      CLOUD_SYNC_MANIFEST_ID,
+      JSON.stringify(manifest),
+    );
+
+    let relationalPartsSynced = 0;
+    if (alsoSyncRelationalParts && schemaReady && Array.isArray(inventoryPayload?.parts) && inventoryPayload.parts.length > 0) {
+      try {
+        for (const u of unitsStore) {
+          const code = String(u.symbol || 'PCS').trim().toUpperCase();
+          if (!code) continue;
+          await client.unitOfMeasure.upsert({
+            where: { code },
+            create: { id: u.id && u.id.startsWith('UNIT-') ? u.id : `UNIT-${code}`, code, name: u.title || `واحد ${code}`, symbol: code, isBase: code === 'KG' || code === 'PCS', active: true },
+            update: { name: u.title || `واحد ${code}`, symbol: code, active: true },
+          });
+        }
+        const existingUoms = await client.unitOfMeasure.findMany({ select: { id: true, code: true } });
+        const uomMap = new Map(existingUoms.map((u: any) => [String(u.code).toUpperCase(), u.id]));
+        const fallbackUomId = uomMap.get('PCS') || existingUoms[0]?.id;
+
+        if (fallbackUomId) {
+          const CHUNK = 50;
+          const partsArr = inventoryPayload.parts as Part[];
+          for (let i = 0; i < partsArr.length; i += CHUNK) {
+            const chunk = partsArr.slice(i, i + CHUNK);
+            await client.$transaction(
+              chunk
+                .filter(p => p?.code && p?.name)
+                .map(p => {
+                  const partNumber = normalizeExcelDigits(p.code);
+                  const normCat = normalizePartCategory(p.category, partNumber);
+                  const normUom = normalizePartUnit(p.unit, normCat);
+                  const uomId = uomMap.get(normUom) || fallbackUomId;
+                  const weightVal = Math.max(0.0001, parseExcelNumber(p.weightPerUnitKg, 1));
+                  const minSafety = Math.max(0, parseExcelNumber(p.minStock, 0));
+                  return client.part.upsert({
+                    where: { partNumber },
+                    create: {
+                      partNumber,
+                      supplierPartNumber: p.sapcoCode ? String(p.sapcoCode).trim() : null,
+                      name: String(p.name).trim(),
+                      category: normCat as any,
+                      carModel: p.carModel ? String(p.carModel).trim() : null,
+                      unitId: uomId,
+                      weightNetKg: weightVal,
+                      weightGrossKg: weightVal,
+                      scrapNormPercent: 0,
+                      minSafetyStock: minSafety,
+                      maxStock: p.maxStock != null && Number(p.maxStock) > 0 ? parseExcelNumber(p.maxStock, 0) : null,
+                      leadTimeDays: Math.max(1, Math.round(Number(p.leadTimeDays) || 1)),
+                      active: true,
+                    },
+                    update: {
+                      supplierPartNumber: p.sapcoCode ? String(p.sapcoCode).trim() : null,
+                      name: String(p.name).trim(),
+                      category: normCat as any,
+                      carModel: p.carModel ? String(p.carModel).trim() : null,
+                      unitId: uomId,
+                      weightNetKg: weightVal,
+                      weightGrossKg: weightVal,
+                      minSafetyStock: minSafety,
+                      maxStock: p.maxStock != null && Number(p.maxStock) > 0 ? parseExcelNumber(p.maxStock, 0) : null,
+                      leadTimeDays: Math.max(1, Math.round(Number(p.leadTimeDays) || 1)),
+                      active: true,
+                    },
+                  });
+                }),
+            );
+            relationalPartsSynced += chunk.length;
+          }
+        }
+      } catch (relErr) {
+        console.warn('[KPIMS Cloud Sync] Relational part batch sync warning:', relErr instanceof Error ? relErr.message : relErr);
+      }
+    }
+
+    return { relationalPartsSynced };
+  });
+}
+
+// Lightweight Git-like Update Checker (zero heavy payload transfer)
+apiRouter.get('/db/sync/check', async (req: Request, res: Response) => {
+  try {
+    const force = req.query.force === 'true';
+    const data = await evaluateCloudSyncStatus(force);
+    res.json({ success: true, data });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'خطا در بررسی نسخه پایگاه داده آنلاین',
+    });
+  }
+});
+
+// Explicit Push: Laptop / Current Machine -> Cloud (Online) DB
+apiRouter.post('/db/sync/push', async (req: Request, res: Response) => {
+  try {
+    const cfg = readDualDbStoredConfig();
+    if (!isValidPostgresUrlSyntax(cfg.cloudDbUrl)) {
+      return res.status(400).json({
+        success: false,
+        error: 'لینک پایگاه داده آنلاین (Cloud DB) هنوز تنظیم نشده است. لطفاً ابتدا آن را در تنظیمات وارد و ذخیره کنید.',
+      });
+    }
+
+    const customDeviceLabel =
+      typeof req.body?.deviceLabel === 'string' && req.body.deviceLabel.trim()
+        ? req.body.deviceLabel.trim().slice(0, 48)
+        : cfg.deviceLabel || getDefaultDeviceLabel();
+
+    const localInfo = computeLocalSyncSnapshotInfo();
+    const currentRemote = await fetchCloudSyncManifestLightweight(true, 3000);
+    if (!currentRemote.cloudReachable) {
+      return res.status(503).json({
+        success: false,
+        error: currentRemote.error || 'امکان برقراری ارتباط با پایگاه داده آنلاین برای آپلود (Push) وجود ندارد.',
+      });
+    }
+
+    const nextRevision =
+      Math.max(
+        currentRemote.manifest?.revision || 0,
+        cfg.lastSyncedCloudRevision || 0,
+        cfg.lastLocalRevision || 0,
+      ) + 1;
+
+    const manifest: CloudSyncManifest = {
+      schemaVersion: 1,
+      revision: nextRevision,
+      contentHash: localInfo.hash,
+      updatedAt: new Date().toISOString(),
+      deviceLabel: customDeviceLabel,
+      counts: localInfo.counts,
+    };
+
+    // Ensure local disk is up to date too
+    writeInventoryDiskSnapshot(localInfo.inventoryPayload);
+
+    const writeRes = await writeFullSnapshotBundleToPgUrl(
+      cfg.cloudDbUrl,
+      localInfo.inventoryPayload,
+      localInfo.wipPayload,
+      manifest,
+      true,
+    );
+
+    const summary = `آپلود کامل (Push #${manifest.revision}) از «${customDeviceLabel}» به دیتابیس آنلاین انجام شد (${localInfo.counts.parts} قطعه، ${localInfo.counts.manufacturingOrders} دستور تولید، ${localInfo.counts.inventoryDocs} سند انبار).`;
+    recordCloudSyncCompleted(manifest, localInfo.hash, summary);
+
+    const checkResult = await evaluateCloudSyncStatus(true);
+    res.json({
+      success: true,
+      message: summary,
+      manifest,
+      relationalPartsSynced: writeRes.relationalPartsSynced,
+      checkResult,
+      status: await checkDatabaseConnection(false),
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'خطا در آپلود داده‌ها به پایگاه داده آنلاین (Push)',
+    });
+  }
+});
+
+// Explicit Pull: Cloud (Online) DB -> Current Machine (Memory + Disk + Local PostgreSQL if configured)
+apiRouter.post('/db/sync/pull', async (_req: Request, res: Response) => {
+  try {
+    const cfg = readDualDbStoredConfig();
+    if (!isValidPostgresUrlSyntax(cfg.cloudDbUrl)) {
+      return res.status(400).json({
+        success: false,
+        error: 'لینک پایگاه داده آنلاین (Cloud DB) هنوز تنظیم نشده است.',
+      });
+    }
+
+    const pulled = await withScopedPgClient(cfg.cloudDbUrl, 25_000, async client => {
+      const regRows = (await client.$queryRawUnsafe(
+        `SELECT to_regclass('public.inventory_app_state_snapshots')::text AS snap, to_regclass('public.wip_state_snapshots')::text AS wip`,
+      )) as Array<{ snap: string | null; wip: string | null }>;
+      if (!regRows?.[0]?.snap) {
+        return null;
+      }
+
+      const invRows = (await client.$queryRawUnsafe(
+        `SELECT "payload", "updatedAt" FROM "inventory_app_state_snapshots" WHERE "id" = $1 LIMIT 1`,
+        INVENTORY_APP_SNAPSHOT_ID,
+      )) as Array<{ payload: any; updatedAt: Date | string }>;
+
+      const manifestRows = (await client.$queryRawUnsafe(
+        `SELECT "payload", "updatedAt" FROM "inventory_app_state_snapshots" WHERE "id" = $1 LIMIT 1`,
+        CLOUD_SYNC_MANIFEST_ID,
+      )) as Array<{ payload: any; updatedAt: Date | string }>;
+
+      let wipRows: Array<{ payload: any; version: number }> = [];
+      if (regRows?.[0]?.wip) {
+        wipRows = (await client.$queryRawUnsafe(
+          `SELECT "payload", "version" FROM "wip_state_snapshots" WHERE "id" = $1 LIMIT 1`,
+          'production-wip-state',
+        )) as Array<{ payload: any; version: number }>;
+      }
+
+      const parseJson = (val: any) => (typeof val === 'string' ? JSON.parse(val) : val);
+      const invPayload = invRows?.[0]?.payload ? parseJson(invRows[0].payload) : null;
+      const wipPayload = wipRows?.[0]?.payload ? parseJson(wipRows[0].payload) : null;
+      const manifestPayload = manifestRows?.[0]?.payload ? (parseJson(manifestRows[0].payload) as CloudSyncManifest) : null;
+
+      return {
+        invPayload,
+        invUpdatedAt: invRows?.[0]?.updatedAt ? new Date(invRows[0].updatedAt).toISOString() : undefined,
+        wipPayload,
+        wipVersion: wipRows?.[0]?.version,
+        manifestPayload,
+      };
+    });
+
+    if (!pulled || (!pulled.invPayload && !pulled.wipPayload)) {
+      return res.status(404).json({
+        success: false,
+        error: 'در پایگاه داده آنلاین هنوز نسخه‌ای برای دریافت (Pull) آپلود نشده است.',
+      });
+    }
+
+    if (pulled.invPayload) {
+      applyHydratedInventoryPayload(pulled.invPayload);
+      writeInventoryDiskSnapshot(pulled.invPayload);
+    }
+    if (pulled.wipPayload) {
+      replaceProductionWipStateFromSync(pulled.wipPayload, pulled.wipVersion);
+    }
+
+    const postPullInfo = computeLocalSyncSnapshotInfo();
+    const resolvedManifest: CloudSyncManifest = pulled.manifestPayload || {
+      schemaVersion: 1,
+      revision: (cfg.lastSyncedCloudRevision || 0) + 1,
+      contentHash: postPullInfo.hash,
+      updatedAt: pulled.invUpdatedAt || new Date().toISOString(),
+      deviceLabel: 'سرور آنلاین',
+      counts: postPullInfo.counts,
+    };
+
+    // If a Local PostgreSQL URL is configured and reachable on this PC, push the pulled state into it too!
+    let localPgUpdated = false;
+    let localPgWarning: string | undefined;
+    if (isValidPostgresUrlSyntax(cfg.localDbUrl)) {
+      try {
+        await writeFullSnapshotBundleToPgUrl(
+          cfg.localDbUrl,
+          postPullInfo.inventoryPayload,
+          postPullInfo.wipPayload,
+          resolvedManifest,
+          true,
+        );
+        localPgUpdated = true;
+      } catch (localErr) {
+        localPgWarning = localErr instanceof Error ? localErr.message : String(localErr);
+      }
+    }
+
+    const summary = `به‌روزرسانی محلی (Pull #${resolvedManifest.revision}) از «${resolvedManifest.deviceLabel}» با موفقیت انجام شد (${postPullInfo.counts.parts} قطعه، ${postPullInfo.counts.manufacturingOrders} دستور تولید${localPgUpdated ? ' + ذخیره در PostgreSQL محلی' : ''}).`;
+    recordCloudSyncCompleted(resolvedManifest, postPullInfo.hash, summary);
+    clearCloudManifestCache();
+
+    const checkResult = await evaluateCloudSyncStatus(true);
+    res.json({
+      success: true,
+      message: summary,
+      manifest: resolvedManifest,
+      localPgUpdated,
+      localPgWarning,
+      counts: postPullInfo.counts,
+      checkResult,
+      status: await checkDatabaseConnection(false),
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'خطا در به‌روزرسانی دیتابیس محلی از آنلاین (Pull)',
     });
   }
 });
@@ -3232,6 +3746,30 @@ apiRouter.post('/db/sync', async (_req: Request, res: Response) => {
     const coilRes = await syncCoilsToPostgres(physicalCoilsStore);
     await persistInventoryAppState();
     await persistProductionWipState();
+
+    // Update Cloud sync manifest if active DB is CLOUD so Git checker recognizes it immediately
+    const localInfo = computeLocalSyncSnapshotInfo();
+    const cfg = readDualDbStoredConfig();
+    if (status.dualLinks?.resolvedTarget === 'CLOUD' && isValidPostgresUrlSyntax(cfg.cloudDbUrl)) {
+      const manifest: CloudSyncManifest = {
+        schemaVersion: 1,
+        revision: Math.max(cfg.lastSyncedCloudRevision || 0, cfg.lastLocalRevision || 0) + 1,
+        contentHash: localInfo.hash,
+        updatedAt: new Date().toISOString(),
+        deviceLabel: cfg.deviceLabel || getDefaultDeviceLabel(),
+        counts: localInfo.counts,
+      };
+      try {
+        await getPrismaClient().inventoryAppStateSnapshot.upsert({
+          where: { id: CLOUD_SYNC_MANIFEST_ID },
+          create: { id: CLOUD_SYNC_MANIFEST_ID, payload: manifest as any },
+          update: { payload: manifest as any },
+        });
+        recordCloudSyncCompleted(manifest, localInfo.hash, `همگام‌سازی مستقیم با Cloud DB (#${manifest.revision})`);
+      } catch {
+        // non-fatal
+      }
+    }
 
     const summary = `همگام‌سازی کامل با PostgreSQL (${status.dualLinks?.resolvedTarget || 'PG'}): ${pRes.syncedCount} قطعه، ${cRes.syncedCount} قرارداد، ${coilRes.syncedCount} کلاف و Snapshot تولید/انبار ثبت شد.`;
     recordDualDbSyncResult(summary);

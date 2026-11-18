@@ -1,0 +1,11 @@
+{
+  "localDbUrl": "",
+  "cloudDbUrl": "postgresql://postgres:QKMZDr0H90GWJ3ki@db.iusaocctfromtocsmdog.supabase.co:5432/postgres",
+  "activeTarget": "AUTO",
+  "autoCheckCloudUpdates": false,
+  "cloudCheckIntervalSec": 120,
+  "deviceLabel": "localhost",
+  "lastLocalHash": "704e14cd7b69f894814bcf78",
+  "lastLocalRevision": 2,
+  "lastLocalUpdatedAt": "2026-11-18T04:54:15.857Z"
+}

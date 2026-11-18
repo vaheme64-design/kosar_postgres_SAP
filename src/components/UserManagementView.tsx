@@ -17,8 +17,15 @@ import {
   AlertCircle,
   Copy,
   Check,
+  CloudUpload,
+  CloudDownload,
+  GitBranch,
+  RefreshCw,
+  Laptop,
 } from 'lucide-react';
 import { UserRoleProfile } from '../types/inventory';
+import { CloudSyncCheckResult } from '../types/dbSync';
+import { toPersianDigits } from '../utils/formatters';
 import { auth } from '../lib/firebase';
 import { GoogleAuthProvider, signInWithPopup, signOut } from 'firebase/auth';
 import { KpiCardsSkeleton } from './ui/Skeleton';
@@ -29,6 +36,15 @@ interface UserManagementViewProps {
   firebaseUser: any;
   initialSubTab?: 'rbac' | 'db_architecture';
   onSubTabChange?: (sub: 'rbac' | 'db_architecture') => void;
+  cloudSyncCheck?: CloudSyncCheckResult | null;
+  autoCheckCloudUpdates?: boolean;
+  cloudCheckIntervalSec?: number;
+  cloudSyncBusy?: 'CHECK' | 'PUSH' | 'PULL' | null;
+  onToggleAutoCloudCheck?: (enabled: boolean, intervalSec?: number) => Promise<void>;
+  onCheckCloudUpdates?: (force?: boolean) => Promise<void>;
+  onCloudPush?: (deviceLabel?: string) => Promise<void>;
+  onCloudPull?: () => Promise<void>;
+  onRefreshData?: () => Promise<void>;
 }
 
 export const UserManagementView: React.FC<UserManagementViewProps> = ({
@@ -37,6 +53,15 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
   firebaseUser,
   initialSubTab = 'rbac',
   onSubTabChange,
+  cloudSyncCheck,
+  autoCheckCloudUpdates = false,
+  cloudCheckIntervalSec = 120,
+  cloudSyncBusy = null,
+  onToggleAutoCloudCheck,
+  onCheckCloudUpdates,
+  onCloudPush,
+  onCloudPull,
+  onRefreshData,
 }) => {
   const [activeSubTab, setActiveSubTab] = useState<'rbac' | 'db_architecture'>(initialSubTab);
   const [dbStatus, setDbStatus] = useState<any>(null);
@@ -44,13 +69,18 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
   const [copiedCmd, setCopiedCmd] = useState<string | null>(null);
   const [authErrorMsg, setAuthErrorMsg] = useState<string | null>(null);
 
-  // Dual DB Connection State
+  // Dual DB Connection & Git-Style Sync State
   const [localDbUrl, setLocalDbUrl] = useState('');
   const [cloudDbUrl, setCloudDbUrl] = useState('');
   const [activeTarget, setActiveTarget] = useState<'AUTO' | 'LOCAL' | 'CLOUD' | 'HYBRID_DISK'>('AUTO');
+  const [deviceLabel, setDeviceLabel] = useState('');
+  const [autoCheckPref, setAutoCheckPref] = useState<boolean>(autoCheckCloudUpdates);
+  const [checkIntervalPref, setCheckIntervalPref] = useState<number>(cloudCheckIntervalSec);
   const [savingDbCfg, setSavingDbCfg] = useState(false);
   const [testingTarget, setTestingTarget] = useState<'LOCAL' | 'CLOUD' | null>(null);
   const [syncingDb, setSyncingDb] = useState(false);
+  const [localGitBusy, setLocalGitBusy] = useState<'CHECK' | 'PUSH' | 'PULL' | null>(null);
+  const [localCheckOverride, setLocalCheckOverride] = useState<CloudSyncCheckResult | null>(null);
   const [dbFeedback, setDbFeedback] = useState<{ ok: boolean; text: string } | null>(null);
   const [localTestResult, setLocalTestResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [cloudTestResult, setCloudTestResult] = useState<{ ok: boolean; message: string } | null>(null);
@@ -58,6 +88,14 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
   useEffect(() => {
     setActiveSubTab(initialSubTab);
   }, [initialSubTab]);
+
+  useEffect(() => {
+    setAutoCheckPref(autoCheckCloudUpdates);
+  }, [autoCheckCloudUpdates]);
+
+  useEffect(() => {
+    setCheckIntervalPref(cloudCheckIntervalSec);
+  }, [cloudCheckIntervalSec]);
 
   const selectSubTab = (sub: 'rbac' | 'db_architecture') => {
     setActiveSubTab(sub);
@@ -76,6 +114,9 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
           setLocalDbUrl(dual.localDbUrlMasked || '');
           setCloudDbUrl(dual.cloudDbUrlMasked || '');
           setActiveTarget(dual.activeTarget || 'AUTO');
+          if (dual.deviceLabel) setDeviceLabel(dual.deviceLabel);
+          if (typeof dual.autoCheckCloudUpdates === 'boolean') setAutoCheckPref(dual.autoCheckCloudUpdates);
+          if (typeof dual.cloudCheckIntervalSec === 'number') setCheckIntervalPref(dual.cloudCheckIntervalSec);
         }
       }
     } catch {
@@ -96,11 +137,21 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
       const res = await fetch('/api/db/config', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ localDbUrl, cloudDbUrl, activeTarget }),
+        body: JSON.stringify({
+          localDbUrl,
+          cloudDbUrl,
+          activeTarget,
+          autoCheckCloudUpdates: autoCheckPref,
+          cloudCheckIntervalSec: checkIntervalPref,
+          deviceLabel: deviceLabel.trim() || undefined,
+        }),
       });
       const json = await res.json();
       if (!res.ok || !json.success) {
         throw new Error(json.error || 'خطا در ذخیره تنظیمات دو پایگاه داده');
+      }
+      if (onToggleAutoCloudCheck) {
+        await onToggleAutoCloudCheck(autoCheckPref, checkIntervalPref);
       }
       setDbFeedback({ ok: true, text: json.message || 'تنظیمات دو پایگاه داده با موفقیت ذخیره شد.' });
       await fetchDbStatus(false);
@@ -154,6 +205,62 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
       setSyncingDb(false);
     }
   };
+
+  const handleGitAction = async (mode: 'CHECK' | 'PUSH' | 'PULL') => {
+    setDbFeedback(null);
+    if (mode === 'CHECK' && onCheckCloudUpdates) {
+      await onCheckCloudUpdates(true);
+      await fetchDbStatus(false);
+      return;
+    }
+    if (mode === 'PUSH' && onCloudPush) {
+      await onCloudPush(deviceLabel.trim() || undefined);
+      await fetchDbStatus(false);
+      return;
+    }
+    if (mode === 'PULL' && onCloudPull) {
+      await onCloudPull();
+      await fetchDbStatus(false);
+      return;
+    }
+
+    setLocalGitBusy(mode);
+    try {
+      if (mode === 'CHECK') {
+        const res = await fetch('/api/db/sync/check?force=true');
+        const json = await res.json();
+        if (!res.ok || !json.success) throw new Error(json.error || 'خطا در بررسی نسخه آنلاین');
+        setLocalCheckOverride(json.data);
+        setDbFeedback({ ok: true, text: json.data?.messageFa || 'بررسی انجام شد.' });
+      } else if (mode === 'PUSH') {
+        const res = await fetch('/api/db/sync/push', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ deviceLabel: deviceLabel.trim() || undefined }),
+        });
+        const json = await res.json();
+        if (!res.ok || !json.success) throw new Error(json.error || 'خطا در آپلود به دیتابیس آنلاین');
+        if (json.checkResult) setLocalCheckOverride(json.checkResult);
+        setDbFeedback({ ok: true, text: json.message });
+        await fetchDbStatus(false);
+      } else if (mode === 'PULL') {
+        const res = await fetch('/api/db/sync/pull', { method: 'POST' });
+        const json = await res.json();
+        if (!res.ok || !json.success) throw new Error(json.error || 'خطا در به‌روزرسانی از دیتابیس آنلاین');
+        if (json.checkResult) setLocalCheckOverride(json.checkResult);
+        setDbFeedback({ ok: true, text: json.message });
+        await onRefreshData?.();
+        await fetchDbStatus(false);
+      }
+    } catch (err) {
+      setDbFeedback({ ok: false, text: err instanceof Error ? err.message : 'خطا در عملیات همگام‌سازی' });
+    } finally {
+      setLocalGitBusy(null);
+    }
+  };
+
+  const activeSyncCheck = localCheckOverride || cloudSyncCheck || null;
+  const activeGitBusy = cloudSyncBusy || localGitBusy;
 
   if (loadingDb && !dbStatus) {
     return <KpiCardsSkeleton count={6} columns={6} theme="light" />;
@@ -527,38 +634,230 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
               </div>
             </div>
 
-            {/* Active Target Switcher + Save & Sync Controls */}
-            <div className="p-3 bg-[#f7f7f7] border border-[#d9d9d9] rounded-sm flex flex-wrap items-center justify-between gap-3">
-              <div className="flex items-center gap-2 flex-wrap">
-                <span className="text-xs font-bold text-[#333333]">اولویت اتصال فعال:</span>
-                <select
-                  value={activeTarget}
-                  onChange={e => setActiveTarget(e.target.value as any)}
-                  className="px-2.5 py-1.5 text-xs font-semibold bg-white border border-[#bfbfbf] rounded-sm focus:outline-none focus:border-[#007cc0]"
-                >
-                  <option value="AUTO">خودکار (ابتدا محلی، سپس ابری، در صورت قطعی دیسک پایدار)</option>
-                  <option value="LOCAL">فقط پایگاه داده محلی (Local DB)</option>
-                  <option value="CLOUD">فقط پایگاه داده ابری (Cloud / Supabase DB)</option>
-                  <option value="HYBRID_DISK">فقط ذخیره‌سازی دیسک محلی سرور (Hybrid Durable Disk)</option>
-                </select>
+            {/* Opt-In Git-Style Auto-Check Preferences + Device Label + Active Target */}
+            <div className="p-3.5 bg-[#f7f9fb] border border-[#d9e2ec] rounded-sm space-y-3">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div>
+                  <label className="text-[11px] font-bold text-[#333333] flex items-center gap-1.5 mb-1">
+                    <Laptop className="w-3.5 h-3.5 text-[#007cc0]" />
+                    نام این سیستم / دستگاه (برای تشخیص در تاریخچه آنلاین)
+                  </label>
+                  <input
+                    type="text"
+                    value={deviceLabel}
+                    onChange={e => setDeviceLabel(e.target.value)}
+                    placeholder="مثلاً: لپتاپ مهندس حسینی یا کامپیوتر کارخانه"
+                    className="w-full px-3 py-1.5 text-xs bg-white border border-[#bfbfbf] rounded-sm focus:outline-none focus:border-[#007cc0]"
+                  />
+                </div>
+                <div>
+                  <label className="text-[11px] font-bold text-[#333333] block mb-1">
+                    اولویت اتصال فعال در این سیستم:
+                  </label>
+                  <select
+                    value={activeTarget}
+                    onChange={e => setActiveTarget(e.target.value as any)}
+                    className="w-full px-2.5 py-1.5 text-xs font-semibold bg-white border border-[#bfbfbf] rounded-sm focus:outline-none focus:border-[#007cc0]"
+                  >
+                    <option value="AUTO">خودکار (ابتدا محلی، سپس ابری، در صورت قطعی دیسک پایدار)</option>
+                    <option value="LOCAL">فقط پایگاه داده محلی (Local DB)</option>
+                    <option value="CLOUD">فقط پایگاه داده ابری (Cloud / Supabase DB)</option>
+                    <option value="HYBRID_DISK">فقط ذخیره‌سازی دیسک محلی سرور (Hybrid Durable Disk)</option>
+                  </select>
+                </div>
               </div>
 
-              <div className="flex items-center gap-2 flex-wrap">
+              {/* Opt-in Auto Check Checkbox */}
+              <div className="bg-white border border-[#d9d9d9] rounded-sm p-2.5 flex flex-wrap items-center justify-between gap-3">
+                <label className="flex items-start gap-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={autoCheckPref}
+                    onChange={async e => {
+                      const next = e.target.checked;
+                      setAutoCheckPref(next);
+                      if (onToggleAutoCloudCheck) {
+                        await onToggleAutoCloudCheck(next, checkIntervalPref);
+                      }
+                    }}
+                    className="w-4 h-4 mt-0.5 accent-[#007cc0] cursor-pointer"
+                  />
+                  <div>
+                    <div className="text-xs font-bold text-[#333333]">
+                      بررسی خودکار به‌روزرسانی دیتابیس آنلاین حین اجرا (مثل Git)
+                    </div>
+                    <div className="text-[11px] text-[#666666]">
+                      فقط یک ردیف سبک (کمتر از ۱ کیلوبایت) را بررسی می‌کند و اگر سیستم دیگری (مثلاً لپتاپ) نسخه جدیدتری آپلود کرده باشد هشدار می‌دهد. وقتی تیک خورده نباشد، هیچ درخواست آنلاینی در پس‌زمینه ارسال نمی‌شود.
+                    </div>
+                  </div>
+                </label>
+                <div className="flex items-center gap-2 shrink-0">
+                  <span className="text-[11px] text-[#666666]">بازه بررسی:</span>
+                  <select
+                    value={checkIntervalPref}
+                    disabled={!autoCheckPref}
+                    onChange={async e => {
+                      const nextInt = Number(e.target.value);
+                      setCheckIntervalPref(nextInt);
+                      if (autoCheckPref && onToggleAutoCloudCheck) {
+                        await onToggleAutoCloudCheck(true, nextInt);
+                      }
+                    }}
+                    className="px-2 py-1 text-xs bg-white border border-[#bfbfbf] rounded-sm disabled:opacity-50"
+                  >
+                    <option value={60}>هر ۱ دقیقه</option>
+                    <option value={120}>هر ۲ دقیقه (پیشنهادی)</option>
+                    <option value={300}>هر ۵ دقیقه</option>
+                    <option value={600}>هر ۱۰ دقیقه</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={handleSaveDualDbConfig}
+                    disabled={savingDbCfg}
+                    className="sap-btn-emphasized text-xs px-4 py-1.5 cursor-pointer disabled:opacity-50"
+                  >
+                    {savingDbCfg ? 'در حال ذخیره...' : 'ذخیره لینک‌ها و تنظیمات اتصال'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleSyncToActiveDb}
+                    disabled={syncingDb}
+                    className="sap-btn-standard text-xs px-3.5 py-1.5 cursor-pointer disabled:opacity-50"
+                  >
+                    {syncingDb ? 'در حال همگام‌سازی...' : 'ذخیره داده‌ها در پایگاه داده فعال'}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Git-Style Push & Pull Synchronization Workflow Box */}
+            <div className="p-4 bg-[#f4f8fc] border border-[#b3ddf2] rounded-sm space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <GitBranch className="w-4 h-4 text-[#007cc0]" />
+                  <div>
+                    <h4 className="text-xs font-bold text-[#333333]">
+                      همگام‌سازی بین لپتاپ و کامپیوتر کارخانه از طریق دیتابیس آنلاین (Push / Pull مثل Git)
+                    </h4>
+                    <p className="text-[11px] text-[#666666]">
+                      روی لپتاپ کار کنید و «Push» بزنید؛ وقتی پشت کامپیوتر کارخانه آمدید، برنامه آپدیت را تشخیص می‌دهد و با «Pull» دیتابیس محلی را دقیقاً منطبق با نسخه آنلاین به‌روزرسانی می‌کند.
+                    </p>
+                  </div>
+                </div>
+                {activeSyncCheck && (
+                  <span
+                    className={`text-[11px] font-bold px-2.5 py-0.5 rounded-sm border ${
+                      activeSyncCheck.state === 'IN_SYNC'
+                        ? 'bg-[#ebf7ef] text-[#107e3e] border-[#a9dfbf]'
+                        : activeSyncCheck.state === 'REMOTE_AHEAD'
+                        ? 'bg-[#fff4e5] text-[#b45309] border-[#f5cba7]'
+                        : activeSyncCheck.state === 'LOCAL_AHEAD'
+                        ? 'bg-[#e5f3fa] text-[#007cc0] border-[#b3ddf2]'
+                        : activeSyncCheck.state === 'DIVERGED'
+                        ? 'bg-[#ffecec] text-[#bb0000] border-[#f5b7b1]'
+                        : 'bg-white text-[#666666] border-[#d9d9d9]'
+                    }`}
+                  >
+                    {activeSyncCheck.state === 'IN_SYNC'
+                      ? 'کاملاً همگام (In Sync)'
+                      : activeSyncCheck.state === 'REMOTE_AHEAD'
+                      ? 'نسخه جدیدتر در آنلاین موجود است (Pull لازم است)'
+                      : activeSyncCheck.state === 'LOCAL_AHEAD'
+                      ? 'تغییرات محلی آپلودنشده (Push لازم است)'
+                      : activeSyncCheck.state === 'DIVERGED'
+                      ? 'تغییرات در هر دو سمت (تضاد نسخه)'
+                      : activeSyncCheck.state === 'CLOUD_EMPTY'
+                      ? 'دیتابیس آنلاین خالی است'
+                      : activeSyncCheck.state === 'CLOUD_UNREACHABLE'
+                      ? 'دیتابیس آنلاین در دسترس نیست'
+                      : 'لینک آنلاین تنظیم نشده'}
+                  </span>
+                )}
+              </div>
+
+              {activeSyncCheck && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                  <div className="bg-white border border-[#d9d9d9] rounded-sm p-3 space-y-1">
+                    <div className="font-bold text-[#333333] flex items-center justify-between">
+                      <span>وضعیت فعلی این سیستم ({activeSyncCheck.deviceLabel})</span>
+                      <span className="font-mono text-[11px] text-[#666666]">
+                        Rev #{toPersianDigits(activeSyncCheck.localRevision)}
+                      </span>
+                    </div>
+                    {activeSyncCheck.localCounts && (
+                      <div className="text-[11px] text-[#555555]">
+                        {toPersianDigits(activeSyncCheck.localCounts.parts)} قطعه ·{' '}
+                        {toPersianDigits(activeSyncCheck.localCounts.manufacturingOrders)} دستور تولید ·{' '}
+                        {toPersianDigits(activeSyncCheck.localCounts.inventoryDocs)} سند انبار
+                      </div>
+                    )}
+                    <div className="text-[10px] font-mono text-[#888888]" dir="ltr">
+                      hash: {activeSyncCheck.localHash}
+                    </div>
+                  </div>
+
+                  <div className="bg-white border border-[#d9d9d9] rounded-sm p-3 space-y-1">
+                    <div className="font-bold text-[#007cc0] flex items-center justify-between">
+                      <span>آخرین نسخه روی دیتابیس آنلاین (Cloud DB)</span>
+                      {activeSyncCheck.cloudManifest && (
+                        <span className="font-mono text-[11px]">
+                          Rev #{toPersianDigits(activeSyncCheck.cloudManifest.revision)}
+                        </span>
+                      )}
+                    </div>
+                    {activeSyncCheck.cloudManifest ? (
+                      <>
+                        <div className="text-[11px] text-[#555555]">
+                          آپلودشده از «{activeSyncCheck.cloudManifest.deviceLabel}» در{' '}
+                          {new Date(activeSyncCheck.cloudManifest.updatedAt).toLocaleString('fa-IR')}
+                        </div>
+                        <div className="text-[11px] text-[#555555]">
+                          {toPersianDigits(activeSyncCheck.cloudManifest.counts.parts)} قطعه ·{' '}
+                          {toPersianDigits(activeSyncCheck.cloudManifest.counts.manufacturingOrders)} دستور تولید ·{' '}
+                          {toPersianDigits(activeSyncCheck.cloudManifest.counts.inventoryDocs)} سند انبار
+                        </div>
+                      </>
+                    ) : (
+                      <div className="text-[11px] text-[#666666]">{activeSyncCheck.messageFa}</div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              <div className="flex flex-wrap items-center gap-2.5">
                 <button
                   type="button"
-                  onClick={handleSaveDualDbConfig}
-                  disabled={savingDbCfg}
-                  className="sap-btn-emphasized text-xs px-4 py-1.5 cursor-pointer disabled:opacity-50"
+                  onClick={() => handleGitAction('CHECK')}
+                  disabled={Boolean(activeGitBusy)}
+                  className="sap-btn-standard text-xs px-3 py-1.5 flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
                 >
-                  {savingDbCfg ? 'در حال ذخیره...' : 'ذخیره لینک‌ها و اعمال اتصال'}
+                  <RefreshCw className={`w-3.5 h-3.5 ${activeGitBusy === 'CHECK' ? 'animate-spin' : ''}`} />
+                  <span>{activeGitBusy === 'CHECK' ? 'در حال بررسی...' : '۱. بررسی نسخه آنلاین (Fetch Check)'}</span>
                 </button>
+
                 <button
                   type="button"
-                  onClick={handleSyncToActiveDb}
-                  disabled={syncingDb}
-                  className="sap-btn-standard text-xs px-3.5 py-1.5 cursor-pointer disabled:opacity-50"
+                  onClick={() => handleGitAction('PUSH')}
+                  disabled={Boolean(activeGitBusy)}
+                  className="sap-btn-standard text-xs px-3.5 py-1.5 flex items-center gap-1.5 cursor-pointer text-[#007cc0] border-[#007cc0] bg-white hover:bg-[#e5f3fa] disabled:opacity-50"
                 >
-                  {syncingDb ? 'در حال همگام‌سازی...' : 'همگام‌سازی داده‌ها با پایگاه داده فعال'}
+                  <CloudUpload className="w-4 h-4" />
+                  <span>{activeGitBusy === 'PUSH' ? 'در حال آپلود به آنلاین...' : '۲. آپلود کامل از این سیستم به آنلاین (Push ↑)'}</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleGitAction('PULL')}
+                  disabled={Boolean(activeGitBusy)}
+                  className="sap-btn-emphasized text-xs px-4 py-1.5 flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                >
+                  <CloudDownload className="w-4 h-4" />
+                  <span>{activeGitBusy === 'PULL' ? 'در حال به‌روزرسانی سیستم...' : '۳. به‌روزرسانی دیتابیس محلی از آنلاین (Pull ↓)'}</span>
                 </button>
               </div>
             </div>

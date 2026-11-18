@@ -40,6 +40,7 @@ import { toPersianDigits } from '../utils/formatters';
 import { TabKey } from './Sidebar';
 import { InventorySubTab } from './inventory/InventoryModuleView';
 import { PWAInstallButton } from './pwa/PWAInstallButton';
+import { CloudSyncCheckResult } from '../types/dbSync';
 
 interface NavbarProps {
   activeTab: TabKey;
@@ -64,6 +65,13 @@ interface NavbarProps {
   onOpenErpModal: () => void;
   onOpenHelpModal?: () => void;
   loading: boolean;
+  cloudSyncCheck?: CloudSyncCheckResult | null;
+  autoCheckCloudUpdates?: boolean;
+  cloudSyncBusy?: 'CHECK' | 'PUSH' | 'PULL' | null;
+  onToggleAutoCloudCheck?: (enabled: boolean) => Promise<void>;
+  onCheckCloudUpdates?: (force?: boolean) => Promise<void>;
+  onCloudPull?: () => Promise<void>;
+  onCloudPush?: () => Promise<void>;
 }
 
 interface SearchableModuleItem {
@@ -107,6 +115,13 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenErpModal,
   onOpenHelpModal,
   loading,
+  cloudSyncCheck,
+  autoCheckCloudUpdates = false,
+  cloudSyncBusy = null,
+  onToggleAutoCloudCheck,
+  onCheckCloudUpdates,
+  onCloudPull,
+  onCloudPush,
 }) => {
   const [showConfirmClean, setShowConfirmClean] = useState(false);
   const [dbStatus, setDbStatus] = useState<{ isConnected: boolean; isConfigured: boolean } | null>(null);
@@ -394,18 +409,20 @@ export const Navbar: React.FC<NavbarProps> = ({
             type="button"
             onClick={() => setShowNotifications(!showNotifications)}
             className="p-1.5 rounded bg-[#f5f5f5] hover:bg-[#e5f3fa] hover:text-[#007cc0] text-[#555555] border border-[#d9d9d9] transition-colors cursor-pointer relative"
-            title="اعلان‌های کارخانه"
+            title="اعلان‌های کارخانه و همگام‌سازی آنلاین"
           >
             <Bell className="w-4 h-4" />
-            {reorderAlertsCount > 0 && (
+            {(reorderAlertsCount > 0 ||
+              cloudSyncCheck?.state === 'REMOTE_AHEAD' ||
+              cloudSyncCheck?.state === 'DIVERGED') && (
               <span className="w-2 h-2 rounded-full bg-[#e9730c] border border-white absolute top-1 right-1" />
             )}
           </button>
 
           {showNotifications && (
-            <div className="absolute left-0 top-full mt-2 w-80 bg-white text-[#333333] border border-[#d9d9d9] rounded-md shadow-xl p-3 z-50 text-xs space-y-2">
+            <div className="absolute left-0 top-full mt-2 w-[340px] bg-white text-[#333333] border border-[#d9d9d9] rounded-md shadow-xl p-3 z-50 text-xs space-y-2.5">
               <div className="flex items-center justify-between border-b border-[#e8e8e8] pb-2">
-                <span className="font-semibold text-[#333333]">مرکز اعلان‌های SAP HANA</span>
+                <span className="font-semibold text-[#333333]">مرکز اعلان‌ها و همگام‌سازی SAP HANA</span>
                 <button
                   type="button"
                   onClick={() => setShowNotifications(false)}
@@ -414,7 +431,91 @@ export const Navbar: React.FC<NavbarProps> = ({
                   ✕
                 </button>
               </div>
-              <div className="space-y-1.5">
+              <div className="space-y-2">
+                {/* Git-style Cloud Update Checker Card inside Notifications */}
+                <div
+                  className={`p-2.5 rounded border space-y-2 ${
+                    cloudSyncCheck?.state === 'REMOTE_AHEAD' || cloudSyncCheck?.state === 'DIVERGED'
+                      ? 'bg-[#fff4e5] border-[#f5cba7]'
+                      : 'bg-[#f7f9fb] border-[#d9e2ec]'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-bold text-[#333333] flex items-center gap-1">
+                      <Database className="w-3.5 h-3.5 text-[#007cc0]" />
+                      همگام‌سازی آنلاین (Git-Style)
+                    </span>
+                    <span className="text-[10px] font-bold text-[#007cc0]">
+                      {cloudSyncCheck?.state === 'REMOTE_AHEAD'
+                        ? 'آپدیت جدید موجود'
+                        : cloudSyncCheck?.state === 'LOCAL_AHEAD'
+                        ? 'نیازمند Push'
+                        : cloudSyncCheck?.state === 'DIVERGED'
+                        ? 'تغییر همزمان'
+                        : cloudSyncCheck?.state === 'IN_SYNC'
+                        ? 'همگام'
+                        : 'آماده بررسی'}
+                    </span>
+                  </div>
+
+                  {cloudSyncCheck?.messageFa && (
+                    <div className="text-[11px] text-[#555555] leading-relaxed">
+                      {cloudSyncCheck.messageFa}
+                    </div>
+                  )}
+
+                  {onToggleAutoCloudCheck && (
+                    <label className="flex items-center gap-1.5 text-[11px] font-medium text-[#333333] cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={autoCheckCloudUpdates}
+                        onChange={e => onToggleAutoCloudCheck(e.target.checked)}
+                        className="w-3.5 h-3.5 accent-[#007cc0] cursor-pointer"
+                      />
+                      <span>بررسی خودکار آپدیت آنلاین حین اجرا</span>
+                    </label>
+                  )}
+
+                  <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                    {onCheckCloudUpdates && (
+                      <button
+                        type="button"
+                        onClick={() => onCheckCloudUpdates(true)}
+                        disabled={Boolean(cloudSyncBusy)}
+                        className="px-2 py-1 rounded bg-white border border-[#cccccc] hover:bg-[#f0f0f0] text-[10px] font-semibold cursor-pointer disabled:opacity-50"
+                      >
+                        {cloudSyncBusy === 'CHECK' ? 'در حال چک...' : 'چک آنلاین'}
+                      </button>
+                    )}
+                    {onCloudPull && (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          await onCloudPull();
+                          setShowNotifications(false);
+                        }}
+                        disabled={Boolean(cloudSyncBusy)}
+                        className="px-2 py-1 rounded bg-[#007cc0] hover:bg-[#0066a1] text-white text-[10px] font-semibold cursor-pointer disabled:opacity-50"
+                      >
+                        {cloudSyncBusy === 'PULL' ? 'در حال Pull...' : 'آپدیت از آنلاین (Pull)'}
+                      </button>
+                    )}
+                    {onCloudPush && (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          await onCloudPush();
+                          setShowNotifications(false);
+                        }}
+                        disabled={Boolean(cloudSyncBusy)}
+                        className="px-2 py-1 rounded bg-white border border-[#007cc0] text-[#007cc0] hover:bg-[#e5f3fa] text-[10px] font-semibold cursor-pointer disabled:opacity-50"
+                      >
+                        {cloudSyncBusy === 'PUSH' ? 'در حال Push...' : 'آپلود (Push)'}
+                      </button>
+                    )}
+                  </div>
+                </div>
+
                 {reorderAlertsCount > 0 && (
                   <button
                     type="button"
@@ -520,10 +621,24 @@ export const Navbar: React.FC<NavbarProps> = ({
                   >
                     <div className="flex items-center gap-2">
                       <Database className="w-3.5 h-3.5 text-[#007cc0]" />
-                      <span>وضعیت پایگاه داده</span>
+                      <span>وضعیت پایگاه داده و همگام‌سازی</span>
                     </div>
-                    <span className={`text-[10px] font-bold ${dbStatus?.isConnected ? 'text-[#107e3e]' : 'text-[#e9730c]'}`}>
-                      {dbStatus === null ? '...' : dbStatus.isConnected ? 'PostgreSQL متصل' : 'دیسک پایدار'}
+                    <span
+                      className={`text-[10px] font-bold ${
+                        cloudSyncCheck?.state === 'REMOTE_AHEAD' || cloudSyncCheck?.state === 'DIVERGED'
+                          ? 'text-[#b45309]'
+                          : dbStatus?.isConnected
+                          ? 'text-[#107e3e]'
+                          : 'text-[#e9730c]'
+                      }`}
+                    >
+                      {cloudSyncCheck?.state === 'REMOTE_AHEAD'
+                        ? 'آپدیت آنلاین موجود'
+                        : dbStatus === null
+                        ? '...'
+                        : dbStatus.isConnected
+                        ? 'PostgreSQL متصل'
+                        : 'دیسک پایدار'}
                     </span>
                   </button>
 

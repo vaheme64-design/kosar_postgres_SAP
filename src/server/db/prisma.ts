@@ -2,6 +2,7 @@ import net from 'node:net';
 import tls from 'node:tls';
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { PrismaClient } from '@prisma/client';
 
@@ -39,6 +40,19 @@ declare global {
   var __kpimsSchemaReadyUrl: string | undefined;
   // eslint-disable-next-line no-var
   var __kpimsSchemaEnsurePromise: Promise<{ ready: boolean; autoPushed: boolean; snapshotOnly: boolean; error?: string }> | undefined;
+  // eslint-disable-next-line no-var
+  var __kpimsCloudManifestCache:
+    | {
+        cloudUrl: string;
+        checkedAtMs: number;
+        checkedAtIso: string;
+        reachable: boolean;
+        latencyMs?: number;
+        manifest: CloudSyncManifest | null;
+        hasLegacySnapshot: boolean;
+        error?: string;
+      }
+    | undefined;
 }
 
 const DEFAULT_FALLBACK_PG_URL = 'postgresql://postgres:postgres@localhost:5432/kpims_db?schema=public';
@@ -442,10 +456,74 @@ const DUAL_DB_CONFIG_PATH = path.resolve(process.cwd(), 'data', 'kpims-db-connec
 
 export type DbTargetMode = 'AUTO' | 'LOCAL' | 'CLOUD' | 'HYBRID_DISK';
 
+export const CLOUD_SYNC_MANIFEST_ID = 'KPIMS-SYNC-MANIFEST-V1';
+
+export interface SyncEntityCounts {
+  parts: number;
+  contracts: number;
+  coils: number;
+  orders: number;
+  manufacturingOrders: number;
+  inventoryDocs: number;
+  transactions: number;
+  boms: number;
+  routings: number;
+}
+
+export interface CloudSyncManifest {
+  schemaVersion: 1;
+  revision: number;
+  contentHash: string;
+  updatedAt: string;
+  deviceLabel: string;
+  counts: SyncEntityCounts;
+}
+
+export type GitSyncStatusCode =
+  | 'IN_SYNC'
+  | 'REMOTE_AHEAD'
+  | 'LOCAL_AHEAD'
+  | 'DIVERGED'
+  | 'CLOUD_NOT_CONFIGURED'
+  | 'CLOUD_UNREACHABLE'
+  | 'CLOUD_EMPTY';
+
+export interface CloudSyncCheckResult {
+  state: GitSyncStatusCode;
+  checkedAt: string;
+  cached: boolean;
+  autoCheckEnabled: boolean;
+  checkIntervalSec: number;
+  deviceLabel: string;
+  cloudConfigured: boolean;
+  cloudReachable: boolean;
+  latencyMs?: number;
+  localHash: string;
+  localRevision: number;
+  localUpdatedAt?: string;
+  localCounts?: SyncEntityCounts;
+  lastSyncedCloudHash?: string;
+  lastSyncedCloudRevision?: number;
+  lastSyncedCloudAt?: string;
+  cloudManifest?: CloudSyncManifest | null;
+  messageFa: string;
+  error?: string;
+}
+
 export interface DualDbStoredConfig {
   localDbUrl: string;
   cloudDbUrl: string;
   activeTarget: DbTargetMode;
+  autoCheckCloudUpdates?: boolean;
+  cloudCheckIntervalSec?: number;
+  deviceLabel?: string;
+  lastSyncedCloudHash?: string;
+  lastSyncedLocalHash?: string;
+  lastSyncedCloudRevision?: number;
+  lastSyncedCloudAt?: string;
+  lastLocalHash?: string;
+  lastLocalRevision?: number;
+  lastLocalUpdatedAt?: string;
   lastSyncAt?: string;
   lastSyncSummary?: string;
   updatedAt?: string;
@@ -467,6 +545,14 @@ export interface DualDbPublicStatus {
   hasCloudDbUrl: boolean;
   activeTarget: DbTargetMode;
   resolvedTarget: 'LOCAL' | 'CLOUD' | 'HYBRID_DISK';
+  autoCheckCloudUpdates: boolean;
+  cloudCheckIntervalSec: number;
+  deviceLabel: string;
+  lastSyncedCloudHash?: string;
+  lastSyncedCloudRevision?: number;
+  lastSyncedCloudAt?: string;
+  lastLocalHash?: string;
+  lastLocalRevision?: number;
   lastSyncAt?: string;
   lastSyncSummary?: string;
   updatedAt?: string;
@@ -563,11 +649,21 @@ const enrichPoolerParameters = (rawUrl: string): string => {
   return rawUrl;
 };
 
+export const getDefaultDeviceLabel = (): string => {
+  try {
+    const host = os.hostname();
+    return host ? host.slice(0, 48) : 'Factory-PC';
+  } catch {
+    return 'Factory-PC';
+  }
+};
+
 export const readDualDbStoredConfig = (): DualDbStoredConfig => {
   const envUrl = readDatabaseUrlFromDotEnv() || normalizePgUrl(process.env.DATABASE_URL);
   const envIsValid = isValidPostgresUrlSyntax(envUrl);
   const defaultLocal = envIsValid && isLocalhostUrl(envUrl) ? envUrl : '';
   const defaultCloud = envIsValid && !isLocalhostUrl(envUrl) ? envUrl : '';
+  const fallbackDevice = getDefaultDeviceLabel();
 
   try {
     if (fs.existsSync(DUAL_DB_CONFIG_PATH)) {
@@ -579,10 +675,21 @@ export const readDualDbStoredConfig = (): DualDbStoredConfig => {
         parsed?.activeTarget === 'AUTO'
           ? parsed.activeTarget
           : 'AUTO';
+      const interval = Number(parsed?.cloudCheckIntervalSec);
       return {
         localDbUrl: normalizePgUrl(parsed?.localDbUrl) || defaultLocal,
         cloudDbUrl: normalizePgUrl(parsed?.cloudDbUrl) || defaultCloud,
         activeTarget,
+        autoCheckCloudUpdates: Boolean(parsed?.autoCheckCloudUpdates ?? false),
+        cloudCheckIntervalSec: Number.isFinite(interval) && interval >= 30 && interval <= 3600 ? Math.round(interval) : 120,
+        deviceLabel: typeof parsed?.deviceLabel === 'string' && parsed.deviceLabel.trim() ? parsed.deviceLabel.trim() : fallbackDevice,
+        lastSyncedCloudHash: typeof parsed?.lastSyncedCloudHash === 'string' ? parsed.lastSyncedCloudHash : undefined,
+        lastSyncedLocalHash: typeof parsed?.lastSyncedLocalHash === 'string' ? parsed.lastSyncedLocalHash : undefined,
+        lastSyncedCloudRevision: typeof parsed?.lastSyncedCloudRevision === 'number' ? parsed.lastSyncedCloudRevision : undefined,
+        lastSyncedCloudAt: typeof parsed?.lastSyncedCloudAt === 'string' ? parsed.lastSyncedCloudAt : undefined,
+        lastLocalHash: typeof parsed?.lastLocalHash === 'string' ? parsed.lastLocalHash : undefined,
+        lastLocalRevision: typeof parsed?.lastLocalRevision === 'number' ? parsed.lastLocalRevision : undefined,
+        lastLocalUpdatedAt: typeof parsed?.lastLocalUpdatedAt === 'string' ? parsed.lastLocalUpdatedAt : undefined,
         lastSyncAt: typeof parsed?.lastSyncAt === 'string' ? parsed.lastSyncAt : undefined,
         lastSyncSummary: typeof parsed?.lastSyncSummary === 'string' ? parsed.lastSyncSummary : undefined,
         updatedAt: typeof parsed?.updatedAt === 'string' ? parsed.updatedAt : undefined,
@@ -596,6 +703,9 @@ export const readDualDbStoredConfig = (): DualDbStoredConfig => {
     localDbUrl: defaultLocal,
     cloudDbUrl: defaultCloud,
     activeTarget: 'AUTO',
+    autoCheckCloudUpdates: false,
+    cloudCheckIntervalSec: 120,
+    deviceLabel: fallbackDevice,
   };
 };
 
@@ -609,12 +719,50 @@ const writeDualDbStoredConfig = (cfg: DualDbStoredConfig): void => {
   }
 };
 
+export const clearCloudManifestCache = (): void => {
+  global.__kpimsCloudManifestCache = undefined;
+};
+
+export const recordLocalStateFingerprint = (hash: string): number => {
+  const cfg = readDualDbStoredConfig();
+  if (cfg.lastLocalHash === hash && typeof cfg.lastLocalRevision === 'number') {
+    return cfg.lastLocalRevision;
+  }
+  const nextRevision = (cfg.lastLocalRevision || 0) + 1;
+  cfg.lastLocalHash = hash;
+  cfg.lastLocalRevision = nextRevision;
+  cfg.lastLocalUpdatedAt = new Date().toISOString();
+  writeDualDbStoredConfig(cfg);
+  return nextRevision;
+};
+
+export const recordCloudSyncCompleted = (
+  manifest: CloudSyncManifest,
+  localHash: string,
+  summary: string
+): void => {
+  const cfg = readDualDbStoredConfig();
+  const nowIso = new Date().toISOString();
+  cfg.lastSyncedCloudHash = manifest.contentHash;
+  cfg.lastSyncedLocalHash = localHash;
+  cfg.lastSyncedCloudRevision = manifest.revision;
+  cfg.lastSyncedCloudAt = manifest.updatedAt || nowIso;
+  cfg.lastLocalHash = localHash;
+  cfg.lastLocalRevision = Math.max(cfg.lastLocalRevision || 0, manifest.revision);
+  cfg.lastLocalUpdatedAt = nowIso;
+  cfg.lastSyncAt = nowIso;
+  cfg.lastSyncSummary = summary;
+  writeDualDbStoredConfig(cfg);
+  clearCloudManifestCache();
+};
+
 export const resetPrismaConnectionPool = (): void => {
   global.__kpimsDbReachable = undefined;
   global.__kpimsLastDbError = undefined;
   global.__kpimsLastProbeFailedAt = undefined;
   global.__kpimsSchemaReadyUrl = undefined;
   global.__kpimsSchemaEnsurePromise = undefined;
+  global.__kpimsCloudManifestCache = undefined;
   const existing = global.__prismaClient;
   global.__prismaClient = undefined;
   if (existing) {
@@ -904,6 +1052,9 @@ export async function saveDualDbConfig(input: {
   localDbUrl?: string;
   cloudDbUrl?: string;
   activeTarget?: DbTargetMode;
+  autoCheckCloudUpdates?: boolean;
+  cloudCheckIntervalSec?: number;
+  deviceLabel?: string;
 }): Promise<DualDbPublicStatus> {
   const existing = readDualDbStoredConfig();
   const resolveUrlUpdate = (incoming: string | undefined, prev: string): string => {
@@ -917,21 +1068,42 @@ export async function saveDualDbConfig(input: {
     return trimmed;
   };
 
+  const intervalVal =
+    typeof input.cloudCheckIntervalSec === 'number' && Number.isFinite(input.cloudCheckIntervalSec)
+      ? Math.max(30, Math.min(3600, Math.round(input.cloudCheckIntervalSec)))
+      : existing.cloudCheckIntervalSec ?? 120;
+
   const nextConfig: DualDbStoredConfig = {
+    ...existing,
     localDbUrl: resolveUrlUpdate(input.localDbUrl, existing.localDbUrl),
     cloudDbUrl: resolveUrlUpdate(input.cloudDbUrl, existing.cloudDbUrl),
     activeTarget:
       input.activeTarget && ['AUTO', 'LOCAL', 'CLOUD', 'HYBRID_DISK'].includes(input.activeTarget)
         ? input.activeTarget
         : existing.activeTarget,
-    lastSyncAt: existing.lastSyncAt,
-    lastSyncSummary: existing.lastSyncSummary,
+    autoCheckCloudUpdates:
+      typeof input.autoCheckCloudUpdates === 'boolean'
+        ? input.autoCheckCloudUpdates
+        : Boolean(existing.autoCheckCloudUpdates),
+    cloudCheckIntervalSec: intervalVal,
+    deviceLabel:
+      typeof input.deviceLabel === 'string' && input.deviceLabel.trim()
+        ? input.deviceLabel.trim().slice(0, 48)
+        : existing.deviceLabel || getDefaultDeviceLabel(),
     updatedAt: new Date().toISOString(),
   };
 
+  const connectionChanged =
+    nextConfig.localDbUrl !== existing.localDbUrl ||
+    nextConfig.cloudDbUrl !== existing.cloudDbUrl ||
+    nextConfig.activeTarget !== existing.activeTarget;
+
   writeDualDbStoredConfig(nextConfig);
-  resetPrismaConnectionPool();
-  await probeDatabaseConnectivity(4000, true);
+  clearCloudManifestCache();
+  if (connectionChanged) {
+    resetPrismaConnectionPool();
+    await probeDatabaseConnectivity(4000, true);
+  }
   return getDualDbPublicStatus(false);
 }
 
@@ -1006,6 +1178,14 @@ export async function getDualDbPublicStatus(probeLinks = false): Promise<DualDbP
     hasCloudDbUrl: Boolean(cfg.cloudDbUrl),
     activeTarget: cfg.activeTarget,
     resolvedTarget,
+    autoCheckCloudUpdates: Boolean(cfg.autoCheckCloudUpdates),
+    cloudCheckIntervalSec: cfg.cloudCheckIntervalSec || 120,
+    deviceLabel: cfg.deviceLabel || getDefaultDeviceLabel(),
+    lastSyncedCloudHash: cfg.lastSyncedCloudHash,
+    lastSyncedCloudRevision: cfg.lastSyncedCloudRevision,
+    lastSyncedCloudAt: cfg.lastSyncedCloudAt,
+    lastLocalHash: cfg.lastLocalHash,
+    lastLocalRevision: cfg.lastLocalRevision,
     lastSyncAt: cfg.lastSyncAt,
     lastSyncSummary: cfg.lastSyncSummary,
     updatedAt: cfg.updatedAt,
@@ -1336,6 +1516,203 @@ export async function ensurePostgresSchemaReady(
 
   global.__kpimsSchemaEnsurePromise = run();
   return global.__kpimsSchemaEnsurePromise;
+}
+
+/**
+ * Execute operations against an arbitrary PostgreSQL URL (e.g., Cloud DB while actively working on Local DB)
+ * with fast Wire-Protocol preflight so unreachable remote databases fail cleanly in <2.5s without hanging.
+ */
+export async function withScopedPgClient<T>(
+  rawUrl: string,
+  timeoutMs: number,
+  fn: (client: PrismaClient, enrichedUrl: string) => Promise<T>,
+): Promise<T> {
+  const normalized = normalizePgUrl(rawUrl);
+  if (!isValidPostgresUrlSyntax(normalized)) {
+    throw new Error('آدرس اتصال PostgreSQL معتبر نیست.');
+  }
+  const enriched = enrichPoolerParameters(normalized);
+  const wireOk = await probePostgresWireProtocol(enriched, Math.min(timeoutMs, 3500));
+  if (!wireOk) {
+    throw new Error('سرور PostgreSQL مقصد در این لحظه در دسترس نیست (Wire-Protocol Unreachable).');
+  }
+
+  const client = new PrismaClient({
+    datasources: { db: { url: enriched } },
+    log: [],
+  });
+  try {
+    return await Promise.race([
+      fn(client, enriched),
+      new Promise<T>((_, reject) =>
+        setTimeout(() => reject(new Error('مهلت زمانی عملیات پایگاه داده به پایان رسید.')), timeoutMs)
+      ),
+    ]);
+  } finally {
+    await client.$disconnect().catch(() => {});
+  }
+}
+
+export async function ensureTargetSnapshotTables(client: PrismaClient): Promise<void> {
+  await client.$executeRawUnsafe(
+    `CREATE TABLE IF NOT EXISTS "inventory_app_state_snapshots" ("id" TEXT NOT NULL PRIMARY KEY, "payload" JSONB NOT NULL, "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
+  );
+  await client.$executeRawUnsafe(
+    `CREATE TABLE IF NOT EXISTS "wip_state_snapshots" ("id" TEXT NOT NULL PRIMARY KEY, "payload" JSONB NOT NULL, "version" INTEGER NOT NULL DEFAULT 1, "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
+  );
+}
+
+export async function ensureTargetFullSchemaBestEffort(client: PrismaClient, targetUrl: string): Promise<boolean> {
+  await ensureTargetSnapshotTables(client);
+  try {
+    const rows = (await client.$queryRawUnsafe(
+      `SELECT to_regclass('public.units_of_measure')::text AS uom, to_regclass('public.parts')::text AS parts`,
+    )) as Array<{ uom: string | null; parts: string | null }>;
+    if (rows?.[0]?.uom && rows?.[0]?.parts) {
+      return true;
+    }
+    const pushed = await runPrismaDbPush(targetUrl);
+    if (pushed.ok) {
+      return true;
+    }
+  } catch {
+    // Fallback to snapshots only
+  }
+  return false;
+}
+
+const MANIFEST_CACHE_TTL_MS = 25_000;
+
+export async function fetchCloudSyncManifestLightweight(
+  force = false,
+  timeoutMs = 3000,
+): Promise<{
+  cloudConfigured: boolean;
+  cloudReachable: boolean;
+  cached: boolean;
+  checkedAt: string;
+  latencyMs?: number;
+  manifest: CloudSyncManifest | null;
+  hasLegacySnapshot: boolean;
+  legacyUpdatedAt?: string;
+  error?: string;
+}> {
+  const cfg = readDualDbStoredConfig();
+  const cloudConfigured = isValidPostgresUrlSyntax(cfg.cloudDbUrl);
+  if (!cloudConfigured) {
+    return {
+      cloudConfigured: false,
+      cloudReachable: false,
+      cached: false,
+      checkedAt: new Date().toISOString(),
+      manifest: null,
+      hasLegacySnapshot: false,
+    };
+  }
+
+  const nowMs = Date.now();
+  const cachedEntry = global.__kpimsCloudManifestCache;
+  if (
+    !force &&
+    cachedEntry &&
+    cachedEntry.cloudUrl === cfg.cloudDbUrl &&
+    nowMs - cachedEntry.checkedAtMs < MANIFEST_CACHE_TTL_MS
+  ) {
+    return {
+      cloudConfigured: true,
+      cloudReachable: cachedEntry.reachable,
+      cached: true,
+      checkedAt: cachedEntry.checkedAtIso,
+      latencyMs: cachedEntry.latencyMs,
+      manifest: cachedEntry.manifest,
+      hasLegacySnapshot: cachedEntry.hasLegacySnapshot,
+      error: cachedEntry.error,
+    };
+  }
+
+  const started = Date.now();
+  const checkedAtIso = new Date().toISOString();
+  try {
+    const result = await withScopedPgClient(cfg.cloudDbUrl, timeoutMs, async client => {
+      const regRows = (await client.$queryRawUnsafe(
+        `SELECT to_regclass('public.inventory_app_state_snapshots')::text AS snap`,
+      )) as Array<{ snap: string | null }>;
+      if (!regRows?.[0]?.snap) {
+        return { manifest: null as CloudSyncManifest | null, hasLegacySnapshot: false, legacyUpdatedAt: undefined as string | undefined };
+      }
+
+      const manifestRows = (await client.$queryRawUnsafe(
+        `SELECT "payload", "updatedAt" FROM "inventory_app_state_snapshots" WHERE "id" = $1 LIMIT 1`,
+        CLOUD_SYNC_MANIFEST_ID,
+      )) as Array<{ payload: any; updatedAt: Date | string }>;
+
+      if (manifestRows && manifestRows.length > 0 && manifestRows[0]?.payload) {
+        const p = typeof manifestRows[0].payload === 'string'
+          ? JSON.parse(manifestRows[0].payload)
+          : manifestRows[0].payload;
+        return {
+          manifest: p as CloudSyncManifest,
+          hasLegacySnapshot: true,
+          legacyUpdatedAt: manifestRows[0].updatedAt ? new Date(manifestRows[0].updatedAt).toISOString() : undefined,
+        };
+      }
+
+      // Check only metadata (updatedAt) of legacy snapshot without downloading payload JSON
+      const legacyRows = (await client.$queryRawUnsafe(
+        `SELECT "updatedAt" FROM "inventory_app_state_snapshots" WHERE "id" = 'inventory-app-state' LIMIT 1`,
+      )) as Array<{ updatedAt: Date | string }>;
+
+      return {
+        manifest: null,
+        hasLegacySnapshot: Boolean(legacyRows && legacyRows.length > 0),
+        legacyUpdatedAt: legacyRows?.[0]?.updatedAt ? new Date(legacyRows[0].updatedAt).toISOString() : undefined,
+      };
+    });
+
+    const latencyMs = Date.now() - started;
+    global.__kpimsCloudManifestCache = {
+      cloudUrl: cfg.cloudDbUrl,
+      checkedAtMs: Date.now(),
+      checkedAtIso,
+      reachable: true,
+      latencyMs,
+      manifest: result.manifest,
+      hasLegacySnapshot: result.hasLegacySnapshot,
+    };
+    return {
+      cloudConfigured: true,
+      cloudReachable: true,
+      cached: false,
+      checkedAt: checkedAtIso,
+      latencyMs,
+      manifest: result.manifest,
+      hasLegacySnapshot: result.hasLegacySnapshot,
+      legacyUpdatedAt: result.legacyUpdatedAt,
+    };
+  } catch (err) {
+    const latencyMs = Date.now() - started;
+    const error = err instanceof Error ? err.message : String(err);
+    global.__kpimsCloudManifestCache = {
+      cloudUrl: cfg.cloudDbUrl,
+      checkedAtMs: Date.now(),
+      checkedAtIso,
+      reachable: false,
+      latencyMs,
+      manifest: null,
+      hasLegacySnapshot: false,
+      error,
+    };
+    return {
+      cloudConfigured: true,
+      cloudReachable: false,
+      cached: false,
+      checkedAt: checkedAtIso,
+      latencyMs,
+      manifest: null,
+      hasLegacySnapshot: false,
+      error,
+    };
+  }
 }
 
 

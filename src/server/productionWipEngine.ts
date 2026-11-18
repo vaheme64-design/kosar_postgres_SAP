@@ -184,6 +184,45 @@ export async function persistProductionWipState(): Promise<void> {
   }
 }
 
+export function exportProductionWipSnapshotPayload(): {
+  manufacturingOrders: ManufacturingOrder[];
+  wipTransfers: WipTransfer[];
+  productionLogs: ProductionActivityLog[];
+} {
+  return JSON.parse(
+    JSON.stringify({
+      manufacturingOrders: manufacturingOrdersStore,
+      wipTransfers: wipTransfersStore,
+      productionLogs: productionLogsStore,
+    })
+  );
+}
+
+export function replaceProductionWipStateFromSync(
+  payload: {
+    manufacturingOrders?: ManufacturingOrder[];
+    wipTransfers?: WipTransfer[];
+    productionLogs?: ProductionActivityLog[];
+  },
+  version?: number
+): void {
+  if (!payload || typeof payload !== 'object') return;
+  if (Array.isArray(payload.manufacturingOrders)) {
+    manufacturingOrdersStore.splice(0, manufacturingOrdersStore.length, ...payload.manufacturingOrders);
+  }
+  if (Array.isArray(payload.wipTransfers)) {
+    wipTransfersStore.splice(0, wipTransfersStore.length, ...payload.wipTransfers);
+  }
+  if (Array.isArray(payload.productionLogs)) {
+    productionLogsStore.splice(0, productionLogsStore.length, ...payload.productionLogs);
+  }
+  productionWipSnapshotVersion = Math.max(
+    1,
+    typeof version === 'number' && Number.isFinite(version) ? version : productionWipSnapshotVersion + 1
+  );
+  writeWipDiskSnapshot(exportProductionWipSnapshotPayload(), productionWipSnapshotVersion);
+}
+
 // Helper to determine warehouse location based on operation process
 export function getLocationForProcess(processType: string, stepNumber: number): string {
   switch (processType) {
