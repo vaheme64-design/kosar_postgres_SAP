@@ -670,6 +670,9 @@ export function createManufacturingOrder(params: {
     id: `LOG-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
     moId,
     moNumber: moId,
+    partId: part.id,
+    partCode: part.code,
+    partName: part.name,
     operationId: operations[0].id,
     stepNumber: operations[0].stepNumber,
     stepName: operations[0].stepName,
@@ -720,6 +723,9 @@ export function loadMaterialIntoManufacturingOrder(params: {
     id: `LOG-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
     moId: mo.id,
     moNumber: mo.moNumber,
+    partId: mo.partId,
+    partCode: mo.partCode,
+    partName: mo.partName,
     operationId: op.id,
     stepNumber: op.stepNumber,
     stepName: op.stepName,
@@ -774,6 +780,9 @@ export function registerOperationInput(params: {
     id: `LOG-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
     moId: mo.id,
     moNumber: mo.moNumber,
+    partId: mo.partId,
+    partCode: mo.partCode,
+    partName: mo.partName,
     operationId: op.id,
     stepNumber: op.stepNumber,
     stepName: op.stepName,
@@ -913,6 +922,9 @@ export function registerOperationProduction(params: {
       id: `LOG-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
       moId: mo.id,
       moNumber: mo.moNumber,
+      partId: mo.partId,
+      partCode: mo.partCode,
+      partName: mo.partName,
       operationId: op.id,
       stepNumber: op.stepNumber,
       stepName: op.stepName,
@@ -952,6 +964,9 @@ export function registerOperationProduction(params: {
     id: `LOG-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
     moId: mo.id,
     moNumber: mo.moNumber,
+    partId: mo.partId,
+    partCode: mo.partCode,
+    partName: mo.partName,
     operationId: op.id,
     stepNumber: op.stepNumber,
     stepName: op.stepName,
@@ -1042,6 +1057,9 @@ export function createOperationTransfer(params: {
     id: `LOG-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
     moId: mo.id,
     moNumber: mo.moNumber,
+    partId: mo.partId,
+    partCode: mo.partCode,
+    partName: mo.partName,
     operationId: fromOp.id,
     stepNumber: fromOp.stepNumber,
     stepName: fromOp.stepName,
@@ -1112,6 +1130,9 @@ export function approveOperationTransfer(params: {
     id: `LOG-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
     moId: mo.id,
     moNumber: mo.moNumber,
+    partId: mo.partId,
+    partCode: mo.partCode,
+    partName: mo.partName,
     operationId: transfer.toOperationId,
     stepNumber: transfer.toStepNumber,
     stepName: transfer.toStepName,
@@ -1320,16 +1341,36 @@ if (!isDatabaseUrlConfigured()) {
   initializeProductionWipSeed();
 }
 
+function replaceTextToken(
+  text: string | undefined,
+  oldCode?: string,
+  newCode?: string,
+  oldName?: string,
+  newName?: string,
+): string | undefined {
+  if (!text) return text;
+  let next = text;
+  if (oldCode && newCode && oldCode !== newCode && next.includes(oldCode)) {
+    next = next.split(oldCode).join(newCode);
+  }
+  if (oldName && newName && oldName !== newName && next.includes(oldName)) {
+    next = next.split(oldName).join(newName);
+  }
+  return next;
+}
+
 export function cascadePartUpdateInWipEngine(params: {
   partId: string;
   newCode: string;
   newName: string;
   oldCode?: string;
+  oldName?: string;
 }): { mosUpdated: number; transfersUpdated: number; logsUpdated: number } {
-  const { partId, newCode, newName, oldCode } = params;
+  const { partId, newCode, newName, oldCode, oldName } = params;
   const oldUpper = oldCode ? oldCode.trim().toUpperCase() : '';
   const newUpper = newCode.trim().toUpperCase();
   const now = new Date().toISOString();
+  const affectedMoIds = new Set<string>();
   let mosUpdated = 0;
   let transfersUpdated = 0;
   let logsUpdated = 0;
@@ -1341,10 +1382,27 @@ export function cascadePartUpdateInWipEngine(params: {
       (oldUpper !== '' && codeUpper === oldUpper) ||
       codeUpper === newUpper;
     if (matches) {
+      affectedMoIds.add(mo.id);
+      let moTouched = false;
       if (mo.partId !== partId || mo.partCode !== newCode || mo.partName !== newName) {
         mo.partId = partId;
         mo.partCode = newCode;
         mo.partName = newName;
+        moTouched = true;
+      }
+      const nextMoNotes = replaceTextToken(mo.notes, oldCode, newCode, oldName, newName);
+      if (nextMoNotes !== mo.notes) {
+        mo.notes = nextMoNotes;
+        moTouched = true;
+      }
+      for (const op of mo.operations || []) {
+        const nextStepName = replaceTextToken(op.stepName, oldCode, newCode, oldName, newName);
+        if (nextStepName && nextStepName !== op.stepName) {
+          op.stepName = nextStepName;
+          moTouched = true;
+        }
+      }
+      if (moTouched) {
         mo.updatedAt = now;
         mosUpdated++;
       }
@@ -1355,22 +1413,72 @@ export function cascadePartUpdateInWipEngine(params: {
     const codeUpper = String(tr.partCode || '').trim().toUpperCase();
     const matches =
       tr.partId === partId ||
+      affectedMoIds.has(tr.moId) ||
       (oldUpper !== '' && codeUpper === oldUpper) ||
       codeUpper === newUpper;
     if (matches) {
+      affectedMoIds.add(tr.moId);
+      let trTouched = false;
       if (tr.partId !== partId || tr.partCode !== newCode || tr.partName !== newName) {
         tr.partId = partId;
         tr.partCode = newCode;
         tr.partName = newName;
+        trTouched = true;
+      }
+      const nextTrNotes = replaceTextToken(tr.notes, oldCode, newCode, oldName, newName);
+      if (nextTrNotes !== tr.notes) {
+        tr.notes = nextTrNotes;
+        trTouched = true;
+      }
+      const nextFromStep = replaceTextToken(tr.fromStepName, oldCode, newCode, oldName, newName);
+      if (nextFromStep && nextFromStep !== tr.fromStepName) {
+        tr.fromStepName = nextFromStep;
+        trTouched = true;
+      }
+      const nextToStep = replaceTextToken(tr.toStepName, oldCode, newCode, oldName, newName);
+      if (nextToStep && nextToStep !== tr.toStepName) {
+        tr.toStepName = nextToStep;
+        trTouched = true;
+      }
+      if (trTouched) {
         transfersUpdated++;
       }
     }
   }
 
   for (const log of productionLogsStore) {
-    if (oldCode && oldCode !== newCode && log.notes && log.notes.includes(oldCode)) {
-      log.notes = log.notes.split(oldCode).join(newCode);
-      logsUpdated++;
+    const logCodeUpper = String(log.partCode || '').trim().toUpperCase();
+    const mentionsOld =
+      Boolean(oldCode && oldCode !== newCode && log.notes?.includes(oldCode)) ||
+      Boolean(oldName && oldName !== newName && log.notes?.includes(oldName));
+    const matchesLog =
+      affectedMoIds.has(log.moId) ||
+      log.partId === partId ||
+      (oldUpper !== '' && logCodeUpper === oldUpper) ||
+      (logCodeUpper !== '' && logCodeUpper === newUpper) ||
+      mentionsOld;
+
+    if (matchesLog) {
+      let logTouched = false;
+      if (log.partId !== partId || log.partCode !== newCode || log.partName !== newName) {
+        log.partId = partId;
+        log.partCode = newCode;
+        log.partName = newName;
+        logTouched = true;
+      }
+      const nextLogNotes = replaceTextToken(log.notes, oldCode, newCode, oldName, newName);
+      if (nextLogNotes !== log.notes) {
+        log.notes = nextLogNotes;
+        logTouched = true;
+      }
+      const nextStepName = replaceTextToken(log.stepName, oldCode, newCode, oldName, newName);
+      if (nextStepName && nextStepName !== log.stepName) {
+        log.stepName = nextStepName;
+        logTouched = true;
+      }
+      if (logTouched) {
+        logsUpdated++;
+      }
     }
   }
 
@@ -1381,20 +1489,27 @@ export function reconcileWipEngineWithParts(parts: Part[]): number {
   let changes = 0;
   const byId = new Map(parts.map(p => [p.id, p]));
   const byCode = new Map(parts.map(p => [String(p.code || '').trim().toUpperCase(), p]));
+  const moPartMap = new Map<string, Part>();
 
   for (const mo of manufacturingOrdersStore) {
     const part = byId.get(mo.partId) || byCode.get(String(mo.partCode || '').trim().toUpperCase());
-    if (part && (mo.partCode !== part.code || mo.partName !== part.name)) {
-      mo.partId = part.id;
-      mo.partCode = part.code;
-      mo.partName = part.name;
-      changes++;
+    if (part) {
+      moPartMap.set(mo.id, part);
+      if (mo.partId !== part.id || mo.partCode !== part.code || mo.partName !== part.name) {
+        mo.partId = part.id;
+        mo.partCode = part.code;
+        mo.partName = part.name;
+        changes++;
+      }
     }
   }
 
   for (const tr of wipTransfersStore) {
-    const part = byId.get(tr.partId) || byCode.get(String(tr.partCode || '').trim().toUpperCase());
-    if (part && (tr.partCode !== part.code || tr.partName !== part.name)) {
+    const part =
+      byId.get(tr.partId) ||
+      byCode.get(String(tr.partCode || '').trim().toUpperCase()) ||
+      moPartMap.get(tr.moId);
+    if (part && (tr.partId !== part.id || tr.partCode !== part.code || tr.partName !== part.name)) {
       tr.partId = part.id;
       tr.partCode = part.code;
       tr.partName = part.name;
@@ -1402,7 +1517,21 @@ export function reconcileWipEngineWithParts(parts: Part[]): number {
     }
   }
 
+  for (const log of productionLogsStore) {
+    const part =
+      (log.partId ? byId.get(log.partId) : undefined) ||
+      (log.partCode ? byCode.get(String(log.partCode).trim().toUpperCase()) : undefined) ||
+      moPartMap.get(log.moId);
+    if (part && (log.partId !== part.id || log.partCode !== part.code || log.partName !== part.name)) {
+      log.partId = part.id;
+      log.partCode = part.code;
+      log.partName = part.name;
+      changes++;
+    }
+  }
+
   return changes;
 }
+
 
 

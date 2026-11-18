@@ -42,6 +42,10 @@ import {
 import { CloudSyncCheckResult } from './types/dbSync';
 import { toPersianDigits } from './utils/formatters';
 import {
+  saveDbConnectionSettings,
+  syncSavedDbSettingsWithBackend,
+} from './utils/dbConnectionStorage';
+import {
   CloudDownload,
   CloudUpload,
   RefreshCw,
@@ -333,19 +337,23 @@ function AppContent() {
     return () => window.removeEventListener('kpims-parts-imported', handlePartsImported);
   }, [loadAllData]);
 
-  // Read lightweight local sync preference on mount (zero remote DB queries unless opted in)
+  // Hydrate browser-persisted DB credentials to backend if needed & read sync preference
   useEffect(() => {
-    fetch('/api/db/config')
-      .then(r => r.json())
-      .then(json => {
-        if (json?.success && json.data) {
-          setAutoCheckCloudUpdates(Boolean(json.data.autoCheckCloudUpdates));
-          if (typeof json.data.cloudCheckIntervalSec === 'number') {
-            setCloudCheckIntervalSec(json.data.cloudCheckIntervalSec);
-          }
+    let active = true;
+    syncSavedDbSettingsWithBackend()
+      .then(result => {
+        if (!active) return;
+        if (typeof result.autoCheckCloudUpdates === 'boolean') {
+          setAutoCheckCloudUpdates(result.autoCheckCloudUpdates);
+        }
+        if (typeof result.cloudCheckIntervalSec === 'number') {
+          setCloudCheckIntervalSec(result.cloudCheckIntervalSec);
         }
       })
       .catch(() => {});
+    return () => {
+      active = false;
+    };
   }, []);
 
   const handleCheckCloudUpdates = useCallback(async (force = false) => {
@@ -398,17 +406,22 @@ function AppContent() {
 
   const handleToggleAutoCloudCheck = useCallback(
     async (enabled: boolean, intervalSec?: number) => {
+      const nextInterval = intervalSec ?? cloudCheckIntervalSec;
       setAutoCheckCloudUpdates(enabled);
       if (typeof intervalSec === 'number') {
         setCloudCheckIntervalSec(intervalSec);
       }
+      saveDbConnectionSettings({
+        autoCheckCloudUpdates: enabled,
+        cloudCheckIntervalSec: nextInterval,
+      });
       try {
         const res = await fetch('/api/db/config', {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             autoCheckCloudUpdates: enabled,
-            cloudCheckIntervalSec: intervalSec ?? cloudCheckIntervalSec,
+            cloudCheckIntervalSec: nextInterval,
           }),
         });
         const json = await res.json();

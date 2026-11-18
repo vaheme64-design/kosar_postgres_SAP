@@ -479,7 +479,7 @@ export function setAllTraceabilityTags(tags: TraceabilityTagData[]): void {
   }
 }
 
-function replaceCodeToken(text: string | undefined, oldCode: string, newCode: string): string | undefined {
+function replaceCodeToken(text: string | undefined, oldCode: string | undefined, newCode: string): string | undefined {
   if (!text || !oldCode || oldCode === newCode) return text;
   if (!text.includes(oldCode)) return text;
   return text.split(oldCode).join(newCode);
@@ -494,11 +494,20 @@ export function cascadePartUpdateInBomEngine(params: {
   oldCode?: string;
   oldName?: string;
 }): { bomsUpdated: number; componentsUpdated: number; flowsUpdated: number; tagsUpdated: number } {
-  const { partId, newCode, newName, carModel, unit, oldCode } = params;
+  const { partId, newCode, newName, carModel, unit, oldCode, oldName } = params;
   const oldUpper = oldCode ? oldCode.trim().toUpperCase() : '';
   const newUpper = newCode.trim().toUpperCase();
   const normalizedBomUnit: 'PCS' | 'KG' | 'SET' | undefined =
     unit === 'KG' ? 'KG' : unit === 'SET' ? 'SET' : unit === 'PCS' ? 'PCS' : undefined;
+
+  const replacePartTokens = (text?: string): string | undefined => {
+    if (!text) return text;
+    let next = replaceCodeToken(text, oldCode, newCode) || text;
+    if (oldName && oldName !== newName && next.includes(oldName)) {
+      next = next.split(oldName).join(newName);
+    }
+    return next;
+  };
 
   let bomsUpdated = 0;
   let componentsUpdated = 0;
@@ -527,8 +536,8 @@ export function cascadePartUpdateInBomEngine(params: {
       }
     }
 
-    if (oldCode && oldCode !== newCode && bom.notes) {
-      const nextNotes = replaceCodeToken(bom.notes, oldCode, newCode);
+    if (bom.notes) {
+      const nextNotes = replacePartTokens(bom.notes);
       if (nextNotes !== bom.notes) {
         bom.notes = nextNotes;
         bomTouched = true;
@@ -540,6 +549,7 @@ export function cascadePartUpdateInBomEngine(params: {
         cmp.componentPartId === partId ||
         (oldUpper !== '' && String(cmp.componentPartCode || '').trim().toUpperCase() === oldUpper) ||
         String(cmp.componentPartCode || '').trim().toUpperCase() === newUpper;
+      let cmpTouched = false;
       if (cmpMatches) {
         if (
           cmp.componentPartId !== partId ||
@@ -551,9 +561,19 @@ export function cascadePartUpdateInBomEngine(params: {
           cmp.componentPartCode = newCode;
           cmp.componentPartName = newName;
           if (normalizedBomUnit) cmp.unit = normalizedBomUnit;
-          componentsUpdated++;
-          bomTouched = true;
+          cmpTouched = true;
         }
+      }
+      if (cmp.notes) {
+        const nextCmpNotes = replacePartTokens(cmp.notes);
+        if (nextCmpNotes !== cmp.notes) {
+          cmp.notes = nextCmpNotes;
+          cmpTouched = true;
+        }
+      }
+      if (cmpTouched) {
+        componentsUpdated++;
+        bomTouched = true;
       }
     }
 
@@ -580,14 +600,14 @@ export function cascadePartUpdateInBomEngine(params: {
         }
       }
     }
-    if (oldCode && oldCode !== newCode) {
-      const nextNotes = replaceCodeToken(flow.notes, oldCode, newCode);
+    if ((oldCode && oldCode !== newCode) || (oldName && oldName !== newName)) {
+      const nextNotes = replacePartTokens(flow.notes);
       if (nextNotes !== flow.notes) {
         flow.notes = nextNotes;
         flowTouched = true;
       }
       for (const node of flow.nodes || []) {
-        const nextDesc = replaceCodeToken(node.description, oldCode, newCode);
+        const nextDesc = replacePartTokens(node.description);
         if (nextDesc !== node.description) {
           node.description = nextDesc || '';
           flowTouched = true;

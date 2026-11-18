@@ -1455,6 +1455,24 @@ function reconcileProductStructureSubNodesWithCatalog(
   return count;
 }
 
+function replacePartTextReferences(
+  text: string | undefined,
+  oldCode?: string,
+  newCode?: string,
+  oldName?: string,
+  newName?: string,
+): string | undefined {
+  if (!text) return text;
+  let next = text;
+  if (oldCode && newCode && oldCode !== newCode && next.includes(oldCode)) {
+    next = next.split(oldCode).join(newCode);
+  }
+  if (oldName && newName && oldName !== newName && next.includes(oldName)) {
+    next = next.split(oldName).join(newName);
+  }
+  return next;
+}
+
 export async function cascadePartUpdateAcrossSystem(params: {
   part: Part;
   oldCode?: string;
@@ -1489,6 +1507,13 @@ export async function cascadePartUpdateAcrossSystem(params: {
         psTouched = true;
       }
     }
+    if (ps.notes) {
+      const nextPsNotes = replacePartTextReferences(ps.notes, oldCode, part.code, oldName, part.name);
+      if (nextPsNotes !== ps.notes) {
+        ps.notes = nextPsNotes;
+        psTouched = true;
+      }
+    }
     const subChanges = updateProductStructureSubNodesForPart(ps.subComponents, part, oldUpper, newUpper);
     if (psTouched || subChanges > 0) {
       productStructuresUpdated += (psTouched ? 1 : 0) + subChanges;
@@ -1510,6 +1535,14 @@ export async function cascadePartUpdateAcrossSystem(params: {
       rtg.updatedAt = now;
       touched = true;
     }
+    if (rtg.notes) {
+      const nextRtgNotes = replacePartTextReferences(rtg.notes, oldCode, part.code, oldName, part.name);
+      if (nextRtgNotes !== rtg.notes) {
+        rtg.notes = nextRtgNotes;
+        rtg.updatedAt = now;
+        touched = true;
+      }
+    }
     for (const op of rtg.operations || []) {
       const sharedUpper = String(op.sharedPartCode || '').trim().toUpperCase();
       if (
@@ -1521,6 +1554,26 @@ export async function cascadePartUpdateAcrossSystem(params: {
           op.sharedPartId = part.id;
           op.sharedPartCode = part.code;
           op.sharedPartName = part.name;
+          touched = true;
+        }
+      }
+      if (op.description) {
+        const nextDesc = replacePartTextReferences(op.description, oldCode, part.code, oldName, part.name);
+        if (nextDesc !== op.description) {
+          op.description = nextDesc;
+          touched = true;
+        }
+      }
+      if (op.sharedOperationNotes) {
+        const nextSharedNotes = replacePartTextReferences(
+          op.sharedOperationNotes,
+          oldCode,
+          part.code,
+          oldName,
+          part.name,
+        );
+        if (nextSharedNotes !== op.sharedOperationNotes) {
+          op.sharedOperationNotes = nextSharedNotes;
           touched = true;
         }
       }
@@ -1713,6 +1766,7 @@ export async function cascadePartUpdateAcrossSystem(params: {
     newCode: part.code,
     newName: part.name,
     oldCode,
+    oldName,
   });
 
   const mrpRecordsUpdated = cascadePartUpdateInMrpEngine({
@@ -1730,7 +1784,7 @@ export async function cascadePartUpdateAcrossSystem(params: {
     oldCode,
   });
 
-  const embeddedUpdated = syncPartToEmbeddedSapPpStore(part, oldCode) ? 1 : 0;
+  const embeddedUpdated = syncPartToEmbeddedSapPpStore(part, oldCode, oldName) ? 1 : 0;
 
   if (isDatabaseUrlConfigured() && (oldUpper !== newUpper || oldName !== part.name)) {
     try {
@@ -1742,6 +1796,21 @@ export async function cascadePartUpdateAcrossSystem(params: {
         .updateMany({
           where: whereClause,
           data: { partCode: part.code, partName: part.name },
+        })
+        .catch(() => {});
+
+      const itemWhereClause: any = oldCode
+        ? { OR: [{ id: part.id }, { code: oldCode }, { code: part.code }] }
+        : { OR: [{ id: part.id }, { code: part.code }] };
+      await prisma.item
+        .updateMany({
+          where: itemWhereClause,
+          data: {
+            code: part.code,
+            name: part.name,
+            carModel: part.carModel || undefined,
+            unit: part.unit,
+          },
         })
         .catch(() => {});
     } catch {
@@ -2755,8 +2824,11 @@ apiRouter.get('/parts', async (req: Request, res: Response) => {
 
         if (catalogChangedFromDb) {
           partsStore = uniqueParts(Array.from(mergedById.values()));
-          reconcileAllPartReferencesFromCatalog();
+          const reconciled = reconcileAllPartReferencesFromCatalog();
           await persistInventoryAppState();
+          if (reconciled.totalUpdated > 0) {
+            await persistProductionWipState();
+          }
         }
       } catch (dbErr) {
         console.warn('[KPIMS /api/parts] DB read warning:', dbErr instanceof Error ? dbErr.message : dbErr);
@@ -2789,26 +2861,35 @@ apiRouter.get('/parts', async (req: Request, res: Response) => {
   }
 });
 
-apiRouter.post('/parts', async (req: Request, res: Response) => {
+async function handleUpsertPart(req: Request, res: Response, forcedPartId?: string) {
   try {
-    const payload: Partial<Part> = req.body;
-    const code = normalizeExcelDigits(payload.code);
-    const name = String(payload.name || '').trim();
+    const payload: Partial<Part> = req.body || {};
+    const lookupKey = String(forcedPartId || payload.id || '').trim();
+    let existingIndex = lookupKey
+      ? partsStore.findIndex(p => p.id === lookupKey || p.code.toUpperCase() === lookupKey.toUpperCase())
+      : -1;
+
+    const rawCode = payload.code !== undefined ? normalizeExcelDigits(payload.code) : '';
+    if (existingIndex < 0 && !forcedPartId && !payload.id && rawCode) {
+      existingIndex = partsStore.findIndex(p => p.code.toUpperCase() === rawCode.toUpperCase());
+    }
+
+    if (forcedPartId && existingIndex < 0) {
+      return res.status(404).json({ success: false, error: 'قطعه مورد نظر در کاتالوگ یافت نشد.' });
+    }
+
+    const existingPart = existingIndex >= 0 ? partsStore[existingIndex] : undefined;
+    const code = rawCode || existingPart?.code || '';
+    const name = payload.name !== undefined ? String(payload.name || '').trim() : existingPart?.name || '';
     if (!code || !name) {
       return res.status(400).json({ success: false, error: 'اطلاعات ضروری قطعه (کد و نام قطعه) تکمیل نشده است.' });
     }
-    const normCategory = normalizePartCategory(payload.category || 'RAW_MATERIAL', code);
-    const normUnit = normalizePartUnit(payload.unit || 'PCS', normCategory);
 
-    let existingIndex = payload.id
-      ? partsStore.findIndex(p => p.id === payload.id)
-      : -1;
-    if (existingIndex < 0 && !payload.id) {
-      existingIndex = partsStore.findIndex(p => p.code.toUpperCase() === code.toUpperCase());
-    }
+    const normCategory = normalizePartCategory(payload.category || existingPart?.category || 'RAW_MATERIAL', code);
+    const normUnit = normalizePartUnit(payload.unit || existingPart?.unit || 'PCS', normCategory);
 
     const codeCollision = partsStore.findIndex(
-      (p, idx) => idx !== existingIndex && p.code.toUpperCase() === code.toUpperCase()
+      (p, idx) => idx !== existingIndex && p.code.toUpperCase() === code.toUpperCase(),
     );
     if (codeCollision >= 0) {
       return res.status(400).json({
@@ -2818,10 +2899,15 @@ apiRouter.post('/parts', async (req: Request, res: Response) => {
     }
 
     const now = new Date().toISOString();
-    const vipFlag = payload.isVIP !== undefined ? Boolean(payload.isVIP) : payload.isPinned !== undefined ? Boolean(payload.isPinned) : undefined;
+    const vipFlag =
+      payload.isVIP !== undefined
+        ? Boolean(payload.isVIP)
+        : payload.isPinned !== undefined
+        ? Boolean(payload.isPinned)
+        : undefined;
 
-    if (existingIndex >= 0) {
-      const prevSnapshot: Part = { ...partsStore[existingIndex] };
+    if (existingIndex >= 0 && existingPart) {
+      const prevSnapshot: Part = { ...existingPart };
       const oldCode = prevSnapshot.code;
       const oldName = prevSnapshot.name;
       const effectiveVip = vipFlag !== undefined ? vipFlag : Boolean(prevSnapshot.isVIP ?? prevSnapshot.isPinned);
@@ -2870,7 +2956,7 @@ apiRouter.post('/parts', async (req: Request, res: Response) => {
       const persistedTarget = pgSync.attempted && !pgSync.error ? 'POSTGRESQL' : 'HYBRID_DURABLE_DISK';
       const cascadeNote =
         cascadeSummary.totalAffectedRecords > 0
-          ? ` و در ${cascadeSummary.totalAffectedRecords} رکورد وابسته (BOM، ساختار درختی، مسیر تولید و دستورات کار) همگام‌سازی شد.`
+          ? ` و در ${cascadeSummary.totalAffectedRecords} رکورد وابسته (BOM، ساختار درختی، مسیر تولید، دستورات کار و لاگ عملیات) همگام‌سازی شد.`
           : '.';
       return res.json({
         success: true,
@@ -2933,7 +3019,11 @@ apiRouter.post('/parts', async (req: Request, res: Response) => {
   } catch (error) {
     return res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در ثبت قطعه در پایگاه داده' });
   }
-});
+}
+
+apiRouter.post('/parts', (req: Request, res: Response) => handleUpsertPart(req, res));
+apiRouter.put('/parts/:id', (req: Request, res: Response) => handleUpsertPart(req, res, req.params.id));
+apiRouter.patch('/parts/:id', (req: Request, res: Response) => handleUpsertPart(req, res, req.params.id));
 
 apiRouter.delete('/parts/:id', async (req: Request, res: Response) => {
   try {

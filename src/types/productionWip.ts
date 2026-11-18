@@ -106,6 +106,9 @@ export interface ProductionActivityLog {
   id: string;
   moId: string;
   moNumber: string;
+  partId?: string;
+  partCode?: string;
+  partName?: string;
   operationId: string;
   stepNumber: number;
   stepName: string;

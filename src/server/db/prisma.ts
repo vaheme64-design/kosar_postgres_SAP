@@ -270,12 +270,14 @@ export function syncPartToEmbeddedSapPpStore(
     weightPerUnitKg?: number;
     minStock?: number;
   },
-  oldCode?: string
+  oldCode?: string,
+  oldName?: string,
 ): boolean {
   const store = getEmbeddedSapPpStore();
   const oldUpper = oldCode ? oldCode.trim().toUpperCase() : '';
   const newUpper = part.code.trim().toUpperCase();
   let changed = false;
+  const matchedItemIds = new Set<string>();
 
   for (const item of store.items) {
     const itemCodeUpper = String(item.code || '').toUpperCase();
@@ -284,6 +286,7 @@ export function syncPartToEmbeddedSapPpStore(
       (oldUpper && itemCodeUpper === oldUpper) ||
       itemCodeUpper === newUpper;
     if (!matches) continue;
+    matchedItemIds.add(item.id);
 
     if (
       item.code !== part.code ||
@@ -303,6 +306,50 @@ export function syncPartToEmbeddedSapPpStore(
         item.minSafetyStock = part.minStock;
       }
       changed = true;
+    }
+  }
+
+  const replaceSapNotes = (notes?: string | null): string | null | undefined => {
+    if (!notes) return notes;
+    let next = notes;
+    if (oldCode && oldCode !== part.code && next.includes(oldCode)) {
+      next = next.split(oldCode).join(part.code);
+    }
+    if (oldName && oldName !== part.name && next.includes(oldName)) {
+      next = next.split(oldName).join(part.name);
+    }
+    return next;
+  };
+
+  if ((oldCode && oldCode !== part.code) || (oldName && oldName !== part.name)) {
+    const matchedWorkOrderIds = new Set<string>();
+    for (const bomCmp of store.bomComponents) {
+      if (matchedItemIds.has(bomCmp.parentItemId) || matchedItemIds.has(bomCmp.childItemId)) {
+        const nextNotes = replaceSapNotes(bomCmp.notes);
+        if (nextNotes !== bomCmp.notes) {
+          bomCmp.notes = nextNotes ?? null;
+          changed = true;
+        }
+      }
+    }
+    for (const wo of store.workOrders) {
+      if (matchedItemIds.has(wo.itemId)) {
+        matchedWorkOrderIds.add(wo.id);
+        const nextNotes = replaceSapNotes(wo.notes);
+        if (nextNotes !== wo.notes) {
+          wo.notes = nextNotes ?? null;
+          changed = true;
+        }
+      }
+    }
+    for (const pl of store.productionLogs) {
+      if (matchedWorkOrderIds.has(pl.workOrderId)) {
+        const nextNotes = replaceSapNotes(pl.notes);
+        if (nextNotes !== pl.notes) {
+          pl.notes = nextNotes ?? null;
+          changed = true;
+        }
+      }
     }
   }
 

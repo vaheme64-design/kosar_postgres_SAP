@@ -30,6 +30,15 @@ import { auth } from '../lib/firebase';
 import { GoogleAuthProvider, signInWithPopup, signOut } from 'firebase/auth';
 import { KpiCardsSkeleton } from './ui/Skeleton';
 import { InlinePageGuideButton } from './common/PageGuideSystem';
+import {
+  clearSavedDbConnectionUrl,
+  isMaskedDbUrl,
+  isSameDbEndpointIgnoringPassword,
+  loadSavedDbConnectionSettings,
+  loadSavedDbConnectionSettingsAsync,
+  saveDbConnectionSettings,
+  syncSavedDbSettingsWithBackend,
+} from '../utils/dbConnectionStorage';
 
 interface UserManagementViewProps {
   currentUser: UserRoleProfile;
@@ -70,13 +79,22 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
   const [copiedCmd, setCopiedCmd] = useState<string | null>(null);
   const [authErrorMsg, setAuthErrorMsg] = useState<string | null>(null);
 
-  // Dual DB Connection & Git-Style Sync State
-  const [localDbUrl, setLocalDbUrl] = useState('');
-  const [cloudDbUrl, setCloudDbUrl] = useState('');
-  const [activeTarget, setActiveTarget] = useState<'AUTO' | 'LOCAL' | 'CLOUD' | 'HYBRID_DISK'>('AUTO');
-  const [deviceLabel, setDeviceLabel] = useState('');
-  const [autoCheckPref, setAutoCheckPref] = useState<boolean>(autoCheckCloudUpdates);
-  const [checkIntervalPref, setCheckIntervalPref] = useState<number>(cloudCheckIntervalSec);
+  // Dual DB Connection & Git-Style Sync State (pre-filled synchronously from browser storage)
+  const [initialSavedCfg] = useState(() => loadSavedDbConnectionSettings());
+  const [localDbUrl, setLocalDbUrl] = useState(initialSavedCfg.localDbUrl);
+  const [cloudDbUrl, setCloudDbUrl] = useState(initialSavedCfg.cloudDbUrl);
+  const [activeTarget, setActiveTarget] = useState<'AUTO' | 'LOCAL' | 'CLOUD' | 'HYBRID_DISK'>(
+    initialSavedCfg.activeTarget || 'AUTO',
+  );
+  const [deviceLabel, setDeviceLabel] = useState(initialSavedCfg.deviceLabel);
+  const [autoCheckPref, setAutoCheckPref] = useState<boolean>(
+    initialSavedCfg.updatedAt ? initialSavedCfg.autoCheckCloudUpdates : autoCheckCloudUpdates,
+  );
+  const [checkIntervalPref, setCheckIntervalPref] = useState<number>(
+    initialSavedCfg.updatedAt ? initialSavedCfg.cloudCheckIntervalSec : cloudCheckIntervalSec,
+  );
+  const [hasBrowserSavedLocal, setHasBrowserSavedLocal] = useState<boolean>(Boolean(initialSavedCfg.localDbUrl));
+  const [hasBrowserSavedCloud, setHasBrowserSavedCloud] = useState<boolean>(Boolean(initialSavedCfg.cloudDbUrl));
   const [savingDbCfg, setSavingDbCfg] = useState(false);
   const [testingTarget, setTestingTarget] = useState<'LOCAL' | 'CLOUD' | null>(null);
   const [syncingDb, setSyncingDb] = useState(false);
@@ -111,18 +129,45 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
   const fetchDbStatus = async (probe = false) => {
     setLoadingDb(true);
     try {
+      const saved = await loadSavedDbConnectionSettingsAsync();
+      setHasBrowserSavedLocal(Boolean(saved.localDbUrl));
+      setHasBrowserSavedCloud(Boolean(saved.cloudDbUrl));
+
       const res = await fetch(`/api/db/status${probe ? '?probe=true' : ''}`);
       const data = await res.json();
       if (data.success) {
         setDbStatus(data);
         const dual = data.data?.dualLinks;
         if (dual) {
-          setLocalDbUrl(dual.localDbUrlMasked || '');
-          setCloudDbUrl(dual.cloudDbUrlMasked || '');
-          setActiveTarget(dual.activeTarget || 'AUTO');
-          if (dual.deviceLabel) setDeviceLabel(dual.deviceLabel);
-          if (typeof dual.autoCheckCloudUpdates === 'boolean') setAutoCheckPref(dual.autoCheckCloudUpdates);
-          if (typeof dual.cloudCheckIntervalSec === 'number') setCheckIntervalPref(dual.cloudCheckIntervalSec);
+          // Never clobber an unmasked browser-stored URL with a masked `:****@` URL from the backend
+          if (
+            saved.localDbUrl &&
+            (!dual.localDbUrlMasked || isSameDbEndpointIgnoringPassword(saved.localDbUrl, dual.localDbUrlMasked))
+          ) {
+            setLocalDbUrl(saved.localDbUrl);
+          } else {
+            setLocalDbUrl(prev => (prev && !isMaskedDbUrl(prev) ? prev : dual.localDbUrlMasked || ''));
+          }
+
+          if (
+            saved.cloudDbUrl &&
+            (!dual.cloudDbUrlMasked || isSameDbEndpointIgnoringPassword(saved.cloudDbUrl, dual.cloudDbUrlMasked))
+          ) {
+            setCloudDbUrl(saved.cloudDbUrl);
+          } else {
+            setCloudDbUrl(prev => (prev && !isMaskedDbUrl(prev) ? prev : dual.cloudDbUrlMasked || ''));
+          }
+
+          setActiveTarget(saved.updatedAt ? saved.activeTarget : dual.activeTarget || 'AUTO');
+          if (saved.deviceLabel || dual.deviceLabel) {
+            setDeviceLabel(saved.deviceLabel || dual.deviceLabel);
+          }
+          if (typeof dual.autoCheckCloudUpdates === 'boolean' && !saved.updatedAt) {
+            setAutoCheckPref(dual.autoCheckCloudUpdates);
+          }
+          if (typeof dual.cloudCheckIntervalSec === 'number' && !saved.updatedAt) {
+            setCheckIntervalPref(dual.cloudCheckIntervalSec);
+          }
         }
       }
     } catch {
@@ -133,13 +178,51 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
   };
 
   useEffect(() => {
-    fetchDbStatus(true);
+    let active = true;
+    (async () => {
+      const idbSaved = await loadSavedDbConnectionSettingsAsync();
+      if (active) {
+        if (idbSaved.localDbUrl) {
+          setLocalDbUrl(prev => prev || idbSaved.localDbUrl);
+          setHasBrowserSavedLocal(true);
+        }
+        if (idbSaved.cloudDbUrl) {
+          setCloudDbUrl(prev => prev || idbSaved.cloudDbUrl);
+          setHasBrowserSavedCloud(true);
+        }
+        if (idbSaved.deviceLabel) setDeviceLabel(prev => prev || idbSaved.deviceLabel);
+      }
+      await syncSavedDbSettingsWithBackend().catch(() => null);
+      if (active) {
+        await fetchDbStatus(true);
+      }
+    })();
+    return () => {
+      active = false;
+    };
   }, []);
 
   const handleSaveDualDbConfig = async () => {
     setSavingDbCfg(true);
     setDbFeedback(null);
     try {
+      const nextSaved = saveDbConnectionSettings(
+        {
+          localDbUrl,
+          cloudDbUrl,
+          activeTarget,
+          deviceLabel: deviceLabel.trim(),
+          autoCheckCloudUpdates: autoCheckPref,
+          cloudCheckIntervalSec: checkIntervalPref,
+        },
+        {
+          allowClearLocal: !localDbUrl.trim(),
+          allowClearCloud: !cloudDbUrl.trim(),
+        },
+      );
+      setHasBrowserSavedLocal(Boolean(nextSaved.localDbUrl));
+      setHasBrowserSavedCloud(Boolean(nextSaved.cloudDbUrl));
+
       const res = await fetch('/api/db/config', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -159,7 +242,10 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
       if (onToggleAutoCloudCheck) {
         await onToggleAutoCloudCheck(autoCheckPref, checkIntervalPref);
       }
-      setDbFeedback({ ok: true, text: json.message || 'تنظیمات دو پایگاه داده با موفقیت ذخیره شد.' });
+      setDbFeedback({
+        ok: true,
+        text: `${json.message || 'تنظیمات دو پایگاه داده ذخیره شد.'} (تنظیمات و لینک‌ها در حافظه مرورگر نیز ذخیره شدند تا در ورودهای بعدی به‌صورت خودکار پر شوند.)`,
+      });
       await fetchDbStatus(false);
       if (onCheckCloudUpdates) {
         onCheckCloudUpdates(true).catch(() => {});
@@ -194,8 +280,16 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
       const result = { ok: Boolean(json.success), message: json.message || json.error || 'نتیجه نامشخص' };
       if (target === 'LOCAL') {
         setLocalTestResult(result);
+        if (result.ok && url.trim() && !isMaskedDbUrl(url)) {
+          const nextSaved = saveDbConnectionSettings({ localDbUrl: url.trim() });
+          setHasBrowserSavedLocal(Boolean(nextSaved.localDbUrl));
+        }
       } else {
         setCloudTestResult(result);
+        if (result.ok && url.trim() && !isMaskedDbUrl(url)) {
+          const nextSaved = saveDbConnectionSettings({ cloudDbUrl: url.trim() });
+          setHasBrowserSavedCloud(Boolean(nextSaved.cloudDbUrl));
+        }
         if (result.ok) {
           onCheckCloudUpdates?.(true);
         }
@@ -638,6 +732,11 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
                     ۱. لینک پایگاه داده محلی (Local Server / LAN DB)
                   </span>
                   <div className="flex items-center gap-1.5 text-[10px] font-bold">
+                    {hasBrowserSavedLocal && (
+                      <span className="text-[#007cc0] bg-[#e5f3fa] border border-[#b3ddf2] px-2 py-0.5 rounded-sm">
+                        ذخیره‌شده در مرورگر ✓
+                      </span>
+                    )}
                     {dbStatus?.data?.dualLinks?.hasLocalDbUrl && (
                       <span className="text-[#107e3e] bg-[#ebf7ef] border border-[#a9dfbf] px-2 py-0.5 rounded-sm">
                         رمز ذخیره شده ✓
@@ -656,7 +755,14 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
                   type="text"
                   dir="ltr"
                   value={localDbUrl}
-                  onChange={e => setLocalDbUrl(e.target.value)}
+                  onChange={e => {
+                    const nextVal = e.target.value;
+                    setLocalDbUrl(nextVal);
+                    if (/^postgres(ql)?:\/\/[^:]+:[^@]+@/.test(nextVal.trim()) && !isMaskedDbUrl(nextVal)) {
+                      const nextSaved = saveDbConnectionSettings({ localDbUrl: nextVal.trim() });
+                      setHasBrowserSavedLocal(Boolean(nextSaved.localDbUrl));
+                    }
+                  }}
                   placeholder="postgresql://postgres:password@localhost:5432/kpims_db?schema=public"
                   className="w-full px-3 py-2 text-xs font-mono bg-white border border-[#bfbfbf] rounded-sm focus:outline-none focus:border-[#007cc0]"
                 />
@@ -683,8 +789,23 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
                         تغییر لینک
                       </button>
                     )}
+                    {hasBrowserSavedLocal && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          clearSavedDbConnectionUrl('LOCAL');
+                          setHasBrowserSavedLocal(false);
+                          setLocalDbUrl('');
+                          setLocalTestResult(null);
+                        }}
+                        className="text-[11px] text-[#bb0000] hover:underline px-1.5 py-1 cursor-pointer whitespace-nowrap"
+                        title="حذف لینک و رمز محلی از حافظه مرورگر"
+                      >
+                        پاک‌کردن از مرورگر
+                      </button>
+                    )}
                   </div>
-                  <span className="text-[10px] text-[#666666]">مناسب شبکه داخلی کارخانه (بدون نیاز به ورود مجدد رمز)</span>
+                  <span className="text-[10px] text-[#666666]">مناسب شبکه داخلی کارخانه (ذخیره خودکار در سرور و مرورگر)</span>
                 </div>
                 {localTestResult && (
                   <div className={`text-[11px] p-2 rounded-sm border ${
@@ -703,6 +824,11 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
                     ۲. لینک پایگاه داده ابری (Cloud / Supabase Pooler)
                   </span>
                   <div className="flex items-center gap-1.5 text-[10px] font-bold">
+                    {hasBrowserSavedCloud && (
+                      <span className="text-[#007cc0] bg-[#e5f3fa] border border-[#b3ddf2] px-2 py-0.5 rounded-sm">
+                        ذخیره‌شده در مرورگر ✓
+                      </span>
+                    )}
                     {dbStatus?.data?.dualLinks?.hasCloudDbUrl && (
                       <span className="text-[#107e3e] bg-[#ebf7ef] border border-[#a9dfbf] px-2 py-0.5 rounded-sm">
                         رمز ذخیره شده ✓
@@ -721,7 +847,14 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
                   type="text"
                   dir="ltr"
                   value={cloudDbUrl}
-                  onChange={e => setCloudDbUrl(e.target.value)}
+                  onChange={e => {
+                    const nextVal = e.target.value;
+                    setCloudDbUrl(nextVal);
+                    if (/^postgres(ql)?:\/\/[^:]+:[^@]+@/.test(nextVal.trim()) && !isMaskedDbUrl(nextVal)) {
+                      const nextSaved = saveDbConnectionSettings({ cloudDbUrl: nextVal.trim() });
+                      setHasBrowserSavedCloud(Boolean(nextSaved.cloudDbUrl));
+                    }
+                  }}
                   placeholder="postgresql://postgres.xxxx:password@aws-0-region.pooler.supabase.com:6543/postgres"
                   className="w-full px-3 py-2 text-xs font-mono bg-white border border-[#bfbfbf] rounded-sm focus:outline-none focus:border-[#007cc0]"
                 />
@@ -748,8 +881,23 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
                         تغییر لینک
                       </button>
                     )}
+                    {hasBrowserSavedCloud && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          clearSavedDbConnectionUrl('CLOUD');
+                          setHasBrowserSavedCloud(false);
+                          setCloudDbUrl('');
+                          setCloudTestResult(null);
+                        }}
+                        className="text-[11px] text-[#bb0000] hover:underline px-1.5 py-1 cursor-pointer whitespace-nowrap"
+                        title="حذف لینک و رمز ابری از حافظه مرورگر"
+                      >
+                        پاک‌کردن از مرورگر
+                      </button>
+                    )}
                   </div>
-                  <span className="text-[10px] text-[#666666]">پیشنهاد: Session Pooler سوپابیس (پس از تست موفق، همیشه ذخیره می‌ماند)</span>
+                  <span className="text-[10px] text-[#666666]">پیشنهاد: Session Pooler سوپابیس (ذخیره خودکار در سرور و مرورگر)</span>
                 </div>
                 {cloudTestResult && (
                   <div className={`text-[11px] p-2 rounded-sm border ${
@@ -772,7 +920,11 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
                   <input
                     type="text"
                     value={deviceLabel}
-                    onChange={e => setDeviceLabel(e.target.value)}
+                    onChange={e => {
+                      const val = e.target.value;
+                      setDeviceLabel(val);
+                      saveDbConnectionSettings({ deviceLabel: val });
+                    }}
                     placeholder="مثلاً: لپتاپ مهندس حسینی یا کامپیوتر کارخانه"
                     className="w-full px-3 py-1.5 text-xs bg-white border border-[#bfbfbf] rounded-sm focus:outline-none focus:border-[#007cc0]"
                   />
@@ -783,7 +935,11 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
                   </label>
                   <select
                     value={activeTarget}
-                    onChange={e => setActiveTarget(e.target.value as any)}
+                    onChange={e => {
+                      const val = e.target.value as 'AUTO' | 'LOCAL' | 'CLOUD' | 'HYBRID_DISK';
+                      setActiveTarget(val);
+                      saveDbConnectionSettings({ activeTarget: val });
+                    }}
                     className="w-full px-2.5 py-1.5 text-xs font-semibold bg-white border border-[#bfbfbf] rounded-sm focus:outline-none focus:border-[#007cc0]"
                   >
                     <option value="AUTO">خودکار (ابتدا محلی، سپس ابری، در صورت قطعی دیسک پایدار)</option>
@@ -803,6 +959,7 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
                     onChange={async e => {
                       const next = e.target.checked;
                       setAutoCheckPref(next);
+                      saveDbConnectionSettings({ autoCheckCloudUpdates: next });
                       if (onToggleAutoCloudCheck) {
                         await onToggleAutoCloudCheck(next, checkIntervalPref);
                       }
@@ -826,6 +983,7 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
                     onChange={async e => {
                       const nextInt = Number(e.target.value);
                       setCheckIntervalPref(nextInt);
+                      saveDbConnectionSettings({ cloudCheckIntervalSec: nextInt });
                       if (autoCheckPref && onToggleAutoCloudCheck) {
                         await onToggleAutoCloudCheck(true, nextInt);
                       }
