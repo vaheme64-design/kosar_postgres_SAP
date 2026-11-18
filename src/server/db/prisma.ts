@@ -5,6 +5,14 @@ import path from 'node:path';
 import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { PrismaClient } from '@prisma/client';
+import { Client as PgClient } from 'pg';
+
+try {
+  (net as any).setDefaultAutoSelectFamily?.(true);
+  (net as any).setDefaultAutoSelectFamilyAttemptTimeout?.(1000);
+} catch {
+  // ignore if unsupported in runtime
+}
 
 /**
  * KPIMS Enterprise Database Connection & Hybrid Durable Persistence Configuration
@@ -637,19 +645,22 @@ const enrichPoolerParameters = (rawUrl: string): string => {
         parsed.searchParams.set('connection_limit', '3');
       }
       if (!parsed.searchParams.has('pool_timeout')) {
-        parsed.searchParams.set('pool_timeout', '15');
+        parsed.searchParams.set('pool_timeout', '20');
       }
       if (!parsed.searchParams.has('connect_timeout')) {
-        parsed.searchParams.set('connect_timeout', '15');
+        parsed.searchParams.set('connect_timeout', '20');
       }
       return parsed.toString();
     }
     if (!isLocalhostUrl(rawUrl)) {
+      if (!parsed.searchParams.has('connection_limit')) {
+        parsed.searchParams.set('connection_limit', '2');
+      }
       if (!parsed.searchParams.has('connect_timeout')) {
-        parsed.searchParams.set('connect_timeout', '15');
+        parsed.searchParams.set('connect_timeout', '20');
       }
       if (!parsed.searchParams.has('pool_timeout')) {
-        parsed.searchParams.set('pool_timeout', '15');
+        parsed.searchParams.set('pool_timeout', '20');
       }
       if (
         (host.includes('supabase.co') || host.includes('supabase.com') || host.includes('neon.tech')) &&
@@ -1028,7 +1039,7 @@ async function probePostgresWireProtocol(rawUrl: string, timeoutMs: number): Pro
   }
 }
 
-export async function testSingleDatabaseUrl(rawUrl: string, timeoutMs = 6000): Promise<{
+export async function testSingleDatabaseUrl(rawUrl: string, timeoutMs = 8000): Promise<{
   success: boolean;
   isValidSyntax: boolean;
   isConnected: boolean;
@@ -1052,43 +1063,25 @@ export async function testSingleDatabaseUrl(rawUrl: string, timeoutMs = 6000): P
   }
 
   const start = Date.now();
-  const enriched = enrichPoolerParameters(normalized);
   try {
-    const wireOk = await probePostgresWireProtocol(enriched, timeoutMs);
-    if (!wireOk) {
-      return {
-        success: false,
-        isValidSyntax: true,
-        isConnected: false,
-        latencyMs: Date.now() - start,
-        maskedUrl,
-        message: 'سرور PostgreSQL روی این آدرس در دسترس نیست یا پاسخ Wire-Protocol را رد کرد.',
-        error: 'WIRE_PROTOCOL_UNREACHABLE',
-      };
-    }
-
-    const tempClient = new PrismaClient({
-      datasources: { db: { url: enriched } },
-      log: [],
-    });
-    try {
-      await Promise.race([
-        tempClient.$queryRaw`SELECT 1 as ok`,
-        new Promise((_, reject) => setTimeout(() => reject(new Error('DB connection test timeout')), timeoutMs)),
-      ]);
-      const latencyMs = Date.now() - start;
-      clearCloudManifestCache();
-      return {
-        success: true,
-        isValidSyntax: true,
-        isConnected: true,
-        latencyMs,
-        maskedUrl,
-        message: `اتصال به پایگاه داده با موفقیت برقرار شد (${latencyMs} ms).`,
-      };
-    } finally {
-      await tempClient.$disconnect().catch(() => {});
-    }
+    await withNodePgClient(
+      normalized,
+      timeoutMs,
+      async pgClient => {
+        await pgClient.query('SELECT 1 as ok');
+      },
+      { retries: 1 },
+    );
+    const latencyMs = Date.now() - start;
+    clearCloudManifestCache();
+    return {
+      success: true,
+      isValidSyntax: true,
+      isConnected: true,
+      latencyMs,
+      maskedUrl,
+      message: `اتصال به پایگاه داده با موفقیت برقرار شد (${latencyMs} ms).`,
+    };
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     return {
@@ -1097,7 +1090,7 @@ export async function testSingleDatabaseUrl(rawUrl: string, timeoutMs = 6000): P
       isConnected: false,
       latencyMs: Date.now() - start,
       maskedUrl,
-      message: `خطا در احراز هویت یا کوئری آزمایشی پایگاه داده: ${errMsg.slice(0, 140)}`,
+      message: errMsg,
       error: errMsg,
     };
   }
@@ -1573,63 +1566,148 @@ export async function ensurePostgresSchemaReady(
   return global.__kpimsSchemaEnsurePromise;
 }
 
+const isTransientPgSocketError = (err: unknown): boolean => {
+  const code = String((err as any)?.code || '').toUpperCase();
+  const msg = err instanceof Error ? err.message : String(err || '');
+  return (
+    ['ETIMEDOUT', 'ECONNRESET', 'EPIPE', 'ENETUNREACH', 'EHOSTUNREACH', 'EAI_AGAIN', 'ECONNABORTED'].includes(code) ||
+    /timeout|Connection terminated unexpectedly|socket hang up|read ECONNRESET|ECONNREFUSED|ENETUNREACH/i.test(msg)
+  );
+};
+
+export const formatPgConnectionErrorFa = (err: unknown, rawUrl: string): string => {
+  const rawMsg = err instanceof Error ? err.message : String(err || 'خطای ناشناخته اتصال');
+  const code = String((err as any)?.code || '').toUpperCase();
+  if (code === '28P01' || /password authentication failed/i.test(rawMsg)) {
+    return 'نام کاربری یا رمز عبور پایگاه داده اشتباه است (28P01).';
+  }
+  if (code === '3D000' || /database .* does not exist/i.test(rawMsg)) {
+    return `پایگاه داده نام‌برده در سرور وجود ندارد (${rawMsg}).`;
+  }
+  try {
+    const parsed = new URL(rawUrl);
+    const host = parsed.hostname.toLowerCase();
+    if (
+      host.startsWith('db.') &&
+      (host.endsWith('.supabase.co') || host.endsWith('.supabase.com')) &&
+      (isTransientPgSocketError(err) || /ECONNREFUSED|ENOTFOUND|P1001/i.test(rawMsg))
+    ) {
+      return `شبکه فعلی امکان برقراری اتصال پایدار به هاست مستقیم Supabase (${host}:5432 — مبتنی بر IPv6) را ندارد. لطفاً لینک Session Pooler سوپابیس (pooler.supabase.com دارای IPv4) را جایگزین کنید. [${rawMsg.slice(0, 120)}]`;
+    }
+  } catch {
+    // ignore URL parse
+  }
+  return rawMsg;
+};
+
 /**
- * Execute operations against an arbitrary PostgreSQL URL (e.g., Cloud DB while actively working on Local DB).
- * Background polling keeps a fast Wire-Protocol preflight so unreachable remote databases drop quietly;
- * explicit user Push / Pull / manual Fetch bypasses raw-socket veto so Prisma connects directly with full TLS/timeout handling.
+ * Pure-Node PostgreSQL (`pg.Client`) executor for Cross-Machine Sync, Manifest Check, Push, Pull, and URL testing.
+ * Bypasses Prisma Rust Query Engine completely so Windows IPv6 / TLS / proxy environments that pass Node socket
+ * connectivity never hit Prisma P1001 pooler errors.
  */
-export async function withScopedPgClient<T>(
+export async function withNodePgClient<T>(
   rawUrl: string,
   timeoutMs: number,
-  fn: (client: PrismaClient, enrichedUrl: string) => Promise<T>,
-  options?: { skipWireProbe?: boolean; probeTimeoutMs?: number },
+  fn: (pgClient: PgClient, enrichedUrl: string) => Promise<T>,
+  options?: { retries?: number },
 ): Promise<T> {
   const normalized = normalizePgUrl(rawUrl);
   if (!isValidPostgresUrlSyntax(normalized)) {
     throw new Error('آدرس اتصال PostgreSQL معتبر نیست.');
   }
   const enriched = enrichPoolerParameters(normalized);
+  const parsed = new URL(normalized);
+  const host = parsed.hostname;
+  const port = Number(parsed.port || 5432);
+  const user = decodeURIComponent(parsed.username || 'postgres');
+  const password = decodeURIComponent(parsed.password || '');
+  const database = decodeURIComponent(parsed.pathname.replace(/^\//, '') || 'postgres');
+  const sslMode = (parsed.searchParams.get('sslmode') || '').toLowerCase();
+  const disableSsl = sslMode === 'disable';
+  const preferSsl =
+    !disableSsl &&
+    (!isLocalhostUrl(normalized) ||
+      sslMode === 'require' ||
+      sslMode === 'verify-ca' ||
+      sslMode === 'verify-full' ||
+      sslMode === 'prefer');
 
-  if (!options?.skipWireProbe) {
-    const probeMs = Math.min(timeoutMs, options?.probeTimeoutMs ?? 6000);
-    const wireOk = await probePostgresWireProtocol(enriched, probeMs);
-    if (!wireOk) {
-      throw new Error('سرور PostgreSQL مقصد در این لحظه در دسترس نیست (Wire-Protocol Unreachable).');
+  const maxRetries = Math.max(0, Math.min(2, options?.retries ?? 1));
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    let trySsl = preferSsl;
+    for (let sslFallbackStep = 0; sslFallbackStep < 2; sslFallbackStep++) {
+      const client = new PgClient({
+        host,
+        port,
+        user,
+        password,
+        database,
+        ssl: trySsl ? { rejectUnauthorized: false, servername: host } : false,
+        connectionTimeoutMillis: Math.max(5000, timeoutMs),
+        query_timeout: Math.max(10_000, timeoutMs),
+        statement_timeout: Math.max(10_000, timeoutMs),
+        keepAlive: true,
+      });
+      client.on('error', () => {
+        // Prevent uncaught EventEmitter errors on idle drop
+      });
+
+      try {
+        await Promise.race([
+          client.connect(),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('مهلت زمانی برقراری اتصال به پایگاه داده به پایان رسید.')), timeoutMs),
+          ),
+        ]);
+        const result = await Promise.race([
+          fn(client, enriched),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('مهلت زمانی اجرای کوئری پایگاه داده به پایان رسید.')), Math.max(timeoutMs, 15_000)),
+          ),
+        ]);
+        return result;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err || '');
+        if (trySsl && sslFallbackStep === 0 && /does not support SSL/i.test(msg)) {
+          trySsl = false;
+          continue;
+        }
+        lastError = err;
+        break;
+      } finally {
+        await client.end().catch(() => {});
+      }
     }
+
+    if (attempt < maxRetries && isTransientPgSocketError(lastError)) {
+      await new Promise(resolve => setTimeout(resolve, 350 * (attempt + 1)));
+      continue;
+    }
+    break;
   }
 
-  const client = new PrismaClient({
-    datasources: { db: { url: enriched } },
-    log: [],
-  });
-  try {
-    return await Promise.race([
-      fn(client, enriched),
-      new Promise<T>((_, reject) =>
-        setTimeout(() => reject(new Error('مهلت زمانی عملیات پایگاه داده به پایان رسید.')), timeoutMs)
-      ),
-    ]);
-  } finally {
-    await client.$disconnect().catch(() => {});
-  }
+  throw new Error(formatPgConnectionErrorFa(lastError, normalized));
 }
 
-export async function ensureTargetSnapshotTables(client: PrismaClient): Promise<void> {
-  await client.$executeRawUnsafe(
+export async function ensureTargetSnapshotTables(client: PgClient): Promise<void> {
+  await client.query(
     `CREATE TABLE IF NOT EXISTS "inventory_app_state_snapshots" ("id" TEXT NOT NULL PRIMARY KEY, "payload" JSONB NOT NULL, "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
   );
-  await client.$executeRawUnsafe(
+  await client.query(
     `CREATE TABLE IF NOT EXISTS "wip_state_snapshots" ("id" TEXT NOT NULL PRIMARY KEY, "payload" JSONB NOT NULL, "version" INTEGER NOT NULL DEFAULT 1, "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
   );
 }
 
-export async function ensureTargetFullSchemaBestEffort(client: PrismaClient, targetUrl: string): Promise<boolean> {
+export async function ensureTargetFullSchemaBestEffort(client: PgClient, targetUrl: string): Promise<boolean> {
   await ensureTargetSnapshotTables(client);
   try {
-    const rows = (await client.$queryRawUnsafe(
+    const res = await client.query(
       `SELECT to_regclass('public.units_of_measure')::text AS uom, to_regclass('public.parts')::text AS parts`,
-    )) as Array<{ uom: string | null; parts: string | null }>;
-    if (rows?.[0]?.uom && rows?.[0]?.parts) {
+    );
+    const row = res.rows?.[0] as { uom: string | null; parts: string | null } | undefined;
+    if (row?.uom && row?.parts) {
       return true;
     }
     const pushed = await runPrismaDbPush(targetUrl);
@@ -1642,11 +1720,27 @@ export async function ensureTargetFullSchemaBestEffort(client: PrismaClient, tar
   return false;
 }
 
+export function setCloudManifestCache(
+  cloudUrl: string,
+  manifest: CloudSyncManifest,
+  latencyMs = 0,
+): void {
+  global.__kpimsCloudManifestCache = {
+    cloudUrl,
+    checkedAtMs: Date.now(),
+    checkedAtIso: new Date().toISOString(),
+    reachable: true,
+    latencyMs,
+    manifest,
+    hasLegacySnapshot: true,
+  };
+}
+
 const MANIFEST_CACHE_TTL_MS = 25_000;
 
 export async function fetchCloudSyncManifestLightweight(
   force = false,
-  timeoutMs = force ? 12_000 : 6000,
+  timeoutMs = force ? 14_000 : 8000,
 ): Promise<{
   cloudConfigured: boolean;
   cloudReachable: boolean;
@@ -1694,18 +1788,19 @@ export async function fetchCloudSyncManifestLightweight(
   const started = Date.now();
   const checkedAtIso = new Date().toISOString();
   try {
-    const result = await withScopedPgClient(
+    const result = await withNodePgClient(
       cfg.cloudDbUrl,
       timeoutMs,
       async client => {
         try {
-          const rows = (await client.$queryRawUnsafe(
+          const queryRes = await client.query(
             `SELECT "id", CASE WHEN "id" = $1 THEN "payload" ELSE NULL END AS "payload", "updatedAt" FROM "inventory_app_state_snapshots" WHERE "id" IN ($1, 'inventory-app-state')`,
-            CLOUD_SYNC_MANIFEST_ID,
-          )) as Array<{ id: string; payload: any; updatedAt: Date | string }>;
+            [CLOUD_SYNC_MANIFEST_ID],
+          );
+          const rows = (queryRes.rows || []) as Array<{ id: string; payload: any; updatedAt: Date | string }>;
 
-          const manifestRow = rows?.find(r => r.id === CLOUD_SYNC_MANIFEST_ID && r.payload);
-          const legacyRow = rows?.find(r => r.id === 'inventory-app-state');
+          const manifestRow = rows.find(r => r.id === CLOUD_SYNC_MANIFEST_ID && r.payload);
+          const legacyRow = rows.find(r => r.id === 'inventory-app-state');
 
           if (manifestRow) {
             const p = typeof manifestRow.payload === 'string'
@@ -1734,7 +1829,7 @@ export async function fetchCloudSyncManifestLightweight(
           throw queryErr;
         }
       },
-      { skipWireProbe: force, probeTimeoutMs: 6000 },
+      { retries: force ? 1 : 0 },
     );
 
     const latencyMs = Date.now() - started;

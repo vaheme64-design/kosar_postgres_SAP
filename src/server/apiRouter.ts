@@ -49,9 +49,10 @@ import {
   SyncEntityCounts,
   GitSyncStatusCode,
   clearCloudManifestCache,
+  setCloudManifestCache,
   recordLocalStateFingerprint,
   recordCloudSyncCompleted,
-  withScopedPgClient,
+  withNodePgClient,
   ensureTargetSnapshotTables,
   ensureTargetFullSchemaBestEffort,
   fetchCloudSyncManifestLightweight,
@@ -3248,7 +3249,7 @@ apiRouter.post('/db/test', async (req: Request, res: Response) => {
         error: 'لینک اتصال پایگاه داده برای تست وارد نشده است.',
       });
     }
-    const result = await testSingleDatabaseUrl(urlToTest, 4500);
+    const result = await testSingleDatabaseUrl(urlToTest, 8000);
     res.status(result.success ? 200 : 400).json(result);
   } catch (error) {
     res.status(500).json({
@@ -3401,116 +3402,168 @@ async function writeFullSnapshotBundleToPgUrl(
   targetUrl: string,
   inventoryPayload: any,
   wipPayload: ReturnType<typeof exportProductionWipSnapshotPayload>,
-  manifest: CloudSyncManifest,
+  manifestOrBuilder: CloudSyncManifest | ((remoteExistingManifest: CloudSyncManifest | null) => CloudSyncManifest),
   alsoSyncRelationalParts = true,
-): Promise<{ relationalPartsSynced: number }> {
-  return withScopedPgClient(
+): Promise<{ relationalPartsSynced: number; manifest: CloudSyncManifest; latencyMs: number }> {
+  const started = Date.now();
+  return withNodePgClient(
     targetUrl,
-    30_000,
-    async (client, enrichedUrl) => {
-    const schemaReady = await ensureTargetFullSchemaBestEffort(client, enrichedUrl);
-    await ensureTargetSnapshotTables(client);
+    45_000,
+    async (pgClient, enrichedUrl) => {
+      const schemaReady = await ensureTargetFullSchemaBestEffort(pgClient, enrichedUrl);
+      await ensureTargetSnapshotTables(pgClient);
 
-    await client.$executeRawUnsafe(
-      `INSERT INTO "inventory_app_state_snapshots" ("id", "payload", "updatedAt")
-       VALUES ($1, $2::jsonb, CURRENT_TIMESTAMP)
-       ON CONFLICT ("id") DO UPDATE SET "payload" = EXCLUDED."payload", "updatedAt" = CURRENT_TIMESTAMP`,
-      INVENTORY_APP_SNAPSHOT_ID,
-      JSON.stringify(inventoryPayload),
-    );
-
-    await client.$executeRawUnsafe(
-      `INSERT INTO "wip_state_snapshots" ("id", "payload", "version", "updatedAt")
-       VALUES ($1, $2::jsonb, $3, CURRENT_TIMESTAMP)
-       ON CONFLICT ("id") DO UPDATE SET "payload" = EXCLUDED."payload", "version" = EXCLUDED."version", "updatedAt" = CURRENT_TIMESTAMP`,
-      'production-wip-state',
-      JSON.stringify(wipPayload),
-      manifest.revision,
-    );
-
-    await client.$executeRawUnsafe(
-      `INSERT INTO "inventory_app_state_snapshots" ("id", "payload", "updatedAt")
-       VALUES ($1, $2::jsonb, CURRENT_TIMESTAMP)
-       ON CONFLICT ("id") DO UPDATE SET "payload" = EXCLUDED."payload", "updatedAt" = CURRENT_TIMESTAMP`,
-      CLOUD_SYNC_MANIFEST_ID,
-      JSON.stringify(manifest),
-    );
-
-    let relationalPartsSynced = 0;
-    if (alsoSyncRelationalParts && schemaReady && Array.isArray(inventoryPayload?.parts) && inventoryPayload.parts.length > 0) {
-      try {
-        for (const u of unitsStore) {
-          const code = String(u.symbol || 'PCS').trim().toUpperCase();
-          if (!code) continue;
-          await client.unitOfMeasure.upsert({
-            where: { code },
-            create: { id: u.id && u.id.startsWith('UNIT-') ? u.id : `UNIT-${code}`, code, name: u.title || `واحد ${code}`, symbol: code, isBase: code === 'KG' || code === 'PCS', active: true },
-            update: { name: u.title || `واحد ${code}`, symbol: code, active: true },
-          });
+      let manifest: CloudSyncManifest;
+      if (typeof manifestOrBuilder === 'function') {
+        let remoteManifest: CloudSyncManifest | null = null;
+        try {
+          const curRes = await pgClient.query(
+            `SELECT "payload" FROM "inventory_app_state_snapshots" WHERE "id" = $1 LIMIT 1`,
+            [CLOUD_SYNC_MANIFEST_ID],
+          );
+          const rawPayload = curRes.rows?.[0]?.payload;
+          if (rawPayload) {
+            remoteManifest = typeof rawPayload === 'string' ? JSON.parse(rawPayload) : rawPayload;
+          }
+        } catch {
+          remoteManifest = null;
         }
-        const existingUoms = await client.unitOfMeasure.findMany({ select: { id: true, code: true } });
-        const uomMap = new Map(existingUoms.map((u: any) => [String(u.code).toUpperCase(), u.id]));
-        const fallbackUomId = uomMap.get('PCS') || existingUoms[0]?.id;
+        manifest = manifestOrBuilder(remoteManifest);
+      } else {
+        manifest = manifestOrBuilder;
+      }
 
-        if (fallbackUomId) {
-          const CHUNK = 50;
-          const partsArr = inventoryPayload.parts as Part[];
-          for (let i = 0; i < partsArr.length; i += CHUNK) {
-            const chunk = partsArr.slice(i, i + CHUNK);
-            await client.$transaction(
-              chunk
-                .filter(p => p?.code && p?.name)
-                .map(p => {
-                  const partNumber = normalizeExcelDigits(p.code);
+      await pgClient.query(
+        `INSERT INTO "inventory_app_state_snapshots" ("id", "payload", "updatedAt")
+         VALUES ($1, $2::jsonb, CURRENT_TIMESTAMP)
+         ON CONFLICT ("id") DO UPDATE SET "payload" = EXCLUDED."payload", "updatedAt" = CURRENT_TIMESTAMP`,
+        [INVENTORY_APP_SNAPSHOT_ID, JSON.stringify(inventoryPayload)],
+      );
+
+      await pgClient.query(
+        `INSERT INTO "wip_state_snapshots" ("id", "payload", "version", "updatedAt")
+         VALUES ($1, $2::jsonb, $3, CURRENT_TIMESTAMP)
+         ON CONFLICT ("id") DO UPDATE SET "payload" = EXCLUDED."payload", "version" = EXCLUDED."version", "updatedAt" = CURRENT_TIMESTAMP`,
+        ['production-wip-state', JSON.stringify(wipPayload), manifest.revision],
+      );
+
+      await pgClient.query(
+        `INSERT INTO "inventory_app_state_snapshots" ("id", "payload", "updatedAt")
+         VALUES ($1, $2::jsonb, CURRENT_TIMESTAMP)
+         ON CONFLICT ("id") DO UPDATE SET "payload" = EXCLUDED."payload", "updatedAt" = CURRENT_TIMESTAMP`,
+        [CLOUD_SYNC_MANIFEST_ID, JSON.stringify(manifest)],
+      );
+
+      let relationalPartsSynced = 0;
+      if (alsoSyncRelationalParts && schemaReady && Array.isArray(inventoryPayload?.parts) && inventoryPayload.parts.length > 0) {
+        try {
+          for (const u of unitsStore) {
+            const code = String(u.symbol || 'PCS').trim().toUpperCase();
+            if (!code) continue;
+            const uId = u.id && u.id.startsWith('UNIT-') ? u.id : `UNIT-${code}`;
+            const uName = u.title || `واحد ${code}`;
+            const isBase = code === 'KG' || code === 'PCS';
+            await pgClient.query(
+              `INSERT INTO "units_of_measure" ("id", "code", "name", "symbol", "isBase", "active", "createdAt")
+               VALUES ($1, $2, $3, $4, $5, true, CURRENT_TIMESTAMP)
+               ON CONFLICT ("code") DO UPDATE SET "name" = EXCLUDED."name", "symbol" = EXCLUDED."symbol", "active" = true`,
+              [uId, code, uName, code, isBase],
+            );
+          }
+
+          const uomRes = await pgClient.query(`SELECT "id", "code" FROM "units_of_measure"`);
+          const existingUoms = (uomRes.rows || []) as Array<{ id: string; code: string }>;
+          const uomMap = new Map(existingUoms.map(u => [String(u.code).toUpperCase(), u.id]));
+          const fallbackUomId = uomMap.get('PCS') || existingUoms[0]?.id;
+
+          if (fallbackUomId) {
+            // Deduplicate by normalized partNumber to guarantee PostgreSQL ON CONFLICT does not touch same key twice in a batch
+            const dedupPartsMap = new Map<string, Part>();
+            for (const p of inventoryPayload.parts as Part[]) {
+              if (!p?.code || !p?.name) continue;
+              const partNumber = normalizeExcelDigits(p.code);
+              if (partNumber) dedupPartsMap.set(partNumber, p);
+            }
+            const uniquePartsList = Array.from(dedupPartsMap.entries());
+            const CHUNK = 200;
+
+            await pgClient.query('BEGIN');
+            try {
+              for (let i = 0; i < uniquePartsList.length; i += CHUNK) {
+                const chunk = uniquePartsList.slice(i, i + CHUNK);
+                const valuesSql: string[] = [];
+                const params: any[] = [];
+                let pIdx = 1;
+
+                for (const [partNumber, p] of chunk) {
                   const normCat = normalizePartCategory(p.category, partNumber);
                   const normUom = normalizePartUnit(p.unit, normCat);
                   const uomId = uomMap.get(normUom) || fallbackUomId;
                   const weightVal = Math.max(0.0001, parseExcelNumber(p.weightPerUnitKg, 1));
                   const minSafety = Math.max(0, parseExcelNumber(p.minStock, 0));
-                  return client.part.upsert({
-                    where: { partNumber },
-                    create: {
-                      partNumber,
-                      supplierPartNumber: p.sapcoCode ? String(p.sapcoCode).trim() : null,
-                      name: String(p.name).trim(),
-                      category: normCat as any,
-                      carModel: p.carModel ? String(p.carModel).trim() : null,
-                      unitId: uomId,
-                      weightNetKg: weightVal,
-                      weightGrossKg: weightVal,
-                      scrapNormPercent: 0,
-                      minSafetyStock: minSafety,
-                      maxStock: p.maxStock != null && Number(p.maxStock) > 0 ? parseExcelNumber(p.maxStock, 0) : null,
-                      leadTimeDays: Math.max(1, Math.round(Number(p.leadTimeDays) || 1)),
-                      active: true,
-                    },
-                    update: {
-                      supplierPartNumber: p.sapcoCode ? String(p.sapcoCode).trim() : null,
-                      name: String(p.name).trim(),
-                      category: normCat as any,
-                      carModel: p.carModel ? String(p.carModel).trim() : null,
-                      unitId: uomId,
-                      weightNetKg: weightVal,
-                      weightGrossKg: weightVal,
-                      minSafetyStock: minSafety,
-                      maxStock: p.maxStock != null && Number(p.maxStock) > 0 ? parseExcelNumber(p.maxStock, 0) : null,
-                      leadTimeDays: Math.max(1, Math.round(Number(p.leadTimeDays) || 1)),
-                      active: true,
-                    },
-                  });
-                }),
-            );
-            relationalPartsSynced += chunk.length;
-          }
-        }
-      } catch (relErr) {
-        console.warn('[KPIMS Cloud Sync] Relational part batch sync warning:', relErr instanceof Error ? relErr.message : relErr);
-      }
-    }
+                  const maxStock = p.maxStock != null && Number(p.maxStock) > 0 ? parseExcelNumber(p.maxStock, 0) : null;
+                  const leadTime = Math.max(1, Math.round(Number(p.leadTimeDays) || 1));
+                  const sapcoCode = p.sapcoCode ? String(p.sapcoCode).trim() : null;
+                  const carModel = p.carModel ? String(p.carModel).trim() : null;
+                  const name = String(p.name).trim();
 
-    return { relationalPartsSynced };
-  },
-  { skipWireProbe: true });
+                  valuesSql.push(
+                    `($${pIdx}, $${pIdx + 1}, $${pIdx + 2}, $${pIdx + 3}, $${pIdx + 4}::"PartCategory", $${pIdx + 5}, $${pIdx + 6}, $${pIdx + 7}, $${pIdx + 8}, 0, $${pIdx + 9}, $${pIdx + 10}, $${pIdx + 11}, true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+                  );
+                  params.push(
+                    crypto.randomUUID(),
+                    partNumber,
+                    sapcoCode,
+                    name,
+                    normCat,
+                    carModel,
+                    uomId,
+                    weightVal,
+                    weightVal,
+                    minSafety,
+                    maxStock,
+                    leadTime,
+                  );
+                  pIdx += 12;
+                }
+
+                if (valuesSql.length > 0) {
+                  await pgClient.query(
+                    `INSERT INTO "parts" ("id", "partNumber", "supplierPartNumber", "name", "category", "carModel", "unitId", "weightNetKg", "weightGrossKg", "scrapNormPercent", "minSafetyStock", "maxStock", "leadTimeDays", "active", "createdAt", "updatedAt")
+                     VALUES ${valuesSql.join(', ')}
+                     ON CONFLICT ("partNumber") DO UPDATE SET
+                       "supplierPartNumber" = EXCLUDED."supplierPartNumber",
+                       "name" = EXCLUDED."name",
+                       "category" = EXCLUDED."category",
+                       "carModel" = EXCLUDED."carModel",
+                       "unitId" = EXCLUDED."unitId",
+                       "weightNetKg" = EXCLUDED."weightNetKg",
+                       "weightGrossKg" = EXCLUDED."weightGrossKg",
+                       "minSafetyStock" = EXCLUDED."minSafetyStock",
+                       "maxStock" = EXCLUDED."maxStock",
+                       "leadTimeDays" = EXCLUDED."leadTimeDays",
+                       "active" = true,
+                       "updatedAt" = CURRENT_TIMESTAMP`,
+                    params,
+                  );
+                  relationalPartsSynced += chunk.length;
+                }
+              }
+              await pgClient.query('COMMIT');
+            } catch (txErr) {
+              await pgClient.query('ROLLBACK').catch(() => {});
+              throw txErr;
+            }
+          }
+        } catch (relErr) {
+          console.warn('[KPIMS Cloud Sync] Relational part batch sync warning:', relErr instanceof Error ? relErr.message : relErr);
+        }
+      }
+
+      return { relationalPartsSynced, manifest, latencyMs: Date.now() - started };
+    },
+    { retries: 1 },
+  );
 }
 
 // Lightweight Git-like Update Checker (zero heavy payload transfer)
@@ -3527,7 +3580,7 @@ apiRouter.get('/db/sync/check', async (req: Request, res: Response) => {
   }
 });
 
-// Explicit Push: Laptop / Current Machine -> Cloud (Online) DB
+// Explicit Push: Laptop / Current Machine -> Cloud (Online) DB (Single pure-Node pg connection)
 apiRouter.post('/db/sync/push', async (req: Request, res: Response) => {
   try {
     const cfg = readDualDbStoredConfig();
@@ -3544,49 +3597,40 @@ apiRouter.post('/db/sync/push', async (req: Request, res: Response) => {
         : cfg.deviceLabel || getDefaultDeviceLabel();
 
     const localInfo = computeLocalSyncSnapshotInfo();
-    const currentRemote = await fetchCloudSyncManifestLightweight(true, 12_000);
-    if (!currentRemote.cloudReachable) {
-      return res.status(503).json({
-        success: false,
-        error: currentRemote.error || 'امکان برقراری ارتباط با پایگاه داده آنلاین برای آپلود (Push) وجود ندارد.',
-      });
-    }
-
-    const nextRevision =
-      Math.max(
-        currentRemote.manifest?.revision || 0,
-        cfg.lastSyncedCloudRevision || 0,
-        cfg.lastLocalRevision || 0,
-      ) + 1;
-
-    const manifest: CloudSyncManifest = {
-      schemaVersion: 1,
-      revision: nextRevision,
-      contentHash: localInfo.hash,
-      updatedAt: new Date().toISOString(),
-      deviceLabel: customDeviceLabel,
-      counts: localInfo.counts,
-    };
-
-    // Ensure local disk is up to date too
     writeInventoryDiskSnapshot(localInfo.inventoryPayload);
 
     const writeRes = await writeFullSnapshotBundleToPgUrl(
       cfg.cloudDbUrl,
       localInfo.inventoryPayload,
       localInfo.wipPayload,
-      manifest,
+      remoteManifest => {
+        const nextRevision =
+          Math.max(
+            remoteManifest?.revision || 0,
+            cfg.lastSyncedCloudRevision || 0,
+            cfg.lastLocalRevision || 0,
+          ) + 1;
+        return {
+          schemaVersion: 1,
+          revision: nextRevision,
+          contentHash: localInfo.hash,
+          updatedAt: new Date().toISOString(),
+          deviceLabel: customDeviceLabel,
+          counts: localInfo.counts,
+        };
+      },
       true,
     );
 
-    const summary = `آپلود کامل (Push #${manifest.revision}) از «${customDeviceLabel}» به دیتابیس آنلاین انجام شد (${localInfo.counts.parts} قطعه، ${localInfo.counts.manufacturingOrders} دستور تولید، ${localInfo.counts.inventoryDocs} سند انبار).`;
-    recordCloudSyncCompleted(manifest, localInfo.hash, summary);
+    const summary = `آپلود کامل (Push #${writeRes.manifest.revision}) از «${customDeviceLabel}» به دیتابیس آنلاین انجام شد (${localInfo.counts.parts} قطعه، ${localInfo.counts.manufacturingOrders} دستور تولید، ${localInfo.counts.inventoryDocs} سند انبار).`;
+    recordCloudSyncCompleted(writeRes.manifest, localInfo.hash, summary);
+    setCloudManifestCache(cfg.cloudDbUrl, writeRes.manifest, writeRes.latencyMs);
 
-    const checkResult = await evaluateCloudSyncStatus(true);
+    const checkResult = await evaluateCloudSyncStatus(false);
     res.json({
       success: true,
       message: summary,
-      manifest,
+      manifest: writeRes.manifest,
       relationalPartsSynced: writeRes.relationalPartsSynced,
       checkResult,
       status: await checkDatabaseConnection(false),
@@ -3610,50 +3654,56 @@ apiRouter.post('/db/sync/pull', async (_req: Request, res: Response) => {
       });
     }
 
-    const pulled = await withScopedPgClient(
+    const started = Date.now();
+    const pulled = await withNodePgClient(
       cfg.cloudDbUrl,
-      30_000,
-      async client => {
-        const regRows = (await client.$queryRawUnsafe(
+      45_000,
+      async pgClient => {
+        const regRes = await pgClient.query(
           `SELECT to_regclass('public.inventory_app_state_snapshots')::text AS snap, to_regclass('public.wip_state_snapshots')::text AS wip`,
-        )) as Array<{ snap: string | null; wip: string | null }>;
-        if (!regRows?.[0]?.snap) {
+        );
+        const regRow = regRes.rows?.[0] as { snap: string | null; wip: string | null } | undefined;
+        if (!regRow?.snap) {
           return null;
         }
 
-        const invRows = (await client.$queryRawUnsafe(
+        const invRes = await pgClient.query(
           `SELECT "payload", "updatedAt" FROM "inventory_app_state_snapshots" WHERE "id" = $1 LIMIT 1`,
-          INVENTORY_APP_SNAPSHOT_ID,
-        )) as Array<{ payload: any; updatedAt: Date | string }>;
-
-        const manifestRows = (await client.$queryRawUnsafe(
+          [INVENTORY_APP_SNAPSHOT_ID],
+        );
+        const manifestRes = await pgClient.query(
           `SELECT "payload", "updatedAt" FROM "inventory_app_state_snapshots" WHERE "id" = $1 LIMIT 1`,
-          CLOUD_SYNC_MANIFEST_ID,
-        )) as Array<{ payload: any; updatedAt: Date | string }>;
+          [CLOUD_SYNC_MANIFEST_ID],
+        );
 
         let wipRows: Array<{ payload: any; version: number }> = [];
-        if (regRows?.[0]?.wip) {
-          wipRows = (await client.$queryRawUnsafe(
+        if (regRow.wip) {
+          const wipRes = await pgClient.query(
             `SELECT "payload", "version" FROM "wip_state_snapshots" WHERE "id" = $1 LIMIT 1`,
-            'production-wip-state',
-          )) as Array<{ payload: any; version: number }>;
+            ['production-wip-state'],
+          );
+          wipRows = (wipRes.rows || []) as Array<{ payload: any; version: number }>;
         }
 
         const parseJson = (val: any) => (typeof val === 'string' ? JSON.parse(val) : val);
-        const invPayload = invRows?.[0]?.payload ? parseJson(invRows[0].payload) : null;
+        const invRow = invRes.rows?.[0] as { payload: any; updatedAt: Date | string } | undefined;
+        const manifestRow = manifestRes.rows?.[0] as { payload: any; updatedAt: Date | string } | undefined;
+
+        const invPayload = invRow?.payload ? parseJson(invRow.payload) : null;
         const wipPayload = wipRows?.[0]?.payload ? parseJson(wipRows[0].payload) : null;
-        const manifestPayload = manifestRows?.[0]?.payload ? (parseJson(manifestRows[0].payload) as CloudSyncManifest) : null;
+        const manifestPayload = manifestRow?.payload ? (parseJson(manifestRow.payload) as CloudSyncManifest) : null;
 
         return {
           invPayload,
-          invUpdatedAt: invRows?.[0]?.updatedAt ? new Date(invRows[0].updatedAt).toISOString() : undefined,
+          invUpdatedAt: invRow?.updatedAt ? new Date(invRow.updatedAt).toISOString() : undefined,
           wipPayload,
           wipVersion: wipRows?.[0]?.version,
           manifestPayload,
         };
       },
-      { skipWireProbe: true },
+      { retries: 1 },
     );
+    const pullLatencyMs = Date.now() - started;
 
     if (!pulled || (!pulled.invPayload && !pulled.wipPayload)) {
       return res.status(404).json({
@@ -3700,9 +3750,9 @@ apiRouter.post('/db/sync/pull', async (_req: Request, res: Response) => {
 
     const summary = `به‌روزرسانی محلی (Pull #${resolvedManifest.revision}) از «${resolvedManifest.deviceLabel}» با موفقیت انجام شد (${postPullInfo.counts.parts} قطعه، ${postPullInfo.counts.manufacturingOrders} دستور تولید${localPgUpdated ? ' + ذخیره در PostgreSQL محلی' : ''}).`;
     recordCloudSyncCompleted(resolvedManifest, postPullInfo.hash, summary);
-    clearCloudManifestCache();
+    setCloudManifestCache(cfg.cloudDbUrl, resolvedManifest, pullLatencyMs);
 
-    const checkResult = await evaluateCloudSyncStatus(true);
+    const checkResult = await evaluateCloudSyncStatus(false);
     res.json({
       success: true,
       message: summary,

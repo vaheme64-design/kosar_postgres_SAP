@@ -638,7 +638,7 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
                   >
                     {testingTarget === 'CLOUD' ? 'در حال تست ابری...' : 'تست اتصال ابری'}
                   </button>
-                  <span className="text-[10px] text-[#666666]">مناسب دسترسی از راه دور و Supabase</span>
+                  <span className="text-[10px] text-[#666666]">پیشنهاد شبکه اداری: لینک Session Pooler سوپابیس (دارای IPv4)</span>
                 </div>
                 {cloudTestResult && (
                   <div className={`text-[11px] p-2 rounded-sm border ${
@@ -839,7 +839,14 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
                         </div>
                       </>
                     ) : (
-                      <div className="text-[11px] text-[#666666]">{activeSyncCheck.messageFa}</div>
+                      <div className="space-y-1">
+                        <div className="text-[11px] text-[#666666]">{activeSyncCheck.messageFa}</div>
+                        {activeSyncCheck.error && (
+                          <div className="text-[10px] text-[#bb0000] bg-[#fff5f5] border border-[#f5c6cb] px-2 py-1 rounded-sm">
+                            {activeSyncCheck.error}
+                          </div>
+                        )}
+                      </div>
                     )}
                   </div>
                 </div>
