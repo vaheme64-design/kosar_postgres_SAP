@@ -293,6 +293,10 @@ export const PartsView: React.FC<PartsViewProps> = ({ parts, onSavePart, onRefre
       const res = await onSavePart(formData);
       if (res.success) {
         setIsModalOpen(false);
+        setActionBanner({
+          type: 'success',
+          text: res.message || `مشخصات قطعه «${formData.name}» (${formData.code}) با موفقیت ذخیره و در کل سامانه همگام‌سازی شد.`,
+        });
       } else {
         setFormError(res.error || 'خطا در ثبت مشخصات قطعه');
       }

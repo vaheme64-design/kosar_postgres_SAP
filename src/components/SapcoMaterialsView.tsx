@@ -292,14 +292,46 @@ export const SapcoMaterialsView: React.FC<SapcoMaterialsViewProps> = ({
             },
           ];
 
+    const partsById = new Map(parts.map(p => [p.id, p]));
+    const partsByCode = new Map(parts.map(p => [String(p.code || '').trim().toUpperCase(), p]));
+
     return sourceList.map((c, idx) => {
       const savedMeta =
         coilBatchLinks[c.id] ||
         coilBatchLinks[c.coilNumber] ||
         DEFAULT_HEAT_LINKS[String(idx)];
 
+      const liveCoilPart =
+        (c.partId ? partsById.get(c.partId) : undefined) ||
+        (c.partCode ? partsByCode.get(String(c.partCode).trim().toUpperCase()) : undefined);
+
+      const rawLinked =
+        savedMeta?.linkedProductionBatches ||
+        c.linkedProductionBatches ||
+        [];
+
+      const syncedLinked = rawLinked.map(b => {
+        const liveBatchPart =
+          (b.partId ? partsById.get(b.partId) : undefined) ||
+          (b.partCode ? partsByCode.get(String(b.partCode).trim().toUpperCase()) : undefined) ||
+          (b.moCode === 'MO-ECU-ASY-01' ? partsById.get('PRT-FGD-ECU-BRK') : undefined) ||
+          (b.moCode === 'MO-ECU-MAIN-01' ? partsById.get('PRT-WIP-ECU-MAIN') : undefined) ||
+          (b.moCode === 'MO-ECU-COMP-01' ? partsById.get('PRT-WIP-ECU-COMP') : undefined);
+        return liveBatchPart
+          ? {
+              ...b,
+              partId: liveBatchPart.id,
+              partCode: liveBatchPart.code,
+              partName: liveBatchPart.name,
+            }
+          : b;
+      });
+
       return {
         ...c,
+        partId: liveCoilPart?.id || c.partId,
+        partCode: liveCoilPart?.code || c.partCode,
+        partName: liveCoilPart?.name || c.partName,
         heatNumber:
           savedMeta?.heatNumber ||
           c.heatNumber ||
@@ -308,13 +340,10 @@ export const SapcoMaterialsView: React.FC<SapcoMaterialsViewProps> = ({
           savedMeta?.batchNumber ||
           c.batchNumber ||
           `BCH-SAP-1404-${101 + idx}`,
-        linkedProductionBatches:
-          savedMeta?.linkedProductionBatches ||
-          c.linkedProductionBatches ||
-          [],
+        linkedProductionBatches: syncedLinked,
       };
     });
-  }, [coils, coilBatchLinks]);
+  }, [coils, coilBatchLinks, parts]);
 
   const handleAddGrade = async (e: React.FormEvent) => {
     e.preventDefault();

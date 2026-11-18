@@ -170,13 +170,21 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
   useEffect(() => {
     fetchTraceabilityChain();
-  }, [fetchTraceabilityChain, summary, recentTransactions.length]);
+  }, [fetchTraceabilityChain, summary, recentTransactions.length, parts]);
 
   useEffect(() => {
     const syncVip = () => setVipMap(loadVipPartsMap());
+    const syncMaster = () => {
+      setVipMap(loadVipPartsMap());
+      fetchTraceabilityChain();
+    };
     window.addEventListener('storage', syncVip);
-    return () => window.removeEventListener('storage', syncVip);
-  }, []);
+    window.addEventListener('kpims-master-data-updated', syncMaster);
+    return () => {
+      window.removeEventListener('storage', syncVip);
+      window.removeEventListener('kpims-master-data-updated', syncMaster);
+    };
+  }, [fetchTraceabilityChain]);
 
   // Group 3-Tier items for the top live post-consumption control strip
   const tierGroups = useMemo(() => {
@@ -184,13 +192,13 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     const wipItems = tierStock.filter(i => i.category === 'WIP_PART');
     const fgItems = tierStock.filter(i => i.category === 'FINISHED_GOOD');
 
-    const coilItem = rawItems.find(i => i.partCode.includes('COIL'));
+    const coilItem = rawItems.find(i => i.partId === 'PRT-RAW-ECU-COIL' || i.partCode.includes('COIL'));
     const nutItem = rawItems.find(i => i.partCode.includes('NUT'));
     const boltItem = rawItems.find(i => i.partCode.includes('BOLT'));
 
-    const wipMain = wipItems.find(i => i.partCode === 'WIP-ECU-MAIN-BRK');
-    const wipComp = wipItems.find(i => i.partCode === 'WIP-ECU-COMP-BRK');
-    const fgBrk = fgItems.find(i => i.partCode === 'SAPCO-ASY-ECU-BRK-01') || fgItems[0];
+    const wipMain = wipItems.find(i => i.partId === 'PRT-WIP-ECU-MAIN' || i.partCode === 'WIP-ECU-MAIN-BRK');
+    const wipComp = wipItems.find(i => i.partId === 'PRT-WIP-ECU-COMP' || i.partCode === 'WIP-ECU-COMP-BRK');
+    const fgBrk = fgItems.find(i => i.partId === 'PRT-FGD-ECU-BRK' || i.partCode === 'SAPCO-ASY-ECU-BRK-01') || fgItems[0];
 
     return {
       coilItem,

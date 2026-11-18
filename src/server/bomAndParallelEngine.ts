@@ -479,3 +479,211 @@ export function setAllTraceabilityTags(tags: TraceabilityTagData[]): void {
   }
 }
 
+function replaceCodeToken(text: string | undefined, oldCode: string, newCode: string): string | undefined {
+  if (!text || !oldCode || oldCode === newCode) return text;
+  if (!text.includes(oldCode)) return text;
+  return text.split(oldCode).join(newCode);
+}
+
+export function cascadePartUpdateInBomEngine(params: {
+  partId: string;
+  newCode: string;
+  newName: string;
+  carModel?: string;
+  unit?: string;
+  oldCode?: string;
+  oldName?: string;
+}): { bomsUpdated: number; componentsUpdated: number; flowsUpdated: number; tagsUpdated: number } {
+  const { partId, newCode, newName, carModel, unit, oldCode } = params;
+  const oldUpper = oldCode ? oldCode.trim().toUpperCase() : '';
+  const newUpper = newCode.trim().toUpperCase();
+  const normalizedBomUnit: 'PCS' | 'KG' | 'SET' | undefined =
+    unit === 'KG' ? 'KG' : unit === 'SET' ? 'SET' : unit === 'PCS' ? 'PCS' : undefined;
+
+  let bomsUpdated = 0;
+  let componentsUpdated = 0;
+  let flowsUpdated = 0;
+  let tagsUpdated = 0;
+
+  for (const bom of advancedBomsStore) {
+    let bomTouched = false;
+    const headerMatches =
+      bom.assemblyPartId === partId ||
+      (oldUpper !== '' && String(bom.assemblyPartCode || '').trim().toUpperCase() === oldUpper) ||
+      String(bom.assemblyPartCode || '').trim().toUpperCase() === newUpper;
+
+    if (headerMatches) {
+      if (
+        bom.assemblyPartId !== partId ||
+        bom.assemblyPartCode !== newCode ||
+        bom.assemblyPartName !== newName ||
+        (carModel && bom.carModel !== carModel)
+      ) {
+        bom.assemblyPartId = partId;
+        bom.assemblyPartCode = newCode;
+        bom.assemblyPartName = newName;
+        if (carModel) bom.carModel = carModel;
+        bomTouched = true;
+      }
+    }
+
+    if (oldCode && oldCode !== newCode && bom.notes) {
+      const nextNotes = replaceCodeToken(bom.notes, oldCode, newCode);
+      if (nextNotes !== bom.notes) {
+        bom.notes = nextNotes;
+        bomTouched = true;
+      }
+    }
+
+    for (const cmp of bom.components || []) {
+      const cmpMatches =
+        cmp.componentPartId === partId ||
+        (oldUpper !== '' && String(cmp.componentPartCode || '').trim().toUpperCase() === oldUpper) ||
+        String(cmp.componentPartCode || '').trim().toUpperCase() === newUpper;
+      if (cmpMatches) {
+        if (
+          cmp.componentPartId !== partId ||
+          cmp.componentPartCode !== newCode ||
+          cmp.componentPartName !== newName ||
+          (normalizedBomUnit && cmp.unit !== normalizedBomUnit)
+        ) {
+          cmp.componentPartId = partId;
+          cmp.componentPartCode = newCode;
+          cmp.componentPartName = newName;
+          if (normalizedBomUnit) cmp.unit = normalizedBomUnit;
+          componentsUpdated++;
+          bomTouched = true;
+        }
+      }
+    }
+
+    if (bomTouched) bomsUpdated++;
+  }
+
+  for (const flow of parallelFlowsStore) {
+    let flowTouched = false;
+    const rawUpper = String(flow.inputRawMaterialCode || '').trim().toUpperCase();
+    if ((oldUpper && rawUpper === oldUpper) || rawUpper === newUpper) {
+      if (flow.inputRawMaterialCode !== newCode || flow.inputRawMaterialName !== newName) {
+        flow.inputRawMaterialCode = newCode;
+        flow.inputRawMaterialName = newName;
+        flowTouched = true;
+      }
+    }
+    for (const out of flow.linkedOutputs || []) {
+      const outCodeUpper = String(out.partCode || '').trim().toUpperCase();
+      if ((oldUpper && outCodeUpper === oldUpper) || outCodeUpper === newUpper) {
+        if (out.partCode !== newCode || out.partName !== newName) {
+          out.partCode = newCode;
+          out.partName = newName;
+          flowTouched = true;
+        }
+      }
+    }
+    if (oldCode && oldCode !== newCode) {
+      const nextNotes = replaceCodeToken(flow.notes, oldCode, newCode);
+      if (nextNotes !== flow.notes) {
+        flow.notes = nextNotes;
+        flowTouched = true;
+      }
+      for (const node of flow.nodes || []) {
+        const nextDesc = replaceCodeToken(node.description, oldCode, newCode);
+        if (nextDesc !== node.description) {
+          node.description = nextDesc || '';
+          flowTouched = true;
+        }
+      }
+    }
+    if (flowTouched) flowsUpdated++;
+  }
+
+  for (const tag of traceabilityTagsStore) {
+    const tagCodeUpper = String(tag.partCode || '').trim().toUpperCase();
+    if ((oldUpper && tagCodeUpper === oldUpper) || tagCodeUpper === newUpper) {
+      if (
+        tag.partCode !== newCode ||
+        tag.partName !== newName ||
+        (carModel && tag.carModel !== carModel)
+      ) {
+        tag.partCode = newCode;
+        tag.partName = newName;
+        if (carModel) tag.carModel = carModel;
+        if (oldCode && oldCode !== newCode) {
+          tag.barcodeValue = replaceCodeToken(tag.barcodeValue, oldCode, newCode) || tag.barcodeValue;
+          tag.qrCodeValue = replaceCodeToken(tag.qrCodeValue, oldCode, newCode) || tag.qrCodeValue;
+        }
+        tagsUpdated++;
+      }
+    }
+  }
+
+  return { bomsUpdated, componentsUpdated, flowsUpdated, tagsUpdated };
+}
+
+export function reconcileBomEngineWithParts(
+  parts: Array<{ id: string; code: string; name: string; carModel?: string; unit?: string }>
+): number {
+  let changes = 0;
+  const byId = new Map(parts.map(p => [p.id, p]));
+  const byCode = new Map(parts.map(p => [String(p.code || '').trim().toUpperCase(), p]));
+
+  for (const bom of advancedBomsStore) {
+    const headerPart =
+      byId.get(bom.assemblyPartId) ||
+      byCode.get(String(bom.assemblyPartCode || '').trim().toUpperCase());
+    if (headerPart) {
+      if (bom.assemblyPartCode !== headerPart.code || bom.assemblyPartName !== headerPart.name) {
+        const res = cascadePartUpdateInBomEngine({
+          partId: headerPart.id,
+          newCode: headerPart.code,
+          newName: headerPart.name,
+          carModel: headerPart.carModel,
+          unit: headerPart.unit,
+          oldCode: bom.assemblyPartCode,
+        });
+        changes += res.bomsUpdated;
+      }
+    }
+    for (const cmp of bom.components || []) {
+      const cmpPart =
+        byId.get(cmp.componentPartId) ||
+        byCode.get(String(cmp.componentPartCode || '').trim().toUpperCase());
+      if (cmpPart && (cmp.componentPartCode !== cmpPart.code || cmp.componentPartName !== cmpPart.name)) {
+        const res = cascadePartUpdateInBomEngine({
+          partId: cmpPart.id,
+          newCode: cmpPart.code,
+          newName: cmpPart.name,
+          carModel: cmpPart.carModel,
+          unit: cmpPart.unit,
+          oldCode: cmp.componentPartCode,
+        });
+        changes += res.componentsUpdated;
+      }
+    }
+  }
+
+  for (const flow of parallelFlowsStore) {
+    const rawPart = byCode.get(String(flow.inputRawMaterialCode || '').trim().toUpperCase());
+    if (rawPart && flow.inputRawMaterialName !== rawPart.name) {
+      flow.inputRawMaterialName = rawPart.name;
+      changes++;
+    }
+    for (const out of flow.linkedOutputs || []) {
+      const outPart = byCode.get(String(out.partCode || '').trim().toUpperCase());
+      if (outPart && out.partName !== outPart.name) {
+        out.partName = outPart.name;
+        changes++;
+      }
+    }
+  }
+
+  for (const tag of traceabilityTagsStore) {
+    const tagPart = byCode.get(String(tag.partCode || '').trim().toUpperCase());
+    if (tagPart && tag.partName !== tagPart.name) {
+      tag.partName = tagPart.name;
+      changes++;
+    }
+  }
+
+  return changes;
+}

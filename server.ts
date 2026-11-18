@@ -5,9 +5,9 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
-import { apiRouter, loadInventoryAppState } from './src/server/apiRouter';
+import { apiRouter, loadInventoryAppState, persistInventoryAppState, reconcileAllPartReferencesFromCatalog } from './src/server/apiRouter';
 import { isDatabaseUrlConfigured, probeDatabaseConnectivity, resolveDatabaseUrl } from './src/server/db/prisma';
-import { initializeProductionWipSeed, loadProductionWipState } from './src/server/productionWipEngine';
+import { initializeProductionWipSeed, loadProductionWipState, persistProductionWipState } from './src/server/productionWipEngine';
 
 resolveDatabaseUrl();
 
@@ -127,6 +127,11 @@ async function startServer() {
         await probeDatabaseConnectivity();
         await loadInventoryAppState();
         await loadProductionWipState();
+        const postWipHealed = reconcileAllPartReferencesFromCatalog();
+        if (postWipHealed.totalUpdated > 0) {
+          await persistInventoryAppState();
+          await persistProductionWipState();
+        }
         console.log('[KPIMS Startup] Enterprise state hydrated & synchronized successfully.');
       } catch (err) {
         console.warn('[KPIMS Startup] Hydration notice:', err instanceof Error ? err.message : err);

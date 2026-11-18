@@ -1132,3 +1132,84 @@ export function autoReserveMoMaterials(moId: string): {
   };
 }
 
+export function cascadePartUpdateInMrpEngine(params: {
+  partId: string;
+  newCode: string;
+  newName: string;
+  materialGrade?: string;
+  oldCode?: string;
+}): number {
+  const { partId, newCode, newName, materialGrade, oldCode } = params;
+  const oldUpper = oldCode ? oldCode.trim().toUpperCase() : '';
+  const newUpper = newCode.trim().toUpperCase();
+  let updated = 0;
+
+  for (const pr of mrpPurchaseRequisitionsStore) {
+    const matUpper = String(pr.materialCode || '').trim().toUpperCase();
+    if ((oldUpper && matUpper === oldUpper) || matUpper === newUpper) {
+      if (
+        pr.materialCode !== newCode ||
+        pr.materialName !== newName ||
+        (materialGrade && pr.materialGrade !== materialGrade)
+      ) {
+        pr.materialCode = newCode;
+        pr.materialName = newName;
+        if (materialGrade) pr.materialGrade = materialGrade;
+        updated++;
+      }
+    }
+  }
+
+  for (const hold of Object.values(serverQcHoldStore)) {
+    const holdCodeUpper = String(hold.partCode || '').trim().toUpperCase();
+    if (
+      hold.partId === partId ||
+      (oldUpper && holdCodeUpper === oldUpper) ||
+      holdCodeUpper === newUpper
+    ) {
+      if (hold.partId !== partId || hold.partCode !== newCode) {
+        hold.partId = partId;
+        hold.partCode = newCode;
+        updated++;
+      }
+    }
+  }
+
+  if (oldCode && oldCode !== newCode && oldCode in serverVipPartsStore) {
+    const vipVal = Boolean(serverVipPartsStore[oldCode]);
+    serverVipPartsStore[partId] = vipVal;
+    serverVipPartsStore[newCode] = vipVal;
+    delete serverVipPartsStore[oldCode];
+  }
+
+  return updated;
+}
+
+export function reconcileMrpEngineWithParts(parts: Part[]): number {
+  let changes = 0;
+  const byId = new Map(parts.map(p => [p.id, p]));
+  const byCode = new Map(parts.map(p => [String(p.code || '').trim().toUpperCase(), p]));
+
+  for (const pr of mrpPurchaseRequisitionsStore) {
+    const p = byCode.get(String(pr.materialCode || '').trim().toUpperCase());
+    if (p && pr.materialName !== p.name) {
+      pr.materialName = p.name;
+      if (p.materialGrade) pr.materialGrade = p.materialGrade;
+      changes++;
+    }
+  }
+
+  for (const hold of Object.values(serverQcHoldStore)) {
+    const p =
+      (hold.partId ? byId.get(hold.partId) : undefined) ||
+      (hold.partCode ? byCode.get(String(hold.partCode).trim().toUpperCase()) : undefined);
+    if (p && (hold.partId !== p.id || hold.partCode !== p.code)) {
+      hold.partId = p.id;
+      hold.partCode = p.code;
+      changes++;
+    }
+  }
+
+  return changes;
+}
+

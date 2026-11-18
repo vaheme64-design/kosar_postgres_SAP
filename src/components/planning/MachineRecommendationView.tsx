@@ -96,6 +96,43 @@ export const MachineRecommendationView: React.FC<MachineRecommendationViewProps>
     loadShopFloorSchedule();
   }, [loadShopFloorSchedule]);
 
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent)?.detail;
+      if (detail?.part) {
+        const updatedPart = detail.part;
+        const oldUpper = detail.oldCode ? String(detail.oldCode).trim().toUpperCase() : '';
+        const newUpper = String(updatedPart.code || '').trim().toUpperCase();
+        setShopFloorSchedule(prev => {
+          let changed = false;
+          const next = prev.map(item => {
+            const codeUpper = String(item.partCode || '').trim().toUpperCase();
+            if (
+              item.partId === updatedPart.id ||
+              (oldUpper && codeUpper === oldUpper) ||
+              codeUpper === newUpper
+            ) {
+              changed = true;
+              return { ...item, partId: updatedPart.id, partCode: updatedPart.code, partName: updatedPart.name };
+            }
+            return item;
+          });
+          if (changed) {
+            try {
+              window.localStorage.setItem(SCHEDULE_STORAGE_KEY, JSON.stringify(next));
+            } catch {
+              // ignore
+            }
+          }
+          return changed ? next : prev;
+        });
+      }
+      onRefresh().catch(() => {});
+    };
+    window.addEventListener('kpims-master-data-updated', handler);
+    return () => window.removeEventListener('kpims-master-data-updated', handler);
+  }, [onRefresh]);
+
   // Revision Modal State
   const [showRevisionModal, setShowRevisionModal] = useState(false);
   const [revisionReason, setRevisionReason] = useState('');

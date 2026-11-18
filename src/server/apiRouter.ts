@@ -59,6 +59,8 @@ import {
   isValidPostgresUrlSyntax,
   getDefaultDeviceLabel,
   resolveCandidateDbUrl,
+  syncPartToEmbeddedSapPpStore,
+  reconcileEmbeddedSapPpItems,
 } from './db/prisma';
 import { CreateProductionPlanSchema, CreateSapcoReceiptSchema } from './validation/index';
 import { formatToJalali } from '../utils/jalali';
@@ -147,6 +149,8 @@ import {
   loadMaterialIntoManufacturingOrder,
   exportProductionWipSnapshotPayload,
   replaceProductionWipStateFromSync,
+  cascadePartUpdateInWipEngine,
+  reconcileWipEngineWithParts,
 } from './productionWipEngine';
 import {
   calculateNetRequirements,
@@ -162,6 +166,8 @@ import {
   clearCustomerOrdersAndPlans,
   reseedCustomerOrdersAndPlans,
   registerPlanningRuntimeProvider,
+  cascadePartUpdateInPlanningEngine,
+  reconcilePlanningEngineWithParts,
 } from './productionPlanningEngine';
 import { CustomerOrder } from '../types/productionPlanning';
 import {
@@ -195,6 +201,8 @@ import {
   registerMrpRuntimeProvider,
   mrpPurchaseRequisitionsStore,
   MrpPurchaseRequisition,
+  cascadePartUpdateInMrpEngine,
+  reconcileMrpEngineWithParts,
 } from './mrpEngine';
 import { ReportFilterParams } from '../types/managementReports';
 import {
@@ -210,6 +218,8 @@ import {
   setAllBoms,
   setAllParallelFlows,
   setAllTraceabilityTags,
+  cascadePartUpdateInBomEngine,
+  reconcileBomEngineWithParts,
 } from './bomAndParallelEngine';
 import {
   getMachineUtilizationReport,
@@ -262,6 +272,8 @@ import {
   exportFallbackProposalsSnapshot,
   hydrateFallbackProposalsSnapshot,
   clearFallbackProposalsStore,
+  cascadePartUpdateInFallbackProposals,
+  reconcileFallbackProposalsWithParts,
 } from './inMemoryRelationalFallback';
 import {
   getScenarioSelectors,
@@ -275,19 +287,34 @@ import {
 
 // Server-side State Store (in production can be wired to PostgreSQL / Prisma / SQL Server / ERP)
 function uniqueParts(parts: Part[]): Part[] {
-  const map = new Map<string, Part>();
+  const byId = new Map<string, Part>();
+  const idByCode = new Map<string, string>();
   for (const p of parts) {
+    if (!p || typeof p !== 'object') continue;
     const codeKey = (p.code || '').trim().toUpperCase();
     const idKey = (p.id || '').trim();
-    const key = codeKey || idKey;
-    if (key && !map.has(key)) {
-      map.set(key, p);
-    } else if (key && map.has(key)) {
-      const existing = map.get(key)!;
-      map.set(key, { ...existing, ...p });
+    const matchedId =
+      (idKey && byId.has(idKey) ? idKey : undefined) ||
+      (codeKey ? idByCode.get(codeKey) : undefined) ||
+      idKey ||
+      codeKey;
+    if (!matchedId) continue;
+
+    const existing = byId.get(matchedId);
+    if (existing) {
+      const oldCodeKey = (existing.code || '').trim().toUpperCase();
+      if (oldCodeKey && codeKey && oldCodeKey !== codeKey) {
+        idByCode.delete(oldCodeKey);
+      }
+      byId.set(matchedId, { ...existing, ...p });
+    } else {
+      byId.set(matchedId, p);
+    }
+    if (codeKey) {
+      idByCode.set(codeKey, matchedId);
     }
   }
-  return Array.from(map.values());
+  return Array.from(byId.values());
 }
 
 function uniqueById<T extends { id?: string; code?: string }>(items: T[]): T[] {
@@ -691,7 +718,10 @@ export async function syncCustomersToPostgres(customersToSync: CustomerDefinitio
   }
 }
 
-export async function syncPartsToPostgres(partsToSync: Part[]): Promise<PostgresSyncResult> {
+export async function syncPartsToPostgres(
+  partsToSync: Part[],
+  codeRenameMap?: Map<string, string>
+): Promise<PostgresSyncResult> {
   if (!isDatabaseUrlConfigured() || !partsToSync.length) return { attempted: false, syncedCount: 0 };
   let syncedCount = 0;
   try {
@@ -715,8 +745,15 @@ export async function syncPartsToPostgres(partsToSync: Part[]): Promise<Postgres
       materialIdMap.set(String(m.code).toUpperCase(), m.id);
     }
 
+    const existingDbParts = await prisma.part.findMany({
+      select: { id: true, partNumber: true },
+    });
+    const dbPartById = new Map(existingDbParts.map(row => [row.id, row]));
+    const dbPartByCode = new Map(existingDbParts.map(row => [row.partNumber.toUpperCase(), row]));
+
     const preparedRows: Array<{
       partNumber: string;
+      oldPartNumber?: string;
       idCandidate?: string;
       supplierPartNumber: string | null;
       name: string;
@@ -792,6 +829,7 @@ export async function syncPartsToPostgres(partsToSync: Part[]): Promise<Postgres
 
       preparedRows.push({
         partNumber,
+        oldPartNumber: p.id ? codeRenameMap?.get(p.id) : undefined,
         idCandidate: p.id && !p.id.startsWith('PRT-IMP-') ? p.id : undefined,
         supplierPartNumber: p.sapcoCode ? String(p.sapcoCode).trim() : null,
         name: String(p.name).trim(),
@@ -808,13 +846,56 @@ export async function syncPartsToPostgres(partsToSync: Part[]): Promise<Postgres
       });
     }
 
-    // Batch upsert parts in chunks of 50 inside transactions for fast 1,461+ row sync
+    // Validate no target partNumber collides with a different DB row
+    for (const row of preparedRows) {
+      const existingById = row.idCandidate ? dbPartById.get(row.idCandidate) : undefined;
+      const existingByOld = row.oldPartNumber ? dbPartByCode.get(row.oldPartNumber.toUpperCase()) : undefined;
+      const targetMatch = existingById || existingByOld;
+      const collisionByNewCode = dbPartByCode.get(row.partNumber.toUpperCase());
+      if (targetMatch && collisionByNewCode && collisionByNewCode.id !== targetMatch.id) {
+        return {
+          attempted: true,
+          syncedCount,
+          error: `کد قطعه «${row.partNumber}» قبلاً در پایگاه داده به قطعه دیگری (${collisionByNewCode.id}) اختصاص داده شده است.`,
+        };
+      }
+    }
+
+    // Batch update / upsert parts in chunks of 50 inside transactions for fast 1,461+ row sync
     const CHUNK_SIZE = 50;
     for (let i = 0; i < preparedRows.length; i += CHUNK_SIZE) {
       const chunk = preparedRows.slice(i, i + CHUNK_SIZE);
       await prisma.$transaction(
-        chunk.map(row =>
-          prisma.part.upsert({
+        chunk.map(row => {
+          const existingById = row.idCandidate ? dbPartById.get(row.idCandidate) : undefined;
+          const existingByOld = row.oldPartNumber ? dbPartByCode.get(row.oldPartNumber.toUpperCase()) : undefined;
+          const existingRow = existingById || existingByOld;
+
+          const updatePayload = {
+            partNumber: row.partNumber,
+            supplierPartNumber: row.supplierPartNumber,
+            name: row.name,
+            category: row.category,
+            carModel: row.carModel,
+            unitId: row.unitId,
+            materialId: row.materialId,
+            thicknessMm: row.thicknessMm,
+            weightNetKg: row.weightNetKg,
+            weightGrossKg: row.weightGrossKg,
+            minSafetyStock: row.minSafetyStock,
+            maxStock: row.maxStock,
+            leadTimeDays: row.leadTimeDays,
+            active: true,
+          };
+
+          if (existingRow) {
+            return prisma.part.update({
+              where: { id: existingRow.id },
+              data: updatePayload,
+            });
+          }
+
+          return prisma.part.upsert({
             where: { partNumber: row.partNumber },
             create: {
               id: row.idCandidate,
@@ -834,23 +915,9 @@ export async function syncPartsToPostgres(partsToSync: Part[]): Promise<Postgres
               leadTimeDays: row.leadTimeDays,
               active: true,
             },
-            update: {
-              supplierPartNumber: row.supplierPartNumber,
-              name: row.name,
-              category: row.category,
-              carModel: row.carModel,
-              unitId: row.unitId,
-              materialId: row.materialId,
-              thicknessMm: row.thicknessMm,
-              weightNetKg: row.weightNetKg,
-              weightGrossKg: row.weightGrossKg,
-              minSafetyStock: row.minSafetyStock,
-              maxStock: row.maxStock,
-              leadTimeDays: row.leadTimeDays,
-              active: true,
-            },
-          }),
-        ),
+            update: updatePayload,
+          });
+        }),
       );
       syncedCount += chunk.length;
     }
@@ -1258,6 +1325,606 @@ export async function persistInventoryAppState(): Promise<void> {
   await task;
 }
 
+export interface PartCascadeSummary {
+  productStructuresUpdated: number;
+  bomsUpdated: number;
+  bomComponentsUpdated: number;
+  parallelFlowsUpdated: number;
+  traceabilityTagsUpdated: number;
+  routingsUpdated: number;
+  diesUpdated: number;
+  plansUpdated: number;
+  planningOrdersUpdated: number;
+  planningSuggestionsUpdated: number;
+  wipMosUpdated: number;
+  wipTransfersUpdated: number;
+  wipLogsUpdated: number;
+  coilsUpdated: number;
+  physicalCoilsUpdated: number;
+  contractsUpdated: number;
+  inventoryDocsUpdated: number;
+  reservationsUpdated: number;
+  transactionsUpdated: number;
+  mrpRecordsUpdated: number;
+  fallbackProposalsUpdated: number;
+  embeddedSapPpUpdated: number;
+  totalAffectedRecords: number;
+}
+
+function unitToFaLabel(unit?: string): string {
+  if (unit === 'KG') return 'کیلوگرم';
+  if (unit === 'PCS') return 'عدد';
+  return unit || 'عدد';
+}
+
+function updateProductStructureSubNodesForPart(
+  nodes: any[] | undefined,
+  part: Part,
+  oldCodeUpper: string,
+  newCodeUpper: string
+): number {
+  if (!Array.isArray(nodes)) return 0;
+  let count = 0;
+  for (const node of nodes) {
+    if (!node || typeof node !== 'object') continue;
+    const nodeCodeUpper = String(node.partCode || '').trim().toUpperCase();
+    const matches =
+      node.partId === part.id ||
+      (oldCodeUpper !== '' && nodeCodeUpper === oldCodeUpper) ||
+      nodeCodeUpper === newCodeUpper;
+    if (matches) {
+      if (node.partId !== part.id || node.partCode !== part.code || node.partName !== part.name) {
+        node.partId = part.id;
+        node.partCode = part.code;
+        node.partName = part.name;
+        if (part.unit) node.unit = unitToFaLabel(part.unit);
+        count++;
+      }
+    }
+    if (Array.isArray(node.subComponents) && node.subComponents.length > 0) {
+      count += updateProductStructureSubNodesForPart(node.subComponents, part, oldCodeUpper, newCodeUpper);
+    }
+  }
+  return count;
+}
+
+function reconcileProductStructureSubNodesWithCatalog(
+  nodes: any[] | undefined,
+  byId: Map<string, Part>,
+  byCode: Map<string, Part>
+): number {
+  if (!Array.isArray(nodes)) return 0;
+  let count = 0;
+  for (const node of nodes) {
+    if (!node || typeof node !== 'object') continue;
+    const matched =
+      (node.partId ? byId.get(node.partId) : undefined) ||
+      (node.partCode ? byCode.get(String(node.partCode).trim().toUpperCase()) : undefined);
+    if (matched) {
+      if (node.partId !== matched.id || node.partCode !== matched.code || node.partName !== matched.name) {
+        node.partId = matched.id;
+        node.partCode = matched.code;
+        node.partName = matched.name;
+        count++;
+      }
+    }
+    if (Array.isArray(node.subComponents) && node.subComponents.length > 0) {
+      count += reconcileProductStructureSubNodesWithCatalog(node.subComponents, byId, byCode);
+    }
+  }
+  return count;
+}
+
+export async function cascadePartUpdateAcrossSystem(params: {
+  part: Part;
+  oldCode?: string;
+  oldName?: string;
+  recordAuditLog?: boolean;
+}): Promise<PartCascadeSummary> {
+  const { part, oldCode, oldName, recordAuditLog = true } = params;
+  const oldUpper = oldCode ? oldCode.trim().toUpperCase() : '';
+  const newUpper = part.code.trim().toUpperCase();
+  const now = new Date().toISOString();
+
+  let productStructuresUpdated = 0;
+  for (const ps of productStructuresStore) {
+    if (!ps || typeof ps !== 'object') continue;
+    let psTouched = false;
+    const rootCodeUpper = String(ps.rootPartCode || '').trim().toUpperCase();
+    const rootMatches =
+      ps.rootPartId === part.id ||
+      (oldUpper !== '' && rootCodeUpper === oldUpper) ||
+      rootCodeUpper === newUpper;
+    if (rootMatches) {
+      if (
+        ps.rootPartId !== part.id ||
+        ps.rootPartCode !== part.code ||
+        ps.rootPartName !== part.name ||
+        (part.carModel && ps.carModel !== part.carModel)
+      ) {
+        ps.rootPartId = part.id;
+        ps.rootPartCode = part.code;
+        ps.rootPartName = part.name;
+        if (part.carModel) ps.carModel = part.carModel;
+        psTouched = true;
+      }
+    }
+    const subChanges = updateProductStructureSubNodesForPart(ps.subComponents, part, oldUpper, newUpper);
+    if (psTouched || subChanges > 0) {
+      productStructuresUpdated += (psTouched ? 1 : 0) + subChanges;
+    }
+  }
+
+  let routingsUpdated = 0;
+  for (const rtg of routingsStore) {
+    let touched = false;
+    const rtgCodeUpper = String(rtg.partCode || '').trim().toUpperCase();
+    const matches =
+      rtg.partId === part.id ||
+      (oldUpper !== '' && rtgCodeUpper === oldUpper) ||
+      rtgCodeUpper === newUpper;
+    if (matches && (rtg.partId !== part.id || rtg.partCode !== part.code || rtg.partName !== part.name)) {
+      rtg.partId = part.id;
+      rtg.partCode = part.code;
+      rtg.partName = part.name;
+      rtg.updatedAt = now;
+      touched = true;
+    }
+    for (const op of rtg.operations || []) {
+      const sharedUpper = String(op.sharedPartCode || '').trim().toUpperCase();
+      if (
+        op.sharedPartId === part.id ||
+        (oldUpper !== '' && sharedUpper === oldUpper) ||
+        (sharedUpper !== '' && sharedUpper === newUpper)
+      ) {
+        if (op.sharedPartId !== part.id || op.sharedPartCode !== part.code || op.sharedPartName !== part.name) {
+          op.sharedPartId = part.id;
+          op.sharedPartCode = part.code;
+          op.sharedPartName = part.name;
+          touched = true;
+        }
+      }
+    }
+    if (touched) routingsUpdated++;
+  }
+
+  let diesUpdated = 0;
+  for (const die of diesStore) {
+    const dieCodeUpper = String(die.partCode || '').trim().toUpperCase();
+    const matches =
+      die.partId === part.id ||
+      (oldUpper !== '' && dieCodeUpper === oldUpper) ||
+      dieCodeUpper === newUpper;
+    if (matches && (die.partId !== part.id || die.partCode !== part.code || die.partName !== part.name)) {
+      die.partId = part.id;
+      die.partCode = part.code;
+      die.partName = part.name;
+      diesUpdated++;
+    }
+  }
+
+  let plansUpdated = 0;
+  for (const plan of plansStore) {
+    const planCodeUpper = String(plan.partCode || '').trim().toUpperCase();
+    const matches =
+      plan.partId === part.id ||
+      (oldUpper !== '' && planCodeUpper === oldUpper) ||
+      planCodeUpper === newUpper;
+    if (matches && (plan.partId !== part.id || plan.partCode !== part.code || plan.partName !== part.name)) {
+      plan.partId = part.id;
+      plan.partCode = part.code;
+      plan.partName = part.name;
+      plansUpdated++;
+    }
+  }
+
+  let coilsUpdated = 0;
+  for (const coil of coilsStore) {
+    let touched = false;
+    const cCodeUpper = String(coil.partCode || '').trim().toUpperCase();
+    const matches =
+      coil.partId === part.id ||
+      (oldUpper !== '' && cCodeUpper === oldUpper) ||
+      cCodeUpper === newUpper;
+    if (matches && (coil.partId !== part.id || coil.partCode !== part.code || coil.partName !== part.name)) {
+      coil.partId = part.id;
+      coil.partCode = part.code;
+      coil.partName = part.name;
+      if (part.materialGrade) coil.materialGrade = part.materialGrade;
+      touched = true;
+    }
+    for (const batch of coil.linkedProductionBatches || []) {
+      const bUpper = String(batch.partCode || '').trim().toUpperCase();
+      if (
+        batch.partId === part.id ||
+        (oldUpper !== '' && bUpper === oldUpper) ||
+        bUpper === newUpper
+      ) {
+        if (batch.partId !== part.id || batch.partCode !== part.code || batch.partName !== part.name) {
+          batch.partId = part.id;
+          batch.partCode = part.code;
+          batch.partName = part.name;
+          touched = true;
+        }
+      }
+    }
+    if (touched) coilsUpdated++;
+  }
+
+  let physicalCoilsUpdated = 0;
+  for (const pCoil of physicalCoilsStore) {
+    const pcUpper = String(pCoil.partCode || '').trim().toUpperCase();
+    const matches =
+      pCoil.partId === part.id ||
+      (oldUpper !== '' && pcUpper === oldUpper) ||
+      pcUpper === newUpper;
+    if (matches && (pCoil.partId !== part.id || pCoil.partCode !== part.code || pCoil.partName !== part.name)) {
+      pCoil.partId = part.id;
+      pCoil.partCode = part.code;
+      pCoil.partName = part.name;
+      if (part.materialGrade) pCoil.materialGrade = part.materialGrade;
+      pCoil.updatedAt = now;
+      physicalCoilsUpdated++;
+    }
+  }
+
+  let contractsUpdated = 0;
+  for (const contract of contractsStore) {
+    let cTouched = false;
+    if (oldUpper && Array.isArray(contract.associatedPartCodes)) {
+      const nextCodes = contract.associatedPartCodes.map(c =>
+        String(c || '').trim().toUpperCase() === oldUpper ? part.code : c
+      );
+      if (nextCodes.some((c, i) => c !== contract.associatedPartCodes[i])) {
+        contract.associatedPartCodes = nextCodes;
+        cTouched = true;
+      }
+    }
+    const anyContract = contract as any;
+    if (oldUpper && Array.isArray(anyContract.applicablePartCodes)) {
+      const nextApplicable = anyContract.applicablePartCodes.map((c: string) =>
+        String(c || '').trim().toUpperCase() === oldUpper ? part.code : c
+      );
+      if (nextApplicable.some((c: string, i: number) => c !== anyContract.applicablePartCodes[i])) {
+        anyContract.applicablePartCodes = nextApplicable;
+        cTouched = true;
+      }
+    }
+    for (const line of contract.commercialLines || []) {
+      const lUpper = String(line.partCode || '').trim().toUpperCase();
+      if (line.partId === part.id || (oldUpper !== '' && lUpper === oldUpper) || lUpper === newUpper) {
+        if (line.partId !== part.id || line.partCode !== part.code || line.partName !== part.name) {
+          line.partId = part.id;
+          line.partCode = part.code;
+          line.partName = part.name;
+          cTouched = true;
+        }
+      }
+    }
+    if (cTouched) contractsUpdated++;
+  }
+
+  let inventoryDocsUpdated = 0;
+  for (const doc of inventoryDocsStore) {
+    let docTouched = false;
+    for (const line of doc.lines || []) {
+      const lUpper = String(line.partCode || '').trim().toUpperCase();
+      if (line.partId === part.id || (oldUpper !== '' && lUpper === oldUpper) || lUpper === newUpper) {
+        if (line.partId !== part.id || line.partCode !== part.code || line.partName !== part.name) {
+          line.partId = part.id;
+          line.partCode = part.code;
+          line.partName = part.name;
+          docTouched = true;
+        }
+      }
+    }
+    if (docTouched) {
+      doc.updatedAt = now;
+      inventoryDocsUpdated++;
+    }
+  }
+
+  let reservationsUpdated = 0;
+  for (const resv of reservationsStore) {
+    const rUpper = String(resv.partCode || '').trim().toUpperCase();
+    if (resv.partId === part.id || (oldUpper !== '' && rUpper === oldUpper) || rUpper === newUpper) {
+      if (resv.partId !== part.id || resv.partCode !== part.code || resv.partName !== part.name) {
+        resv.partId = part.id;
+        resv.partCode = part.code;
+        resv.partName = part.name;
+        reservationsUpdated++;
+      }
+    }
+  }
+
+  let transactionsUpdated = 0;
+  for (const tx of transactionsStore) {
+    const tUpper = String(tx.partCode || '').trim().toUpperCase();
+    if (tx.partId === part.id || (oldUpper !== '' && tUpper === oldUpper) || tUpper === newUpper) {
+      if (tx.partId !== part.id || tx.partCode !== part.code || tx.partName !== part.name) {
+        tx.partId = part.id;
+        tx.partCode = part.code;
+        tx.partName = part.name;
+        transactionsUpdated++;
+      }
+    }
+  }
+
+  const bomRes = cascadePartUpdateInBomEngine({
+    partId: part.id,
+    newCode: part.code,
+    newName: part.name,
+    carModel: part.carModel,
+    unit: part.unit,
+    oldCode,
+    oldName,
+  });
+
+  const planRes = cascadePartUpdateInPlanningEngine({
+    partId: part.id,
+    newCode: part.code,
+    newName: part.name,
+    carModel: part.carModel,
+    oldCode,
+  });
+
+  const wipRes = cascadePartUpdateInWipEngine({
+    partId: part.id,
+    newCode: part.code,
+    newName: part.name,
+    oldCode,
+  });
+
+  const mrpRecordsUpdated = cascadePartUpdateInMrpEngine({
+    partId: part.id,
+    newCode: part.code,
+    newName: part.name,
+    materialGrade: part.materialGrade,
+    oldCode,
+  });
+
+  const fallbackProposalsUpdated = cascadePartUpdateInFallbackProposals({
+    partId: part.id,
+    newCode: part.code,
+    newName: part.name,
+    oldCode,
+  });
+
+  const embeddedUpdated = syncPartToEmbeddedSapPpStore(part, oldCode) ? 1 : 0;
+
+  if (isDatabaseUrlConfigured() && (oldUpper !== newUpper || oldName !== part.name)) {
+    try {
+      const prisma = getPrismaClient();
+      const whereClause: any = oldCode
+        ? { OR: [{ partId: part.id }, { partCode: oldCode }, { partCode: part.code }] }
+        : { OR: [{ partId: part.id }, { partCode: part.code }] };
+      await prisma.contractCommercialLine
+        .updateMany({
+          where: whereClause,
+          data: { partCode: part.code, partName: part.name },
+        })
+        .catch(() => {});
+    } catch {
+      // ignore optional relational sync issue
+    }
+  }
+
+  const totalAffectedRecords =
+    productStructuresUpdated +
+    bomRes.bomsUpdated +
+    bomRes.componentsUpdated +
+    bomRes.flowsUpdated +
+    bomRes.tagsUpdated +
+    routingsUpdated +
+    diesUpdated +
+    plansUpdated +
+    planRes.ordersUpdated +
+    planRes.suggestionsUpdated +
+    wipRes.mosUpdated +
+    wipRes.transfersUpdated +
+    wipRes.logsUpdated +
+    coilsUpdated +
+    physicalCoilsUpdated +
+    contractsUpdated +
+    inventoryDocsUpdated +
+    reservationsUpdated +
+    transactionsUpdated +
+    mrpRecordsUpdated +
+    fallbackProposalsUpdated +
+    embeddedUpdated;
+
+  if (recordAuditLog && (oldCode !== part.code || oldName !== part.name || totalAffectedRecords > 0)) {
+    auditLogsStore.unshift({
+      id: `AUD-CASCADE-${Date.now()}`,
+      action: 'MASTER_DATA_CASCADE_UPDATE',
+      entityName: 'Part',
+      entityId: part.id,
+      user: { uid: 'SYSTEM', displayName: 'موتور یکپارچه‌سازی Master Data' },
+      details: `تغییر اطلاعات پایه کالا (${oldCode || part.code} -> ${part.code} | ${oldName || part.name} -> ${part.name}) در ${totalAffectedRecords} رکورد وابسته (BOM، ساختار درختی، مسیر تولید، دستورات کار و اسناد انبار) اعمال گردید.`,
+      timestamp: now,
+    });
+  }
+
+  return {
+    productStructuresUpdated,
+    bomsUpdated: bomRes.bomsUpdated,
+    bomComponentsUpdated: bomRes.componentsUpdated,
+    parallelFlowsUpdated: bomRes.flowsUpdated,
+    traceabilityTagsUpdated: bomRes.tagsUpdated,
+    routingsUpdated,
+    diesUpdated,
+    plansUpdated,
+    planningOrdersUpdated: planRes.ordersUpdated,
+    planningSuggestionsUpdated: planRes.suggestionsUpdated,
+    wipMosUpdated: wipRes.mosUpdated,
+    wipTransfersUpdated: wipRes.transfersUpdated,
+    wipLogsUpdated: wipRes.logsUpdated,
+    coilsUpdated,
+    physicalCoilsUpdated,
+    contractsUpdated,
+    inventoryDocsUpdated,
+    reservationsUpdated,
+    transactionsUpdated,
+    mrpRecordsUpdated,
+    fallbackProposalsUpdated,
+    embeddedSapPpUpdated: embeddedUpdated,
+    totalAffectedRecords,
+  };
+}
+
+export function reconcileAllPartReferencesFromCatalog(): { totalUpdated: number } {
+  if (!partsStore.length) return { totalUpdated: 0 };
+  const byId = new Map(partsStore.map(p => [p.id, p]));
+  const byCode = new Map(partsStore.map(p => [String(p.code || '').trim().toUpperCase(), p]));
+  let totalUpdated = 0;
+
+  for (const ps of productStructuresStore) {
+    if (!ps || typeof ps !== 'object') continue;
+    const rootPart =
+      (ps.rootPartId ? byId.get(ps.rootPartId) : undefined) ||
+      (ps.rootPartCode ? byCode.get(String(ps.rootPartCode).trim().toUpperCase()) : undefined);
+    if (rootPart) {
+      if (ps.rootPartId !== rootPart.id || ps.rootPartCode !== rootPart.code || ps.rootPartName !== rootPart.name) {
+        ps.rootPartId = rootPart.id;
+        ps.rootPartCode = rootPart.code;
+        ps.rootPartName = rootPart.name;
+        if (rootPart.carModel) ps.carModel = rootPart.carModel;
+        totalUpdated++;
+      }
+    }
+    totalUpdated += reconcileProductStructureSubNodesWithCatalog(ps.subComponents, byId, byCode);
+  }
+
+  for (const rtg of routingsStore) {
+    const part = byId.get(rtg.partId) || byCode.get(String(rtg.partCode || '').trim().toUpperCase());
+    if (part && (rtg.partId !== part.id || rtg.partCode !== part.code || rtg.partName !== part.name)) {
+      rtg.partId = part.id;
+      rtg.partCode = part.code;
+      rtg.partName = part.name;
+      totalUpdated++;
+    }
+    for (const op of rtg.operations || []) {
+      const sp =
+        (op.sharedPartId ? byId.get(op.sharedPartId) : undefined) ||
+        (op.sharedPartCode ? byCode.get(String(op.sharedPartCode).trim().toUpperCase()) : undefined);
+      if (sp && (op.sharedPartId !== sp.id || op.sharedPartCode !== sp.code || op.sharedPartName !== sp.name)) {
+        op.sharedPartId = sp.id;
+        op.sharedPartCode = sp.code;
+        op.sharedPartName = sp.name;
+        totalUpdated++;
+      }
+    }
+  }
+
+  for (const die of diesStore) {
+    const part = byId.get(die.partId) || byCode.get(String(die.partCode || '').trim().toUpperCase());
+    if (part && (die.partId !== part.id || die.partCode !== part.code || die.partName !== part.name)) {
+      die.partId = part.id;
+      die.partCode = part.code;
+      die.partName = part.name;
+      totalUpdated++;
+    }
+  }
+
+  for (const plan of plansStore) {
+    const part = byId.get(plan.partId) || byCode.get(String(plan.partCode || '').trim().toUpperCase());
+    if (part && (plan.partId !== part.id || plan.partCode !== part.code || plan.partName !== part.name)) {
+      plan.partId = part.id;
+      plan.partCode = part.code;
+      plan.partName = part.name;
+      totalUpdated++;
+    }
+  }
+
+  for (const coil of coilsStore) {
+    const part = byId.get(coil.partId) || byCode.get(String(coil.partCode || '').trim().toUpperCase());
+    if (part && (coil.partId !== part.id || coil.partCode !== part.code || coil.partName !== part.name)) {
+      coil.partId = part.id;
+      coil.partCode = part.code;
+      coil.partName = part.name;
+      totalUpdated++;
+    }
+    for (const batch of coil.linkedProductionBatches || []) {
+      const bPart =
+        (batch.partId ? byId.get(batch.partId) : undefined) ||
+        byCode.get(String(batch.partCode || '').trim().toUpperCase());
+      if (bPart && (batch.partId !== bPart.id || batch.partCode !== bPart.code || batch.partName !== bPart.name)) {
+        batch.partId = bPart.id;
+        batch.partCode = bPart.code;
+        batch.partName = bPart.name;
+        totalUpdated++;
+      }
+    }
+  }
+
+  for (const pCoil of physicalCoilsStore) {
+    const part =
+      (pCoil.partId ? byId.get(pCoil.partId) : undefined) ||
+      (pCoil.partCode ? byCode.get(String(pCoil.partCode).trim().toUpperCase()) : undefined);
+    if (part && (pCoil.partId !== part.id || pCoil.partCode !== part.code || pCoil.partName !== part.name)) {
+      pCoil.partId = part.id;
+      pCoil.partCode = part.code;
+      pCoil.partName = part.name;
+      totalUpdated++;
+    }
+  }
+
+  for (const contract of contractsStore) {
+    for (const line of contract.commercialLines || []) {
+      const part =
+        (line.partId ? byId.get(line.partId) : undefined) ||
+        byCode.get(String(line.partCode || '').trim().toUpperCase());
+      if (part && (line.partId !== part.id || line.partCode !== part.code || line.partName !== part.name)) {
+        line.partId = part.id;
+        line.partCode = part.code;
+        line.partName = part.name;
+        totalUpdated++;
+      }
+    }
+  }
+
+  for (const doc of inventoryDocsStore) {
+    for (const line of doc.lines || []) {
+      const part = byId.get(line.partId) || byCode.get(String(line.partCode || '').trim().toUpperCase());
+      if (part && (line.partId !== part.id || line.partCode !== part.code || line.partName !== part.name)) {
+        line.partId = part.id;
+        line.partCode = part.code;
+        line.partName = part.name;
+        totalUpdated++;
+      }
+    }
+  }
+
+  for (const resv of reservationsStore) {
+    const part = byId.get(resv.partId) || byCode.get(String(resv.partCode || '').trim().toUpperCase());
+    if (part && (resv.partId !== part.id || resv.partCode !== part.code || resv.partName !== part.name)) {
+      resv.partId = part.id;
+      resv.partCode = part.code;
+      resv.partName = part.name;
+      totalUpdated++;
+    }
+  }
+
+  for (const tx of transactionsStore) {
+    const part = byId.get(tx.partId) || byCode.get(String(tx.partCode || '').trim().toUpperCase());
+    if (part && (tx.partId !== part.id || tx.partCode !== part.code || tx.partName !== part.name)) {
+      tx.partId = part.id;
+      tx.partCode = part.code;
+      tx.partName = part.name;
+      totalUpdated++;
+    }
+  }
+
+  totalUpdated += reconcileBomEngineWithParts(partsStore);
+  totalUpdated += reconcilePlanningEngineWithParts(partsStore);
+  totalUpdated += reconcileWipEngineWithParts(partsStore);
+  totalUpdated += reconcileMrpEngineWithParts(partsStore);
+  totalUpdated += reconcileFallbackProposalsWithParts(partsStore);
+  totalUpdated += reconcileEmbeddedSapPpItems(partsStore);
+
+  return { totalUpdated };
+}
+
 export async function loadInventoryAppState(): Promise<void> {
   // 1. Hydrate from durable disk snapshot immediately
   const diskPayload = readInventoryDiskSnapshot();
@@ -1266,8 +1933,12 @@ export async function loadInventoryAppState(): Promise<void> {
   }
 
   if (!isDatabaseUrlConfigured()) {
-    if (!diskPayload) {
+    const healed = reconcileAllPartReferencesFromCatalog();
+    if (!diskPayload || healed.totalUpdated > 0) {
       await persistInventoryAppState();
+      if (healed.totalUpdated > 0) {
+        await persistProductionWipState();
+      }
     }
     return;
   }
@@ -1305,13 +1976,22 @@ export async function loadInventoryAppState(): Promise<void> {
       }).catch(() => [] as any[]);
     }
     if (dbParts.length > 0) {
+      const existingById = new Map(partsStore.map(p => [p.id, p]));
       const existingByCode = new Map(partsStore.map(p => [p.code.toUpperCase(), p]));
+      const mergedById = new Map<string, Part>();
+      for (const p of partsStore) mergedById.set(p.id, p);
+
       for (const dbPart of dbParts) {
         const codeKey = dbPart.partNumber.toUpperCase();
-        const template = existingByCode.get(codeKey) || INITIAL_PARTS.find(part => part.code.toUpperCase() === codeKey);
-        const vip = Boolean(template?.isVIP ?? template?.isPinned ?? serverVipPartsStore[dbPart.id] ?? serverVipPartsStore[dbPart.partNumber]);
-        existingByCode.set(codeKey, {
-          id: template?.id || dbPart.id,
+        const template =
+          existingById.get(dbPart.id) ||
+          existingByCode.get(codeKey) ||
+          INITIAL_PARTS.find(part => part.id === dbPart.id || part.code.toUpperCase() === codeKey);
+        const resolvedId = template?.id || dbPart.id;
+        const vip = Boolean(template?.isVIP ?? template?.isPinned ?? serverVipPartsStore[resolvedId] ?? serverVipPartsStore[dbPart.id] ?? serverVipPartsStore[dbPart.partNumber]);
+        mergedById.set(resolvedId, {
+          ...(template || {}),
+          id: resolvedId,
           code: dbPart.partNumber,
           name: dbPart.name,
           category: normalizePartCategory(dbPart.category, dbPart.partNumber),
@@ -1329,7 +2009,7 @@ export async function loadInventoryAppState(): Promise<void> {
           isDemo: false,
         } as Part);
       }
-      partsStore = uniqueParts(Array.from(existingByCode.values()));
+      partsStore = uniqueParts(Array.from(mergedById.values()));
     }
 
     const [dbPhysicalCoils, dbCoilIssueRecords] = await Promise.all([
@@ -1570,7 +2250,14 @@ export async function loadInventoryAppState(): Promise<void> {
       for (const row of databaseAudit) auditById.set(row.id, row);
       auditLogsStore.splice(0, auditLogsStore.length, ...auditById.values());
     }
+
+    const healed = reconcileAllPartReferencesFromCatalog();
+    if (healed.totalUpdated > 0) {
+      await persistInventoryAppState();
+      await persistProductionWipState();
+    }
   } catch {
+    reconcileAllPartReferencesFromCatalog();
     // Fallback to durable disk snapshot already hydrated
   }
 }
@@ -1905,18 +2592,25 @@ apiRouter.get('/parts', async (req: Request, res: Response) => {
           orderBy: { partNumber: 'asc' },
         });
         if (dbParts.length > 0) {
+          const existingById = new Map(partsStore.map(p => [p.id, p]));
           const existingByCode = new Map(partsStore.map(p => [p.code.toUpperCase(), p]));
+          const mergedById = new Map<string, Part>();
+          for (const p of partsStore) mergedById.set(p.id, p);
+
           for (const dbPart of dbParts) {
             const codeKey = dbPart.partNumber.toUpperCase();
-            const existing = existingByCode.get(codeKey);
+            const existing = existingById.get(dbPart.id) || existingByCode.get(codeKey);
+            const resolvedId = existing?.id || dbPart.id;
             const vip = Boolean(
               existing?.isVIP ??
               existing?.isPinned ??
+              serverVipPartsStore[resolvedId] ??
               serverVipPartsStore[dbPart.id] ??
               serverVipPartsStore[dbPart.partNumber]
             );
             const merged: Part = {
-              id: existing?.id || dbPart.id,
+              ...(existing || {}),
+              id: resolvedId,
               code: dbPart.partNumber,
               name: dbPart.name,
               category: normalizePartCategory(dbPart.category, dbPart.partNumber),
@@ -1928,13 +2622,14 @@ apiRouter.get('/parts', async (req: Request, res: Response) => {
               materialGrade: dbPart.material?.grade || existing?.materialGrade || undefined,
               minStock: Number(dbPart.minSafetyStock) || existing?.minStock || 0,
               maxStock: dbPart.maxStock == null ? existing?.maxStock : Number(dbPart.maxStock),
+              leadTimeDays: dbPart.leadTimeDays ?? existing?.leadTimeDays,
               isVIP: vip,
               isPinned: vip,
               isDemo: false,
             };
-            existingByCode.set(codeKey, merged);
+            mergedById.set(resolvedId, merged);
           }
-          partsStore = uniqueParts(Array.from(existingByCode.values()));
+          partsStore = uniqueParts(Array.from(mergedById.values()));
         }
       } catch (dbErr) {
         console.warn('[KPIMS /api/parts] DB read warning:', dbErr instanceof Error ? dbErr.message : dbErr);
@@ -1978,20 +2673,42 @@ apiRouter.post('/parts', async (req: Request, res: Response) => {
     const normCategory = normalizePartCategory(payload.category || 'RAW_MATERIAL', code);
     const normUnit = normalizePartUnit(payload.unit || 'PCS', normCategory);
 
-    const existingIndex = partsStore.findIndex(
-      p => (payload.id && p.id === payload.id) || p.code.toUpperCase() === code.toUpperCase()
+    let existingIndex = payload.id
+      ? partsStore.findIndex(p => p.id === payload.id)
+      : -1;
+    if (existingIndex < 0 && !payload.id) {
+      existingIndex = partsStore.findIndex(p => p.code.toUpperCase() === code.toUpperCase());
+    }
+
+    const codeCollision = partsStore.findIndex(
+      (p, idx) => idx !== existingIndex && p.code.toUpperCase() === code.toUpperCase()
     );
+    if (codeCollision >= 0) {
+      return res.status(400).json({
+        success: false,
+        error: `کد قطعه «${code}» قبلاً برای قطعه دیگری (${partsStore[codeCollision].name}) ثبت شده است. لطفاً کد یکتا وارد کنید.`,
+      });
+    }
+
     const now = new Date().toISOString();
     const vipFlag = payload.isVIP !== undefined ? Boolean(payload.isVIP) : payload.isPinned !== undefined ? Boolean(payload.isPinned) : undefined;
 
     if (existingIndex >= 0) {
-      const current = partsStore[existingIndex];
-      const effectiveVip = vipFlag !== undefined ? vipFlag : Boolean(current.isVIP ?? current.isPinned);
-      serverVipPartsStore[current.id] = effectiveVip;
+      const prevSnapshot: Part = { ...partsStore[existingIndex] };
+      const oldCode = prevSnapshot.code;
+      const oldName = prevSnapshot.name;
+      const effectiveVip = vipFlag !== undefined ? vipFlag : Boolean(prevSnapshot.isVIP ?? prevSnapshot.isPinned);
+
+      if (oldCode && oldCode !== code) {
+        delete serverVipPartsStore[oldCode];
+      }
+      serverVipPartsStore[prevSnapshot.id] = effectiveVip;
       serverVipPartsStore[code] = effectiveVip;
-      partsStore[existingIndex] = {
-        ...current,
+
+      const updatedPart: Part = {
+        ...prevSnapshot,
         ...payload,
+        id: prevSnapshot.id,
         code,
         name,
         category: normCategory,
@@ -2000,23 +2717,41 @@ apiRouter.post('/parts', async (req: Request, res: Response) => {
         isPinned: effectiveVip,
         updatedAt: now,
       };
-      const pgSync = await syncPartsToPostgres([partsStore[existingIndex]]);
+      partsStore[existingIndex] = updatedPart;
+
+      const renameMap = oldCode && oldCode !== code ? new Map([[updatedPart.id, oldCode]]) : undefined;
+      const pgSync = await syncPartsToPostgres([updatedPart], renameMap);
       if (pgSync.attempted && pgSync.error) {
+        partsStore[existingIndex] = prevSnapshot;
         return res.status(500).json({
           success: false,
           error: `به‌روزرسانی در پایگاه داده اصلی PostgreSQL ناموفق بود: ${pgSync.error}`,
         });
       }
+
+      const cascadeSummary = await cascadePartUpdateAcrossSystem({
+        part: updatedPart,
+        oldCode,
+        oldName,
+      });
+
       await persistInventoryAppState();
+      await persistProductionWipState();
+
       const persistedTarget = pgSync.attempted && !pgSync.error ? 'POSTGRESQL' : 'HYBRID_DURABLE_DISK';
+      const cascadeNote =
+        cascadeSummary.totalAffectedRecords > 0
+          ? ` و در ${cascadeSummary.totalAffectedRecords} رکورد وابسته (BOM، ساختار درختی، مسیر تولید و دستورات کار) همگام‌سازی شد.`
+          : '.';
       return res.json({
         success: true,
         persistedTarget,
+        cascadeSummary,
         message:
           persistedTarget === 'POSTGRESQL'
-            ? 'اطلاعات قطعه در پایگاه داده اصلی (PostgreSQL) به‌روزرسانی شد.'
-            : 'اطلاعات قطعه در پایگاه داده پایدار محلی (Durable Disk Storage) به‌روزرسانی شد.',
-        data: partsStore[existingIndex],
+            ? `اطلاعات قطعه در پایگاه داده اصلی (PostgreSQL) به‌روزرسانی شد${cascadeNote}`
+            : `اطلاعات قطعه در پایگاه داده پایدار محلی به‌روزرسانی شد${cascadeNote}`,
+        data: updatedPart,
       });
     } else {
       const effectiveVip = Boolean(vipFlag);
@@ -2036,6 +2771,7 @@ apiRouter.post('/parts', async (req: Request, res: Response) => {
         materialGrade: payload.materialGrade || '',
         minStock: parseExcelNumber(payload.minStock, 0),
         maxStock: parseExcelNumber(payload.maxStock, 0),
+        leadTimeDays: payload.leadTimeDays ? Math.max(1, Math.round(Number(payload.leadTimeDays))) : undefined,
         isVIP: effectiveVip,
         isPinned: effectiveVip,
         isDemo: false,
@@ -2241,6 +2977,7 @@ apiRouter.delete('/production/boms/:id', async (req: Request, res: Response) => 
 });
 
 apiRouter.get('/production/product-structures', (_req: Request, res: Response) => {
+  reconcileAllPartReferencesFromCatalog();
   res.json({ success: true, count: productStructuresStore.length, data: productStructuresStore });
 });
 
@@ -2255,6 +2992,7 @@ apiRouter.post('/production/product-structures', async (req: Request, res: Respo
       return res.status(400).json({ success: false, error: 'ساختار محصول نامعتبر است (structures array الزامی است).' });
     }
     productStructuresStore = incoming;
+    reconcileAllPartReferencesFromCatalog();
     await persistInventoryAppState();
     res.json({
       success: true,
@@ -3741,10 +4479,16 @@ apiRouter.post('/db/sync/pull', async (_req: Request, res: Response) => {
 
     if (pulled.invPayload) {
       applyHydratedInventoryPayload(pulled.invPayload);
-      writeInventoryDiskSnapshot(pulled.invPayload);
     }
     if (pulled.wipPayload) {
       replaceProductionWipStateFromSync(pulled.wipPayload, pulled.wipVersion);
+    }
+    const healedOnPull = reconcileAllPartReferencesFromCatalog();
+    if (pulled.invPayload || healedOnPull.totalUpdated > 0) {
+      await persistInventoryAppState();
+    }
+    if (healedOnPull.totalUpdated > 0) {
+      await persistProductionWipState();
     }
 
     const postPullInfo = computeLocalSyncSnapshotInfo();
@@ -3824,6 +4568,7 @@ apiRouter.post('/db/sync', async (_req: Request, res: Response) => {
       });
     }
 
+    reconcileAllPartReferencesFromCatalog();
     const uRes = await syncUnitsToPostgres(unitsStore);
     const wRes = await syncWarehousesToPostgres(warehousesStore);
     const cuRes = await syncCustomersToPostgres(customersStore);
@@ -9492,6 +10237,8 @@ apiRouter.post('/inventory/import/confirm', async (req: Request, res: Response) 
     const partsByCodeLower = new Map<string, number>();
     partsStore.forEach((p, idx) => partsByCodeLower.set(p.code.toLowerCase(), idx));
 
+    const updatedExistingPartsForCascade: Array<{ part: Part; oldCode: string; oldName: string }> = [];
+
     if (bTypeUpper === 'PARTS' || bTypeUpper === 'ITEMS' || bTypeUpper === 'ITEM_MASTER') {
       for (const row of validRowsToImport) {
         const extracted = extractPartRowFields(row);
@@ -9535,8 +10282,17 @@ apiRouter.post('/inventory/import/confirm', async (req: Request, res: Response) 
         };
 
         if (existingIdx >= 0) {
+          const oldCode = partsStore[existingIdx].code;
+          const oldName = partsStore[existingIdx].name;
           partsStore[existingIdx] = { ...partsStore[existingIdx], ...newPart };
           partsToPersistInDb.push(partsStore[existingIdx]);
+          if (oldCode !== partsStore[existingIdx].code || oldName !== partsStore[existingIdx].name) {
+            updatedExistingPartsForCascade.push({
+              part: partsStore[existingIdx],
+              oldCode,
+              oldName,
+            });
+          }
         } else {
           partsStore.push(newPart);
           partsByCodeLower.set(code.toLowerCase(), partsStore.length - 1);
@@ -9858,7 +10614,18 @@ apiRouter.post('/inventory/import/confirm', async (req: Request, res: Response) 
         }
       }
     }
+    for (const item of updatedExistingPartsForCascade) {
+      await cascadePartUpdateAcrossSystem({
+        part: item.part,
+        oldCode: item.oldCode,
+        oldName: item.oldName,
+        recordAuditLog: false,
+      });
+    }
     await persistInventoryAppState();
+    if (updatedExistingPartsForCascade.length > 0) {
+      await persistProductionWipState();
+    }
 
     const batchSummary: ImportBatchSummary = {
       id: `BATCH-${Date.now()}`,

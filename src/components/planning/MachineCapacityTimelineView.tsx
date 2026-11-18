@@ -203,6 +203,7 @@ export const timeStringToHour = (timeStr: string): number => {
 
 export const MachineCapacityTimelineView: React.FC<MachineCapacityTimelineViewProps> = ({
   suggestions,
+  parts = [],
   initialMachineCode,
 }) => {
   const { openQuickEditDrawer, requestConfirm, showUndoToast, recordAudit } = useEnterpriseUx();
@@ -218,6 +219,56 @@ export const MachineCapacityTimelineView: React.FC<MachineCapacityTimelineViewPr
     }
     return INITIAL_CAPACITY_BLOCKS;
   });
+
+  useEffect(() => {
+    if (!parts || parts.length === 0) return;
+    const byCode = new Map(parts.map(p => [String(p.code || '').trim().toUpperCase(), p]));
+    const ecuRootPart = parts.find(p => p.id === 'PRT-FGD-ECU-BRK');
+    const ecuMainPart = parts.find(p => p.id === 'PRT-WIP-ECU-MAIN');
+    const ecuCompPart = parts.find(p => p.id === 'PRT-WIP-ECU-COMP');
+
+    setBlocks(prev => {
+      let changed = false;
+      const next = prev.map(b => {
+        const matched =
+          byCode.get(String(b.partCode || '').trim().toUpperCase()) ||
+          (b.moNumber === 'MO-ECU-ASY-01' ? ecuRootPart : undefined) ||
+          (b.moNumber === 'MO-ECU-MAIN-01' ? ecuMainPart : undefined) ||
+          (b.moNumber === 'MO-ECU-COMP-01' ? ecuCompPart : undefined);
+        if (matched && (b.partCode !== matched.code || b.partName !== matched.name)) {
+          changed = true;
+          return { ...b, partCode: matched.code, partName: matched.name };
+        }
+        return b;
+      });
+      return changed ? next : prev;
+    });
+  }, [parts]);
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent)?.detail;
+      if (!detail?.part) return;
+      const updatedPart: Part = detail.part;
+      const oldUpper = detail.oldCode ? String(detail.oldCode).trim().toUpperCase() : '';
+      setBlocks(prev => {
+        let changed = false;
+        const next = prev.map(b => {
+          const bUpper = String(b.partCode || '').trim().toUpperCase();
+          if ((oldUpper && bUpper === oldUpper) || bUpper === updatedPart.code.trim().toUpperCase()) {
+            if (b.partCode !== updatedPart.code || b.partName !== updatedPart.name) {
+              changed = true;
+              return { ...b, partCode: updatedPart.code, partName: updatedPart.name };
+            }
+          }
+          return b;
+        });
+        return changed ? next : prev;
+      });
+    };
+    window.addEventListener('kpims-master-data-updated', handler);
+    return () => window.removeEventListener('kpims-master-data-updated', handler);
+  }, []);
 
   useEffect(() => {
     try {

@@ -773,3 +773,87 @@ export function getPlanningDashboardMetrics(): PlanningDashboardMetrics {
     criticalPartsRequiringImmediateAction: criticalParts,
   };
 }
+
+export function cascadePartUpdateInPlanningEngine(params: {
+  partId: string;
+  newCode: string;
+  newName: string;
+  carModel?: string;
+  oldCode?: string;
+}): { ordersUpdated: number; suggestionsUpdated: number } {
+  const { partId, newCode, newName, oldCode } = params;
+  const oldUpper = oldCode ? oldCode.trim().toUpperCase() : '';
+  const newUpper = newCode.trim().toUpperCase();
+  let ordersUpdated = 0;
+  let suggestionsUpdated = 0;
+
+  for (const order of customerOrdersStore) {
+    let orderTouched = false;
+    for (const line of order.lines || []) {
+      const lineCodeUpper = String(line.partCode || '').trim().toUpperCase();
+      const matches =
+        line.partId === partId ||
+        (oldUpper !== '' && lineCodeUpper === oldUpper) ||
+        lineCodeUpper === newUpper;
+      if (matches) {
+        if (line.partId !== partId || line.partCode !== newCode || line.partName !== newName) {
+          line.partId = partId;
+          line.partCode = newCode;
+          line.partName = newName;
+          orderTouched = true;
+        }
+      }
+    }
+    if (orderTouched) ordersUpdated++;
+  }
+
+  for (const plan of planSuggestionsStore) {
+    const planCodeUpper = String(plan.partCode || '').trim().toUpperCase();
+    const matches =
+      plan.partId === partId ||
+      (oldUpper !== '' && planCodeUpper === oldUpper) ||
+      planCodeUpper === newUpper;
+    if (matches) {
+      if (plan.partId !== partId || plan.partCode !== newCode || plan.partName !== newName) {
+        plan.partId = partId;
+        plan.partCode = newCode;
+        plan.partName = newName;
+        plan.updatedAt = new Date().toISOString();
+        suggestionsUpdated++;
+      }
+    }
+  }
+
+  return { ordersUpdated, suggestionsUpdated };
+}
+
+export function reconcilePlanningEngineWithParts(parts: Part[]): number {
+  let changes = 0;
+  const byId = new Map(parts.map(p => [p.id, p]));
+  const byCode = new Map(parts.map(p => [String(p.code || '').trim().toUpperCase(), p]));
+
+  for (const order of customerOrdersStore) {
+    for (const line of order.lines || []) {
+      const part = byId.get(line.partId) || byCode.get(String(line.partCode || '').trim().toUpperCase());
+      if (part && (line.partCode !== part.code || line.partName !== part.name)) {
+        line.partId = part.id;
+        line.partCode = part.code;
+        line.partName = part.name;
+        changes++;
+      }
+    }
+  }
+
+  for (const plan of planSuggestionsStore) {
+    const part = byId.get(plan.partId) || byCode.get(String(plan.partCode || '').trim().toUpperCase());
+    if (part && (plan.partCode !== part.code || plan.partName !== part.name)) {
+      plan.partId = part.id;
+      plan.partCode = part.code;
+      plan.partName = part.name;
+      changes++;
+    }
+  }
+
+  return changes;
+}
+

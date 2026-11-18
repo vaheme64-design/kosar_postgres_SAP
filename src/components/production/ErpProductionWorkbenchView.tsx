@@ -361,24 +361,50 @@ export const ErpProductionWorkbenchView: React.FC<ErpProductionWorkbenchViewProp
       const todayIdx = getTodayWorkDayIndex();
       let changed = false;
 
-      // 1. Update names, weights, and routing OPs of existing scheduled items if edited in Master Data
+      // 1. Update names, codes, weights, parent references, and routing OPs of existing scheduled items if edited in Master Data
+      const partsById = new Map(parts.map(p => [p.id, p]));
+      const partsByCode = new Map(parts.map(p => [String(p.code || '').trim().toUpperCase(), p]));
+      const ecuRootLive = partsById.get('PRT-FGD-ECU-BRK');
+      const ecuRawLive = partsById.get('PRT-RAW-ECU-COIL');
+
       const updated = prev.map(item => {
-        const matchedPart = parts.find(p => p.id === item.partId || p.code === item.partCode);
+        const matchedPart = partsById.get(item.partId) || partsByCode.get(String(item.partCode || '').trim().toUpperCase());
         const matchedRouting = routings.find(
           r => r.partId === item.partId || (matchedPart && r.partId === matchedPart.id)
         );
-        if (!matchedPart && !matchedRouting) return item;
 
         const nextItem = { ...item };
         if (matchedPart) {
           if (
             nextItem.partName !== matchedPart.name ||
             nextItem.partCode !== matchedPart.code ||
+            (matchedPart.carModel && nextItem.carModel !== matchedPart.carModel) ||
             (matchedPart.weightPerUnitKg && nextItem.unitWeightKg !== matchedPart.weightPerUnitKg)
           ) {
+            nextItem.partId = matchedPart.id;
             nextItem.partName = matchedPart.name;
             nextItem.partCode = matchedPart.code;
+            if (matchedPart.carModel) nextItem.carModel = matchedPart.carModel;
             if (matchedPart.weightPerUnitKg) nextItem.unitWeightKg = matchedPart.weightPerUnitKg;
+            changed = true;
+          }
+        }
+
+        if (nextItem.parentProductCode && ecuRootLive) {
+          const parentMatched = partsByCode.get(nextItem.parentProductCode.trim().toUpperCase()) || ecuRootLive;
+          if (parentMatched && nextItem.parentProductCode !== parentMatched.code) {
+            nextItem.parentProductCode = parentMatched.code;
+            changed = true;
+          }
+        }
+
+        if (nextItem.rawMaterialCode) {
+          const rawMatched =
+            partsByCode.get(nextItem.rawMaterialCode.trim().toUpperCase()) ||
+            (nextItem.partId === 'PRT-WIP-ECU-MAIN' || nextItem.partId === 'PRT-WIP-ECU-COMP' ? ecuRawLive : undefined);
+          if (rawMatched && (nextItem.rawMaterialCode !== rawMatched.code || nextItem.rawMaterialName !== rawMatched.name)) {
+            nextItem.rawMaterialCode = rawMatched.code;
+            nextItem.rawMaterialName = rawMatched.name;
             changed = true;
           }
         }
@@ -488,6 +514,14 @@ export const ErpProductionWorkbenchView: React.FC<ErpProductionWorkbenchViewProp
           });
         }
       });
+
+      if (changed) {
+        try {
+          window.localStorage.setItem(STORAGE_KEY_MULTI_OP_APS, JSON.stringify(updated));
+        } catch {
+          // ignore
+        }
+      }
 
       return changed ? updated : prev;
     });

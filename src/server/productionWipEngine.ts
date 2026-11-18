@@ -1320,3 +1320,89 @@ if (!isDatabaseUrlConfigured()) {
   initializeProductionWipSeed();
 }
 
+export function cascadePartUpdateInWipEngine(params: {
+  partId: string;
+  newCode: string;
+  newName: string;
+  oldCode?: string;
+}): { mosUpdated: number; transfersUpdated: number; logsUpdated: number } {
+  const { partId, newCode, newName, oldCode } = params;
+  const oldUpper = oldCode ? oldCode.trim().toUpperCase() : '';
+  const newUpper = newCode.trim().toUpperCase();
+  const now = new Date().toISOString();
+  let mosUpdated = 0;
+  let transfersUpdated = 0;
+  let logsUpdated = 0;
+
+  for (const mo of manufacturingOrdersStore) {
+    const codeUpper = String(mo.partCode || '').trim().toUpperCase();
+    const matches =
+      mo.partId === partId ||
+      (oldUpper !== '' && codeUpper === oldUpper) ||
+      codeUpper === newUpper;
+    if (matches) {
+      if (mo.partId !== partId || mo.partCode !== newCode || mo.partName !== newName) {
+        mo.partId = partId;
+        mo.partCode = newCode;
+        mo.partName = newName;
+        mo.updatedAt = now;
+        mosUpdated++;
+      }
+    }
+  }
+
+  for (const tr of wipTransfersStore) {
+    const codeUpper = String(tr.partCode || '').trim().toUpperCase();
+    const matches =
+      tr.partId === partId ||
+      (oldUpper !== '' && codeUpper === oldUpper) ||
+      codeUpper === newUpper;
+    if (matches) {
+      if (tr.partId !== partId || tr.partCode !== newCode || tr.partName !== newName) {
+        tr.partId = partId;
+        tr.partCode = newCode;
+        tr.partName = newName;
+        transfersUpdated++;
+      }
+    }
+  }
+
+  for (const log of productionLogsStore) {
+    if (oldCode && oldCode !== newCode && log.notes && log.notes.includes(oldCode)) {
+      log.notes = log.notes.split(oldCode).join(newCode);
+      logsUpdated++;
+    }
+  }
+
+  return { mosUpdated, transfersUpdated, logsUpdated };
+}
+
+export function reconcileWipEngineWithParts(parts: Part[]): number {
+  let changes = 0;
+  const byId = new Map(parts.map(p => [p.id, p]));
+  const byCode = new Map(parts.map(p => [String(p.code || '').trim().toUpperCase(), p]));
+
+  for (const mo of manufacturingOrdersStore) {
+    const part = byId.get(mo.partId) || byCode.get(String(mo.partCode || '').trim().toUpperCase());
+    if (part && (mo.partCode !== part.code || mo.partName !== part.name)) {
+      mo.partId = part.id;
+      mo.partCode = part.code;
+      mo.partName = part.name;
+      changes++;
+    }
+  }
+
+  for (const tr of wipTransfersStore) {
+    const part = byId.get(tr.partId) || byCode.get(String(tr.partCode || '').trim().toUpperCase());
+    if (part && (tr.partCode !== part.code || tr.partName !== part.name)) {
+      tr.partId = part.id;
+      tr.partCode = part.code;
+      tr.partName = part.name;
+      changes++;
+    }
+  }
+
+  return changes;
+}
+
+

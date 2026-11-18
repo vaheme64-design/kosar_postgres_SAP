@@ -2347,3 +2347,67 @@ export function getFallbackDashboardSummary(
     lastUpdatedTimestamp: new Date().toISOString(),
   };
 }
+
+export function cascadePartUpdateInFallbackProposals(params: {
+  partId: string;
+  newCode: string;
+  newName: string;
+  oldCode?: string;
+}): number {
+  const { partId, newCode, newName, oldCode } = params;
+  const oldUpper = oldCode ? oldCode.trim().toUpperCase() : '';
+  const newUpper = newCode.trim().toUpperCase();
+  let updated = 0;
+
+  for (const prop of fallbackPlanProposalsStore) {
+    for (const line of prop.lines || []) {
+      const codeUpper = String(line.partCode || line.part?.partNumber || '').trim().toUpperCase();
+      const matches =
+        line.partId === partId ||
+        (oldUpper !== '' && codeUpper === oldUpper) ||
+        codeUpper === newUpper;
+      if (matches) {
+        line.partId = partId;
+        line.partCode = newCode;
+        line.partName = newName;
+        if (line.part && typeof line.part === 'object') {
+          line.part.partNumber = newCode;
+          line.part.name = newName;
+        }
+        updated++;
+      }
+    }
+  }
+  return updated;
+}
+
+export function reconcileFallbackProposalsWithParts(parts: Part[]): number {
+  let changes = 0;
+  const byId = new Map(parts.map(p => [p.id, p]));
+  const byCode = new Map(parts.map(p => [String(p.code || '').trim().toUpperCase(), p]));
+
+  for (const prop of fallbackPlanProposalsStore) {
+    for (const line of prop.lines || []) {
+      const part =
+        byId.get(line.partId) ||
+        byCode.get(String(line.partCode || line.part?.partNumber || '').trim().toUpperCase());
+      if (
+        part &&
+        (line.partCode !== part.code ||
+          line.partName !== part.name ||
+          line.part?.partNumber !== part.code ||
+          line.part?.name !== part.name)
+      ) {
+        line.partId = part.id;
+        line.partCode = part.code;
+        line.partName = part.name;
+        if (line.part && typeof line.part === 'object') {
+          line.part.partNumber = part.code;
+          line.part.name = part.name;
+        }
+        changes++;
+      }
+    }
+  }
+  return changes;
+}

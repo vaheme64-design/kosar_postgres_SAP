@@ -239,6 +239,14 @@ export const ProductionPlanningModuleView: React.FC<ProductionPlanningModuleView
 
   useEffect(() => {
     loadPlanningData();
+  }, [parts.length]);
+
+  useEffect(() => {
+    const handler = () => {
+      loadPlanningData();
+    };
+    window.addEventListener('kpims-master-data-updated', handler);
+    return () => window.removeEventListener('kpims-master-data-updated', handler);
   }, []);
 
   const handleRegenerate = async () => {

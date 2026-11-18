@@ -157,30 +157,138 @@ export const ProductStructureView: React.FC<ProductStructureViewProps> = ({ part
     'SUB-TAR-02': true,
   });
 
-  // Load from backend if backend has saved structures
-  useEffect(() => {
+  const reconcileStructuresWithParts = React.useCallback(
+    (list: ProductStructureData[], liveParts: Part[]): { next: ProductStructureData[]; changed: boolean } => {
+      if (!liveParts.length || !list.length) return { next: list, changed: false };
+      const byId = new Map(liveParts.map(p => [p.id, p]));
+      const byCode = new Map(liveParts.map(p => [String(p.code || '').trim().toUpperCase(), p]));
+      let changed = false;
+
+      const reconcileNodes = (nodes: SubComponentNode[] | undefined): SubComponentNode[] | undefined => {
+        if (!Array.isArray(nodes)) return nodes;
+        return nodes.map(node => {
+          const matched =
+            (node.partId ? byId.get(node.partId) : undefined) ||
+            (node.partCode ? byCode.get(String(node.partCode).trim().toUpperCase()) : undefined);
+          let nextNode = node;
+          if (matched && (node.partId !== matched.id || node.partCode !== matched.code || node.partName !== matched.name)) {
+            changed = true;
+            nextNode = {
+              ...node,
+              partId: matched.id,
+              partCode: matched.code,
+              partName: matched.name,
+            };
+          }
+          if (Array.isArray(nextNode.subComponents) && nextNode.subComponents.length > 0) {
+            const nextChildren = reconcileNodes(nextNode.subComponents);
+            if (nextChildren !== nextNode.subComponents) {
+              nextNode = { ...nextNode, subComponents: nextChildren };
+            }
+          }
+          return nextNode;
+        });
+      };
+
+      const nextList = list.map(ps => {
+        const matchedRoot =
+          (ps.rootPartId ? byId.get(ps.rootPartId) : undefined) ||
+          (ps.rootPartCode ? byCode.get(String(ps.rootPartCode).trim().toUpperCase()) : undefined);
+        let nextPs = ps;
+        if (
+          matchedRoot &&
+          (ps.rootPartId !== matchedRoot.id ||
+            ps.rootPartCode !== matchedRoot.code ||
+            ps.rootPartName !== matchedRoot.name ||
+            (matchedRoot.carModel && ps.carModel !== matchedRoot.carModel))
+        ) {
+          changed = true;
+          nextPs = {
+            ...nextPs,
+            rootPartId: matchedRoot.id,
+            rootPartCode: matchedRoot.code,
+            rootPartName: matchedRoot.name,
+            carModel: matchedRoot.carModel || nextPs.carModel,
+          };
+        }
+        const nextSubs = reconcileNodes(nextPs.subComponents) || [];
+        if (nextSubs !== nextPs.subComponents) {
+          nextPs = { ...nextPs, subComponents: nextSubs };
+        }
+        return nextPs;
+      });
+
+      return { next: changed ? nextList : list, changed };
+    },
+    []
+  );
+
+  const syncFromBackendAndReconcile = React.useCallback(() => {
     fetch('/api/production/product-structures')
       .then(r => r.json())
       .then(res => {
         if (res.success && Array.isArray(res.data) && res.data.length > 0) {
-          setStructures(res.data);
-          window.localStorage.setItem(STORAGE_KEY_PRODUCT_STRUCTURES, JSON.stringify(res.data));
+          const { next } = reconcileStructuresWithParts(res.data, parts);
+          setStructures(next);
+          try {
+            window.localStorage.setItem(STORAGE_KEY_PRODUCT_STRUCTURES, JSON.stringify(next));
+          } catch {
+            // ignore
+          }
         } else {
-          // Seed backend with current localStorage / initial structures
+          const { next } = reconcileStructuresWithParts(structures, parts);
+          setStructures(next);
+          try {
+            window.localStorage.setItem(STORAGE_KEY_PRODUCT_STRUCTURES, JSON.stringify(next));
+          } catch {
+            // ignore
+          }
           fetch('/api/production/product-structures', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ structures }),
+            body: JSON.stringify({ structures: next }),
           }).catch(() => {});
         }
       })
       .catch(() => {});
+  }, [parts, reconcileStructuresWithParts]);
+
+  // Load from backend on mount & whenever master data changes
+  useEffect(() => {
+    syncFromBackendAndReconcile();
   }, []);
 
+  useEffect(() => {
+    if (!parts || parts.length === 0) return;
+    setStructures(prev => {
+      const { next, changed } = reconcileStructuresWithParts(prev, parts);
+      if (changed) {
+        try {
+          window.localStorage.setItem(STORAGE_KEY_PRODUCT_STRUCTURES, JSON.stringify(next));
+        } catch {
+          // ignore
+        }
+        fetch('/api/production/product-structures', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ structures: next }),
+        }).catch(() => {});
+      }
+      return changed ? next : prev;
+    });
+  }, [parts, reconcileStructuresWithParts]);
+
+  useEffect(() => {
+    const handler = () => syncFromBackendAndReconcile();
+    window.addEventListener('kpims-master-data-updated', handler);
+    return () => window.removeEventListener('kpims-master-data-updated', handler);
+  }, [syncFromBackendAndReconcile]);
+
   const persistStructures = async (nextStructures: ProductStructureData[], msg: string) => {
-    setStructures(nextStructures);
+    const { next } = reconcileStructuresWithParts(nextStructures, parts);
+    setStructures(next);
     try {
-      window.localStorage.setItem(STORAGE_KEY_PRODUCT_STRUCTURES, JSON.stringify(nextStructures));
+      window.localStorage.setItem(STORAGE_KEY_PRODUCT_STRUCTURES, JSON.stringify(next));
     } catch {
       // ignore
     }
@@ -189,7 +297,7 @@ export const ProductStructureView: React.FC<ProductStructureViewProps> = ({ part
       await fetch('/api/production/product-structures', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ structures: nextStructures }),
+        body: JSON.stringify({ structures: next }),
       });
     } catch {
       // ignore

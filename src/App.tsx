@@ -550,6 +550,16 @@ function AppContent() {
       const data = await res.json();
       if (!res.ok || !data.success) throw new Error(data.error || 'خطا در ثبت قطعه');
       await loadAllData();
+      window.dispatchEvent(
+        new CustomEvent('kpims-master-data-updated', {
+          detail: {
+            type: 'PART',
+            part: data.data || partData,
+            oldCode: partData.id ? parts.find(p => p.id === partData.id)?.code : undefined,
+            cascadeSummary: data.cascadeSummary,
+          },
+        }),
+      );
       return { success: true, message: data.message };
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'خطا در ثبت قطعه';

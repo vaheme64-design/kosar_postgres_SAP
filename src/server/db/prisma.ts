@@ -260,6 +260,78 @@ function saveEmbeddedSapPpStore(): void {
   }
 }
 
+export function syncPartToEmbeddedSapPpStore(
+  part: {
+    id: string;
+    code: string;
+    name: string;
+    carModel?: string;
+    unit?: string;
+    weightPerUnitKg?: number;
+    minStock?: number;
+  },
+  oldCode?: string
+): boolean {
+  const store = getEmbeddedSapPpStore();
+  const oldUpper = oldCode ? oldCode.trim().toUpperCase() : '';
+  const newUpper = part.code.trim().toUpperCase();
+  let changed = false;
+
+  for (const item of store.items) {
+    const itemCodeUpper = String(item.code || '').toUpperCase();
+    const matches =
+      item.id === part.id ||
+      (oldUpper && itemCodeUpper === oldUpper) ||
+      itemCodeUpper === newUpper;
+    if (!matches) continue;
+
+    if (
+      item.code !== part.code ||
+      item.name !== part.name ||
+      (part.carModel !== undefined && item.carModel !== part.carModel) ||
+      (part.unit && item.unit !== part.unit) ||
+      (part.weightPerUnitKg != null && Number(item.weightNetKg) !== Number(part.weightPerUnitKg))
+    ) {
+      item.code = part.code;
+      item.name = part.name;
+      if (part.carModel !== undefined) item.carModel = part.carModel || item.carModel;
+      if (part.unit) item.unit = part.unit;
+      if (part.weightPerUnitKg != null && part.weightPerUnitKg > 0) {
+        item.weightNetKg = part.weightPerUnitKg;
+      }
+      if (part.minStock != null) {
+        item.minSafetyStock = part.minStock;
+      }
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    saveEmbeddedSapPpStore();
+  }
+  return changed;
+}
+
+export function reconcileEmbeddedSapPpItems(
+  parts: Array<{
+    id: string;
+    code: string;
+    name: string;
+    carModel?: string;
+    unit?: string;
+    weightPerUnitKg?: number;
+    minStock?: number;
+  }>
+): number {
+  let updated = 0;
+  for (const p of parts) {
+    if (syncPartToEmbeddedSapPpStore(p)) {
+      updated++;
+    }
+  }
+  return updated;
+}
+
 function matchesWhere(row: any, where?: any): boolean {
   if (!where || typeof where !== 'object') return true;
   for (const [key, cond] of Object.entries(where)) {

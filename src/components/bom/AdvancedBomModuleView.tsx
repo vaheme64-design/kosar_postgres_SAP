@@ -101,7 +101,22 @@ export const AdvancedBomModuleView: React.FC<AdvancedBomModuleViewProps> = ({
       const res = await fetch('/api/production/boms');
       const data = await res.json();
       if (data.success && data.data) {
-        const list: AdvancedBomDefinition[] = data.data;
+        const byPartId = new Map(parts.map(p => [p.id, p]));
+        const list: AdvancedBomDefinition[] = (data.data as AdvancedBomDefinition[]).map(b => {
+          const liveHeader = byPartId.get(b.assemblyPartId);
+          return {
+            ...b,
+            assemblyPartCode: liveHeader?.code || b.assemblyPartCode,
+            assemblyPartName: liveHeader?.name || b.assemblyPartName,
+            carModel: liveHeader?.carModel || b.carModel,
+            components: (b.components || []).map(cmp => {
+              const liveCmp = byPartId.get(cmp.componentPartId);
+              return liveCmp
+                ? { ...cmp, componentPartCode: liveCmp.code, componentPartName: liveCmp.name }
+                : cmp;
+            }),
+          };
+        });
         setBoms(list);
         const query = (route.docQuery || '').trim().toLowerCase();
         if (query) {
@@ -133,6 +148,14 @@ export const AdvancedBomModuleView: React.FC<AdvancedBomModuleViewProps> = ({
 
   useEffect(() => {
     loadBoms();
+  }, [parts]);
+
+  useEffect(() => {
+    const handler = () => {
+      loadBoms();
+    };
+    window.addEventListener('kpims-master-data-updated', handler);
+    return () => window.removeEventListener('kpims-master-data-updated', handler);
   }, []);
 
   useEffect(() => {

@@ -184,6 +184,14 @@ export const ProductionWipModuleView: React.FC<ProductionWipModuleViewProps> = (
 
   useEffect(() => {
     loadWipData();
+  }, [loadWipData, parts]);
+
+  useEffect(() => {
+    const handler = () => {
+      loadWipData();
+    };
+    window.addEventListener('kpims-master-data-updated', handler);
+    return () => window.removeEventListener('kpims-master-data-updated', handler);
   }, [loadWipData]);
 
   const bottleneckAnalysis = React.useMemo(() => {
