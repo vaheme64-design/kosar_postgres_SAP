@@ -317,15 +317,17 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
         const json = await res.json();
         if (!res.ok || !json.success) throw new Error(json.error || 'خطا در آپلود به دیتابیس آنلاین');
         if (json.checkResult) setLocalCheckOverride(json.checkResult);
-        setDbFeedback({ ok: true, text: json.message });
+        setDbFeedback({ ok: !json.relationalSyncWarning, text: json.message });
         await fetchDbStatus(false);
       } else if (mode === 'PULL') {
         const res = await fetch('/api/db/sync/pull', { method: 'POST' });
         const json = await res.json();
         if (!res.ok || !json.success) throw new Error(json.error || 'خطا در به‌روزرسانی از دیتابیس آنلاین');
         if (json.checkResult) setLocalCheckOverride(json.checkResult);
-        setDbFeedback({ ok: true, text: json.message });
+        const warnText = json.localPgWarning ? ` (هشدار دیتابیس محلی: ${json.localPgWarning})` : '';
+        setDbFeedback({ ok: true, text: `${json.message}${warnText}` });
         await onRefreshData?.();
+        window.dispatchEvent(new CustomEvent('kpims-master-data-updated', { detail: { type: 'CLOUD_PULL' } }));
         await fetchDbStatus(false);
       }
     } catch (err) {

@@ -561,10 +561,13 @@ let importBatchesStore: ImportBatchSummary[] = [];
 // Legacy snapshot for non-relational inventory UI state; physical coil and issue/return records are rehydrated from normalized PostgreSQL tables.
 const INVENTORY_APP_SNAPSHOT_ID = 'inventory-app-state';
 let inventoryStateQueue: Promise<unknown> = Promise.resolve();
+let skipDbPartsMergeAfterPull = false;
+let lastLocalPartMutationMs = 0;
 
 export interface PostgresSyncResult {
   attempted: boolean;
   syncedCount: number;
+  deactivatedCount?: number;
   skippedMissingSchema?: boolean;
   error?: string;
 }
@@ -720,10 +723,13 @@ export async function syncCustomersToPostgres(customersToSync: CustomerDefinitio
 
 export async function syncPartsToPostgres(
   partsToSync: Part[],
-  codeRenameMap?: Map<string, string>
+  codeRenameMap?: Map<string, string>,
+  options?: { deactivateMissing?: boolean }
 ): Promise<PostgresSyncResult> {
-  if (!isDatabaseUrlConfigured() || !partsToSync.length) return { attempted: false, syncedCount: 0 };
+  if (!isDatabaseUrlConfigured()) return { attempted: false, syncedCount: 0 };
+  if (!partsToSync.length && !options?.deactivateMissing) return { attempted: false, syncedCount: 0 };
   let syncedCount = 0;
+  let deactivatedCount = 0;
   try {
     const schema = await ensurePostgresSchemaReady();
     if (!schema.ready) {
@@ -746,9 +752,10 @@ export async function syncPartsToPostgres(
     }
 
     const existingDbParts = await prisma.part.findMany({
-      select: { id: true, partNumber: true },
+      select: { id: true, partNumber: true, active: true },
     });
     const dbPartById = new Map(existingDbParts.map(row => [row.id, row]));
+    const dbPartByExactCode = new Map(existingDbParts.map(row => [row.partNumber, row]));
     const dbPartByCode = new Map(existingDbParts.map(row => [row.partNumber.toUpperCase(), row]));
 
     const preparedRows: Array<{
@@ -830,7 +837,7 @@ export async function syncPartsToPostgres(
       preparedRows.push({
         partNumber,
         oldPartNumber: p.id ? codeRenameMap?.get(p.id) : undefined,
-        idCandidate: p.id && !p.id.startsWith('PRT-IMP-') ? p.id : undefined,
+        idCandidate: p.id || undefined,
         supplierPartNumber: p.sapcoCode ? String(p.sapcoCode).trim() : null,
         name: String(p.name).trim(),
         category: normCat as any,
@@ -849,10 +856,12 @@ export async function syncPartsToPostgres(
     // Validate no target partNumber collides with a different DB row
     for (const row of preparedRows) {
       const existingById = row.idCandidate ? dbPartById.get(row.idCandidate) : undefined;
-      const existingByOld = row.oldPartNumber ? dbPartByCode.get(row.oldPartNumber.toUpperCase()) : undefined;
+      const existingByOld = row.oldPartNumber
+        ? dbPartByExactCode.get(row.oldPartNumber) || dbPartByCode.get(row.oldPartNumber.toUpperCase())
+        : undefined;
       const targetMatch = existingById || existingByOld;
-      const collisionByNewCode = dbPartByCode.get(row.partNumber.toUpperCase());
-      if (targetMatch && collisionByNewCode && collisionByNewCode.id !== targetMatch.id) {
+      const collisionByNewCode = dbPartByExactCode.get(row.partNumber) || dbPartByCode.get(row.partNumber.toUpperCase());
+      if (targetMatch && collisionByNewCode && collisionByNewCode.id !== targetMatch.id && collisionByNewCode.active) {
         return {
           attempted: true,
           syncedCount,
@@ -861,15 +870,22 @@ export async function syncPartsToPostgres(
       }
     }
 
+    const activeTargetIds = new Set<string>();
+    const activeTargetUpperCodes = new Set<string>(preparedRows.map(r => r.partNumber.toUpperCase()));
+
     // Batch update / upsert parts in chunks of 50 inside transactions for fast 1,461+ row sync
     const CHUNK_SIZE = 50;
     for (let i = 0; i < preparedRows.length; i += CHUNK_SIZE) {
       const chunk = preparedRows.slice(i, i + CHUNK_SIZE);
-      await prisma.$transaction(
+      const txResults = await prisma.$transaction(
         chunk.map(row => {
           const existingById = row.idCandidate ? dbPartById.get(row.idCandidate) : undefined;
-          const existingByOld = row.oldPartNumber ? dbPartByCode.get(row.oldPartNumber.toUpperCase()) : undefined;
-          const existingRow = existingById || existingByOld;
+          const existingByOld = row.oldPartNumber
+            ? dbPartByExactCode.get(row.oldPartNumber) || dbPartByCode.get(row.oldPartNumber.toUpperCase())
+            : undefined;
+          const existingByCurrentCode =
+            dbPartByExactCode.get(row.partNumber) || dbPartByCode.get(row.partNumber.toUpperCase());
+          const existingRow = existingById || existingByOld || existingByCurrentCode;
 
           const updatePayload = {
             partNumber: row.partNumber,
@@ -892,13 +908,14 @@ export async function syncPartsToPostgres(
             return prisma.part.update({
               where: { id: existingRow.id },
               data: updatePayload,
+              select: { id: true },
             });
           }
 
           return prisma.part.upsert({
             where: { partNumber: row.partNumber },
             create: {
-              id: row.idCandidate,
+              id: row.idCandidate && !dbPartById.has(row.idCandidate) ? row.idCandidate : undefined,
               partNumber: row.partNumber,
               supplierPartNumber: row.supplierPartNumber,
               name: row.name,
@@ -916,19 +933,40 @@ export async function syncPartsToPostgres(
               active: true,
             },
             update: updatePayload,
+            select: { id: true },
           });
         }),
       );
+      for (const r of txResults) activeTargetIds.add(r.id);
       syncedCount += chunk.length;
     }
 
-    return { attempted: true, syncedCount };
+    if (options?.deactivateMissing) {
+      const toDeactivateIds = existingDbParts
+        .filter(
+          row =>
+            row.active &&
+            !activeTargetIds.has(row.id) &&
+            !activeTargetUpperCodes.has(row.partNumber.toUpperCase()),
+        )
+        .map(row => row.id);
+      if (toDeactivateIds.length > 0) {
+        const res = await prisma.part.updateMany({
+          where: { id: { in: toDeactivateIds } },
+          data: { active: false },
+        });
+        deactivatedCount = res.count;
+      }
+    }
+
+    return { attempted: true, syncedCount, deactivatedCount };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn('[KPIMS Sync] syncPartsToPostgres warning:', msg);
     return {
       attempted: true,
       syncedCount,
+      deactivatedCount,
       skippedMissingSchema: isMissingRelationError(err),
       error: msg,
     };
@@ -1107,47 +1145,47 @@ function readInventoryDiskSnapshot(): any | null {
 
 function applyHydratedInventoryPayload(payload: any): void {
   if (!payload || typeof payload !== 'object') return;
-  if (Array.isArray(payload.parts) && payload.parts.length > 0) {
+  if (Array.isArray(payload.parts)) {
     partsStore = uniqueParts(payload.parts);
   }
-  if (Array.isArray(payload.units) && payload.units.length > 0) {
+  if (Array.isArray(payload.units)) {
     unitsStore = payload.units;
   }
-  if (Array.isArray(payload.warehouses) && payload.warehouses.length > 0) {
+  if (Array.isArray(payload.warehouses)) {
     warehousesStore = payload.warehouses;
     WAREHOUSES_LIST.splice(0, WAREHOUSES_LIST.length, ...warehousesStore);
   }
-  if (Array.isArray(payload.customers) && payload.customers.length > 0) {
+  if (Array.isArray(payload.customers)) {
     customersStore = payload.customers;
   }
-  if (Array.isArray(payload.machines) && payload.machines.length > 0) {
+  if (Array.isArray(payload.machines)) {
     machinesStore = uniqueById(payload.machines);
   }
-  if (Array.isArray(payload.routings) && payload.routings.length > 0) {
+  if (Array.isArray(payload.routings)) {
     routingsStore = uniqueById(payload.routings);
   }
-  if (Array.isArray(payload.dies) && payload.dies.length > 0) {
+  if (Array.isArray(payload.dies)) {
     diesStore = uniqueById(payload.dies);
   }
-  if (Array.isArray(payload.operators) && payload.operators.length > 0) {
+  if (Array.isArray(payload.operators)) {
     operatorsStore = uniqueById(payload.operators);
   }
-  if (Array.isArray(payload.halls) && payload.halls.length > 0) {
+  if (Array.isArray(payload.halls)) {
     hallsStore = uniqueById(payload.halls);
   }
-  if (Array.isArray(payload.processes) && payload.processes.length > 0) {
+  if (Array.isArray(payload.processes)) {
     processesStore = payload.processes;
   }
-  if (Array.isArray(payload.materialGrades) && payload.materialGrades.length > 0) {
+  if (Array.isArray(payload.materialGrades)) {
     materialGradesStore = payload.materialGrades;
   }
-  if (Array.isArray(payload.shifts) && payload.shifts.length > 0) {
+  if (Array.isArray(payload.shifts)) {
     shiftsStore = payload.shifts;
   }
-  if (Array.isArray(payload.carModels) && payload.carModels.length > 0) {
+  if (Array.isArray(payload.carModels)) {
     carModelsStore = payload.carModels;
   }
-  if (Array.isArray(payload.operations) && payload.operations.length > 0) {
+  if (Array.isArray(payload.operations)) {
     operationsStore = payload.operations;
   }
   if (Array.isArray(payload.plans)) {
@@ -1156,19 +1194,20 @@ function applyHydratedInventoryPayload(payload: any): void {
   if (Array.isArray(payload.coils)) {
     coilsStore = uniqueById(payload.coils);
   }
-  if (Array.isArray(payload.advancedBoms) && payload.advancedBoms.length > 0) {
+  if (Array.isArray(payload.advancedBoms)) {
     setAllBoms(payload.advancedBoms);
   }
-  if (Array.isArray(payload.parallelFlows) && payload.parallelFlows.length > 0) {
+  if (Array.isArray(payload.parallelFlows)) {
     setAllParallelFlows(payload.parallelFlows);
   }
-  if (Array.isArray(payload.traceabilityTags) && payload.traceabilityTags.length > 0) {
+  if (Array.isArray(payload.traceabilityTags)) {
     setAllTraceabilityTags(payload.traceabilityTags);
   }
   if (payload.vipParts && typeof payload.vipParts === 'object') {
+    for (const key of Object.keys(serverVipPartsStore)) delete serverVipPartsStore[key];
     Object.assign(serverVipPartsStore, payload.vipParts);
   }
-  if (Array.isArray(payload.physicalCoils) && payload.physicalCoils.length > 0) {
+  if (Array.isArray(payload.physicalCoils)) {
     physicalCoilsStore.splice(0, physicalCoilsStore.length, ...payload.physicalCoils);
   }
   if (Array.isArray(payload.coilIssueRecords)) {
@@ -1196,12 +1235,13 @@ function applyHydratedInventoryPayload(payload: any): void {
   if (Array.isArray(payload.customerOrders)) {
     customerOrdersStore.splice(0, customerOrdersStore.length, ...payload.customerOrders);
   }
-  if (Array.isArray(payload.planSuggestions) && payload.planSuggestions.length > 0) {
+  if (Array.isArray(payload.planSuggestions)) {
     planSuggestionsStore.splice(0, planSuggestionsStore.length, ...payload.planSuggestions);
   } else if (planSuggestionsStore.length === 0) {
     planSuggestionsStore.push(...generateProductionPlanSuggestions());
   }
   if (payload.machineWorkloadHours && typeof payload.machineWorkloadHours === 'object') {
+    for (const key of Object.keys(machineWorkloadHoursMap)) delete machineWorkloadHoursMap[key];
     Object.assign(machineWorkloadHoursMap, payload.machineWorkloadHours);
   }
   if (Array.isArray(payload.transactions)) {
@@ -1962,30 +2002,72 @@ export async function loadInventoryAppState(): Promise<void> {
       await persistInventoryAppState();
     }
 
+    const snapshotUpdatedMs = snapshot?.updatedAt ? new Date(snapshot.updatedAt).getTime() : 0;
+    const snapshotHasParts = Boolean(snapshot?.payload && Array.isArray((snapshot.payload as any).parts));
+
     let dbParts = await prisma.part.findMany({
       where: { active: true },
       include: { unit: true, material: true },
       orderBy: { partNumber: 'asc' },
     }).catch(() => [] as any[]);
     if (dbParts.length === 0 && partsStore.length > 0) {
-      await syncPartsToPostgres(partsStore);
+      await syncPartsToPostgres(partsStore, undefined, { deactivateMissing: true });
       dbParts = await prisma.part.findMany({
         where: { active: true },
         include: { unit: true, material: true },
         orderBy: { partNumber: 'asc' },
       }).catch(() => [] as any[]);
     }
+
+    const inactiveDbParts = snapshotHasParts
+      ? await prisma.part.findMany({
+          where: { active: false },
+          select: { id: true, partNumber: true, updatedAt: true },
+        }).catch(() => [] as Array<{ id: string; partNumber: string; updatedAt: Date }>)
+      : [];
+
     if (dbParts.length > 0) {
       const existingById = new Map(partsStore.map(p => [p.id, p]));
       const existingByCode = new Map(partsStore.map(p => [p.code.toUpperCase(), p]));
       const mergedById = new Map<string, Part>();
       for (const p of partsStore) mergedById.set(p.id, p);
 
+      // Apply explicit SQL deactivations newer than snapshot
+      if (snapshotHasParts && inactiveDbParts.length > 0) {
+        const deactivatedKeys = new Set<string>();
+        for (const inact of inactiveDbParts) {
+          const inactMs = inact.updatedAt ? new Date(inact.updatedAt).getTime() : 0;
+          if (inactMs > snapshotUpdatedMs + 1500) {
+            deactivatedKeys.add(inact.id);
+            deactivatedKeys.add(inact.partNumber.toUpperCase());
+          }
+        }
+        if (deactivatedKeys.size > 0) {
+          for (const [k, part] of mergedById.entries()) {
+            if (deactivatedKeys.has(part.id) || deactivatedKeys.has(part.code.toUpperCase())) {
+              mergedById.delete(k);
+            }
+          }
+        }
+      }
+
       for (const dbPart of dbParts) {
         const codeKey = dbPart.partNumber.toUpperCase();
+        const existing = existingById.get(dbPart.id) || existingByCode.get(codeKey);
+        const dbPartUpdatedMs = dbPart.updatedAt ? new Date(dbPart.updatedAt).getTime() : 0;
+
+        // If snapshot exists, never let older stale relational rows resurrect deleted parts or overwrite newer snapshot edits
+        if (snapshotHasParts) {
+          if (!existing && dbPartUpdatedMs <= snapshotUpdatedMs + 1500) {
+            continue;
+          }
+          if (existing && dbPartUpdatedMs <= snapshotUpdatedMs + 1500) {
+            continue;
+          }
+        }
+
         const template =
-          existingById.get(dbPart.id) ||
-          existingByCode.get(codeKey) ||
+          existing ||
           INITIAL_PARTS.find(part => part.id === dbPart.id || part.code.toUpperCase() === codeKey);
         const resolvedId = template?.id || dbPart.id;
         const vip = Boolean(template?.isVIP ?? template?.isPinned ?? serverVipPartsStore[resolvedId] ?? serverVipPartsStore[dbPart.id] ?? serverVipPartsStore[dbPart.partNumber]);
@@ -2583,23 +2665,60 @@ apiRouter.post('/inventory/reverse', async (req: Request, res: Response) => {
 apiRouter.get('/parts', async (req: Request, res: Response) => {
   try {
     const { category, search, carModel } = req.query;
-    if (isDatabaseUrlConfigured()) {
+    if (!skipDbPartsMergeAfterPull && isDatabaseUrlConfigured()) {
       try {
         const prisma = getPrismaClient();
-        const dbParts = await prisma.part.findMany({
-          where: { active: true },
-          include: { unit: true, material: true },
-          orderBy: { partNumber: 'asc' },
-        });
-        if (dbParts.length > 0) {
-          const existingById = new Map(partsStore.map(p => [p.id, p]));
-          const existingByCode = new Map(partsStore.map(p => [p.code.toUpperCase(), p]));
-          const mergedById = new Map<string, Part>();
-          for (const p of partsStore) mergedById.set(p.id, p);
+        const [dbParts, inactiveDbParts] = await Promise.all([
+          prisma.part.findMany({
+            where: { active: true },
+            include: { unit: true, material: true },
+            orderBy: { partNumber: 'asc' },
+          }),
+          prisma.part.findMany({
+            where: { active: false },
+            select: { id: true, partNumber: true, updatedAt: true },
+          }).catch(() => [] as Array<{ id: string; partNumber: string; updatedAt: Date }>),
+        ]);
 
+        let catalogChangedFromDb = false;
+        const existingById = new Map(partsStore.map(p => [p.id, p]));
+        const existingByCode = new Map(partsStore.map(p => [p.code.toUpperCase(), p]));
+        const mergedById = new Map<string, Part>();
+        for (const p of partsStore) mergedById.set(p.id, p);
+
+        if (inactiveDbParts.length > 0) {
+          const tombstoneKeys = new Set<string>();
+          for (const inact of inactiveDbParts) {
+            const inactMs = inact.updatedAt ? new Date(inact.updatedAt).getTime() : 0;
+            if (lastLocalPartMutationMs === 0 || inactMs > lastLocalPartMutationMs + 1500) {
+              tombstoneKeys.add(inact.id);
+              tombstoneKeys.add(inact.partNumber.toUpperCase());
+            }
+          }
+          if (tombstoneKeys.size > 0) {
+            for (const [k, p] of mergedById.entries()) {
+              if (tombstoneKeys.has(p.id) || tombstoneKeys.has(p.code.toUpperCase())) {
+                mergedById.delete(k);
+                catalogChangedFromDb = true;
+              }
+            }
+          }
+        }
+
+        if (dbParts.length > 0) {
           for (const dbPart of dbParts) {
             const codeKey = dbPart.partNumber.toUpperCase();
             const existing = existingById.get(dbPart.id) || existingByCode.get(codeKey);
+            const dbUpdatedMs = dbPart.updatedAt ? new Date(dbPart.updatedAt).getTime() : 0;
+
+            // Do not resurrect old DB rows right after a local delete/pull unless DB row is genuinely newer
+            if (!existing && lastLocalPartMutationMs > 0 && dbUpdatedMs <= lastLocalPartMutationMs + 1500) {
+              continue;
+            }
+            if (existing && lastLocalPartMutationMs > 0 && dbUpdatedMs <= lastLocalPartMutationMs + 1500) {
+              continue;
+            }
+
             const resolvedId = existing?.id || dbPart.id;
             const vip = Boolean(
               existing?.isVIP ??
@@ -2627,9 +2746,17 @@ apiRouter.get('/parts', async (req: Request, res: Response) => {
               isPinned: vip,
               isDemo: false,
             };
+            if (!existing || existing.name !== merged.name || existing.code !== merged.code) {
+              catalogChangedFromDb = true;
+            }
             mergedById.set(resolvedId, merged);
           }
+        }
+
+        if (catalogChangedFromDb) {
           partsStore = uniqueParts(Array.from(mergedById.values()));
+          reconcileAllPartReferencesFromCatalog();
+          await persistInventoryAppState();
         }
       } catch (dbErr) {
         console.warn('[KPIMS /api/parts] DB read warning:', dbErr instanceof Error ? dbErr.message : dbErr);
@@ -2735,6 +2862,8 @@ apiRouter.post('/parts', async (req: Request, res: Response) => {
         oldName,
       });
 
+      skipDbPartsMergeAfterPull = false;
+      lastLocalPartMutationMs = Date.now();
       await persistInventoryAppState();
       await persistProductionWipState();
 
@@ -2787,6 +2916,8 @@ apiRouter.post('/parts', async (req: Request, res: Response) => {
           error: `ثبت قطعه در پایگاه داده اصلی PostgreSQL ناموفق بود: ${pgSync.error}`,
         });
       }
+      skipDbPartsMergeAfterPull = false;
+      lastLocalPartMutationMs = Date.now();
       await persistInventoryAppState();
       const persistedTarget = pgSync.attempted && !pgSync.error ? 'POSTGRESQL' : 'HYBRID_DURABLE_DISK';
       return res.status(201).json({
@@ -2813,16 +2944,44 @@ apiRouter.delete('/parts/:id', async (req: Request, res: Response) => {
     }
     const removed = partsStore[index];
     partsStore.splice(index, 1);
+    delete serverVipPartsStore[removed.id];
+    delete serverVipPartsStore[removed.code];
+    delete serverVipPartsStore[removed.code.toUpperCase()];
+
     if (isDatabaseUrlConfigured()) {
       try {
         const prisma = getPrismaClient();
-        await prisma.part.delete({ where: { id: removed.id } }).catch(() => {
-          return prisma.part.update({ where: { id: removed.id }, data: { active: false } });
+        const matchingRows = await prisma.part.findMany({
+          where: {
+            OR: [
+              { id: removed.id },
+              { partNumber: { equals: removed.code, mode: 'insensitive' } },
+            ],
+          },
+          select: { id: true },
         });
+        for (const row of matchingRows) {
+          await prisma.part.delete({ where: { id: row.id } }).catch(() => {
+            return prisma.part.update({ where: { id: row.id }, data: { active: false } });
+          });
+        }
       } catch (dbErr) {
         console.warn('[KPIMS /api/parts DELETE] DB delete warning:', dbErr);
       }
     }
+
+    auditLogsStore.unshift({
+      id: `AUD-DEL-PART-${Date.now()}`,
+      action: 'DELETE_PART',
+      entityName: 'Part',
+      entityId: removed.id,
+      user: { uid: 'SYSTEM', displayName: 'کاربر سامانه' },
+      details: `حذف قطعه «${removed.name}» (${removed.code}) از کاتالوگ مرکزی و غیرفعال‌سازی/پاکسازی در پایگاه داده.`,
+      timestamp: new Date().toISOString(),
+    });
+
+    skipDbPartsMergeAfterPull = false;
+    lastLocalPartMutationMs = Date.now();
     await persistInventoryAppState();
     return res.json({ success: true, message: `قطعه «${removed.name}» با موفقیت از کاتالوگ حذف گردید.` });
   } catch (error) {
@@ -4169,11 +4328,17 @@ async function writeFullSnapshotBundleToPgUrl(
   wipPayload: ReturnType<typeof exportProductionWipSnapshotPayload>,
   manifestOrBuilder: CloudSyncManifest | ((remoteExistingManifest: CloudSyncManifest | null) => CloudSyncManifest),
   alsoSyncRelationalParts = true,
-): Promise<{ relationalPartsSynced: number; manifest: CloudSyncManifest; latencyMs: number }> {
+): Promise<{
+  relationalPartsSynced: number;
+  deactivatedPartsCount: number;
+  relationalSyncWarning?: string;
+  manifest: CloudSyncManifest;
+  latencyMs: number;
+}> {
   const started = Date.now();
   return withNodePgClient(
     targetUrl,
-    45_000,
+    65_000,
     async (pgClient, enrichedUrl) => {
       const schemaReady = await ensureTargetFullSchemaBestEffort(pgClient, enrichedUrl);
       await ensureTargetSnapshotTables(pgClient);
@@ -4220,100 +4385,378 @@ async function writeFullSnapshotBundleToPgUrl(
       );
 
       let relationalPartsSynced = 0;
-      if (alsoSyncRelationalParts && schemaReady && Array.isArray(inventoryPayload?.parts) && inventoryPayload.parts.length > 0) {
+      let deactivatedPartsCount = 0;
+      let relationalSyncWarning: string | undefined;
+
+      if (alsoSyncRelationalParts && schemaReady && Array.isArray(inventoryPayload?.parts)) {
         try {
-          for (const u of unitsStore) {
-            const code = String(u.symbol || 'PCS').trim().toUpperCase();
-            if (!code) continue;
-            const uId = u.id && u.id.startsWith('UNIT-') ? u.id : `UNIT-${code}`;
-            const uName = u.title || `واحد ${code}`;
-            const isBase = code === 'KG' || code === 'PCS';
+          // 1. Bulk sync Units of Measure in max 2 queries
+          const existingUomRes = await pgClient.query(`SELECT "id", "code" FROM "units_of_measure"`);
+          const uomByCode = new Map<string, string>();
+          const claimedUomIds = new Set<string>();
+          for (const row of (existingUomRes.rows || []) as Array<{ id: string; code: string }>) {
+            uomByCode.set(String(row.code).toUpperCase(), row.id);
+            claimedUomIds.add(row.id);
+          }
+
+          const unitsToSync = Array.isArray(inventoryPayload?.units) && inventoryPayload.units.length > 0
+            ? inventoryPayload.units
+            : unitsStore;
+          const uIds: string[] = [];
+          const uCodes: string[] = [];
+          const uNames: string[] = [];
+          const uIsBase: boolean[] = [];
+          const seenUomCodes = new Set<string>();
+
+          for (const u of unitsToSync) {
+            const code = String(u?.symbol || u?.code || 'PCS').trim().toUpperCase();
+            if (!code || seenUomCodes.has(code)) continue;
+            seenUomCodes.add(code);
+            let targetUomId = uomByCode.get(code);
+            if (!targetUomId) {
+              const candidate = u?.id && String(u.id).startsWith('UNIT-') ? String(u.id) : `UNIT-${code}`;
+              targetUomId = !claimedUomIds.has(candidate) ? candidate : `UNIT-${code}-${crypto.randomUUID().slice(0, 6)}`;
+              claimedUomIds.add(targetUomId);
+              uomByCode.set(code, targetUomId);
+            }
+            uIds.push(targetUomId);
+            uCodes.push(code);
+            uNames.push(String(u?.title || u?.name || `واحد ${code}`));
+            uIsBase.push(Boolean(u?.isBaseUnit ?? (code === 'KG' || code === 'PCS')));
+          }
+          for (const reqCode of ['PCS', 'KG']) {
+            if (!seenUomCodes.has(reqCode)) {
+              seenUomCodes.add(reqCode);
+              const targetUomId = uomByCode.get(reqCode) || (!claimedUomIds.has(`UNIT-${reqCode}`) ? `UNIT-${reqCode}` : `UNIT-${reqCode}-${crypto.randomUUID().slice(0, 6)}`);
+              uomByCode.set(reqCode, targetUomId);
+              claimedUomIds.add(targetUomId);
+              uIds.push(targetUomId);
+              uCodes.push(reqCode);
+              uNames.push(reqCode === 'KG' ? 'کیلوگرم' : 'عدد (قطعه)');
+              uIsBase.push(true);
+            }
+          }
+          if (uCodes.length > 0) {
             await pgClient.query(
               `INSERT INTO "units_of_measure" ("id", "code", "name", "symbol", "isBase", "active", "createdAt")
-               VALUES ($1, $2, $3, $4, $5, true, CURRENT_TIMESTAMP)
-               ON CONFLICT ("code") DO UPDATE SET "name" = EXCLUDED."name", "symbol" = EXCLUDED."symbol", "active" = true`,
-              [uId, code, uName, code, isBase],
+               SELECT x.id, x.code, x.name, x.code, x.is_base, true, CURRENT_TIMESTAMP
+               FROM unnest($1::text[], $2::text[], $3::text[], $4::boolean[]) AS x(id, code, name, is_base)
+               ON CONFLICT ("code") DO UPDATE SET
+                 "name" = EXCLUDED."name",
+                 "symbol" = EXCLUDED."symbol",
+                 "active" = true`,
+              [uIds, uCodes, uNames, uIsBase],
             );
           }
 
-          const uomRes = await pgClient.query(`SELECT "id", "code" FROM "units_of_measure"`);
-          const existingUoms = (uomRes.rows || []) as Array<{ id: string; code: string }>;
-          const uomMap = new Map(existingUoms.map(u => [String(u.code).toUpperCase(), u.id]));
-          const fallbackUomId = uomMap.get('PCS') || existingUoms[0]?.id;
+          const refreshedUoms = await pgClient.query(`SELECT "id", "code" FROM "units_of_measure"`);
+          const uomMap = new Map<string, string>();
+          for (const row of (refreshedUoms.rows || []) as Array<{ id: string; code: string }>) {
+            uomMap.set(String(row.code).toUpperCase(), row.id);
+          }
+          const fallbackUomId = uomMap.get('PCS') || Array.from(uomMap.values())[0];
+
+          // 2. Bulk sync Materials needed by parts in max 2 queries
+          const matMap = new Map<string, string>();
+          try {
+            const matRes = await pgClient.query(`SELECT "id", "code" FROM "materials"`);
+            const claimedMatIds = new Set<string>();
+            for (const row of (matRes.rows || []) as Array<{ id: string; code: string }>) {
+              matMap.set(String(row.code).toUpperCase(), row.id);
+              claimedMatIds.add(row.id);
+            }
+            const missingMats = new Map<string, { id: string; code: string; name: string; grade: string }>();
+            for (const p of inventoryPayload.parts as Part[]) {
+              const gradeStr = String(p?.materialGrade || '').trim().toUpperCase();
+              if (!gradeStr) continue;
+              const cleaned = gradeStr.replace(/[^A-Z0-9_-]/g, '');
+              const matCode = cleaned
+                ? `MAT-${cleaned}`
+                : `MAT-${Buffer.from(gradeStr).toString('hex').slice(0, 12).toUpperCase()}`;
+              if (!matMap.has(matCode) && !missingMats.has(matCode)) {
+                const candidateId = !claimedMatIds.has(matCode) ? matCode : `MAT-${crypto.randomUUID().slice(0, 12)}`;
+                claimedMatIds.add(candidateId);
+                missingMats.set(matCode, {
+                  id: candidateId,
+                  code: matCode,
+                  name: `ورق فولادی گرید ${gradeStr}`,
+                  grade: gradeStr,
+                });
+              }
+            }
+            if (missingMats.size > 0) {
+              const matsArr = Array.from(missingMats.values());
+              await pgClient.query(
+                `INSERT INTO "materials" ("id", "code", "name", "grade", "active", "createdAt", "updatedAt")
+                 SELECT x.id, x.code, x.name, x.grade, true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                 FROM unnest($1::text[], $2::text[], $3::text[], $4::text[]) AS x(id, code, name, grade)
+                 ON CONFLICT ("code") DO UPDATE SET
+                   "grade" = EXCLUDED."grade",
+                   "active" = true,
+                   "updatedAt" = CURRENT_TIMESTAMP`,
+                [
+                  matsArr.map(m => m.id),
+                  matsArr.map(m => m.code),
+                  matsArr.map(m => m.name),
+                  matsArr.map(m => m.grade),
+                ],
+              );
+              const refreshedMats = await pgClient.query(`SELECT "id", "code" FROM "materials"`);
+              for (const row of (refreshedMats.rows || []) as Array<{ id: string; code: string }>) {
+                matMap.set(String(row.code).toUpperCase(), row.id);
+              }
+            }
+          } catch {
+            // materials table is optional in older custom schemas
+          }
 
           if (fallbackUomId) {
-            // Deduplicate by normalized partNumber to guarantee PostgreSQL ON CONFLICT does not touch same key twice in a batch
-            const dedupPartsMap = new Map<string, Part>();
+            // Deduplicate case-insensitively by normalized partNumber
+            const dedupPartsMap = new Map<string, { partNumber: string; part: Part }>();
             for (const p of inventoryPayload.parts as Part[]) {
               if (!p?.code || !p?.name) continue;
               const partNumber = normalizeExcelDigits(p.code);
-              if (partNumber) dedupPartsMap.set(partNumber, p);
+              if (partNumber) {
+                dedupPartsMap.set(partNumber.toUpperCase(), { partNumber, part: p });
+              }
             }
-            const uniquePartsList = Array.from(dedupPartsMap.entries());
-            const CHUNK = 200;
 
             await pgClient.query('BEGIN');
             try {
-              for (let i = 0; i < uniquePartsList.length; i += CHUNK) {
-                const chunk = uniquePartsList.slice(i, i + CHUNK);
-                const valuesSql: string[] = [];
-                const params: any[] = [];
-                let pIdx = 1;
+              const existingPartsRes = await pgClient.query(
+                `SELECT "id", "partNumber", "active" FROM "parts"`,
+              );
+              const existingRows = (existingPartsRes.rows || []) as Array<{
+                id: string;
+                partNumber: string;
+                active: boolean;
+              }>;
+              const existingById = new Map(existingRows.map(r => [r.id, r]));
+              const existingByExactCode = new Map(existingRows.map(r => [r.partNumber, r]));
+              const existingByUpperCode = new Map(existingRows.map(r => [r.partNumber.toUpperCase(), r]));
+              const claimedPartIds = new Set(existingRows.map(r => r.id));
 
-                for (const [partNumber, p] of chunk) {
-                  const normCat = normalizePartCategory(p.category, partNumber);
-                  const normUom = normalizePartUnit(p.unit, normCat);
-                  const uomId = uomMap.get(normUom) || fallbackUomId;
-                  const weightVal = Math.max(0.0001, parseExcelNumber(p.weightPerUnitKg, 1));
-                  const minSafety = Math.max(0, parseExcelNumber(p.minStock, 0));
-                  const maxStock = p.maxStock != null && Number(p.maxStock) > 0 ? parseExcelNumber(p.maxStock, 0) : null;
-                  const leadTime = Math.max(1, Math.round(Number(p.leadTimeDays) || 1));
-                  const sapcoCode = p.sapcoCode ? String(p.sapcoCode).trim() : null;
-                  const carModel = p.carModel ? String(p.carModel).trim() : null;
-                  const name = String(p.name).trim();
-
-                  valuesSql.push(
-                    `($${pIdx}, $${pIdx + 1}, $${pIdx + 2}, $${pIdx + 3}, $${pIdx + 4}::"PartCategory", $${pIdx + 5}, $${pIdx + 6}, $${pIdx + 7}, $${pIdx + 8}, 0, $${pIdx + 9}, $${pIdx + 10}, $${pIdx + 11}, true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-                  );
-                  params.push(
-                    crypto.randomUUID(),
-                    partNumber,
-                    sapcoCode,
-                    name,
-                    normCat,
-                    carModel,
-                    uomId,
-                    weightVal,
-                    weightVal,
-                    minSafety,
-                    maxStock,
-                    leadTime,
-                  );
-                  pIdx += 12;
-                }
-
-                if (valuesSql.length > 0) {
-                  await pgClient.query(
-                    `INSERT INTO "parts" ("id", "partNumber", "supplierPartNumber", "name", "category", "carModel", "unitId", "weightNetKg", "weightGrossKg", "scrapNormPercent", "minSafetyStock", "maxStock", "leadTimeDays", "active", "createdAt", "updatedAt")
-                     VALUES ${valuesSql.join(', ')}
-                     ON CONFLICT ("partNumber") DO UPDATE SET
-                       "supplierPartNumber" = EXCLUDED."supplierPartNumber",
-                       "name" = EXCLUDED."name",
-                       "category" = EXCLUDED."category",
-                       "carModel" = EXCLUDED."carModel",
-                       "unitId" = EXCLUDED."unitId",
-                       "weightNetKg" = EXCLUDED."weightNetKg",
-                       "weightGrossKg" = EXCLUDED."weightGrossKg",
-                       "minSafetyStock" = EXCLUDED."minSafetyStock",
-                       "maxStock" = EXCLUDED."maxStock",
-                       "leadTimeDays" = EXCLUDED."leadTimeDays",
-                       "active" = true,
-                       "updatedAt" = CURRENT_TIMESTAMP`,
-                    params,
-                  );
-                  relationalPartsSynced += chunk.length;
-                }
+              interface PreparedSyncPart {
+                id: string;
+                isExisting: boolean;
+                partNumber: string;
+                supplierPartNumber: string | null;
+                name: string;
+                category: string;
+                carModel: string | null;
+                unitId: string;
+                materialId: string | null;
+                thicknessMm: number | null;
+                weightNetKg: number;
+                weightGrossKg: number;
+                minSafetyStock: number;
+                maxStock: number | null;
+                leadTimeDays: number;
               }
+
+              const preparedList: PreparedSyncPart[] = [];
+              const canonicalTargetIds = new Set<string>();
+              const usedTargetPartNumbers = new Set<string>();
+
+              for (const [upperCode, { partNumber, part: p }] of dedupPartsMap.entries()) {
+                const matchedExisting =
+                  existingByExactCode.get(partNumber) ||
+                  existingByUpperCode.get(upperCode) ||
+                  (p.id ? existingById.get(p.id) : undefined);
+
+                let targetId: string;
+                if (matchedExisting && !canonicalTargetIds.has(matchedExisting.id)) {
+                  targetId = matchedExisting.id;
+                } else if (p.id && !claimedPartIds.has(p.id)) {
+                  targetId = p.id;
+                  claimedPartIds.add(targetId);
+                } else {
+                  targetId = crypto.randomUUID();
+                  claimedPartIds.add(targetId);
+                }
+                canonicalTargetIds.add(targetId);
+                usedTargetPartNumbers.add(partNumber);
+
+                const normCat = normalizePartCategory(p.category, partNumber);
+                const normUom = normalizePartUnit(p.unit, normCat);
+                const uomId = uomMap.get(normUom) || fallbackUomId;
+
+                let materialId: string | null = null;
+                const gradeStr = String(p.materialGrade || '').trim().toUpperCase();
+                if (gradeStr) {
+                  const cleaned = gradeStr.replace(/[^A-Z0-9_-]/g, '');
+                  const matCode = cleaned
+                    ? `MAT-${cleaned}`
+                    : `MAT-${Buffer.from(gradeStr).toString('hex').slice(0, 12).toUpperCase()}`;
+                  materialId = matMap.get(matCode) || null;
+                }
+
+                const weightVal = Math.max(0.0001, parseExcelNumber(p.weightPerUnitKg, 1));
+                const minSafety = Math.max(0, parseExcelNumber(p.minStock, 0));
+                const maxStock = p.maxStock != null && Number(p.maxStock) > 0 ? parseExcelNumber(p.maxStock, 0) : null;
+                const thicknessMm = p.thicknessMm != null && Number(p.thicknessMm) > 0 ? parseExcelNumber(p.thicknessMm, 0) : null;
+                const leadTime = Math.max(1, Math.round(Number(p.leadTimeDays) || 1));
+
+                preparedList.push({
+                  id: targetId,
+                  isExisting: Boolean(matchedExisting && matchedExisting.id === targetId),
+                  partNumber,
+                  supplierPartNumber: p.sapcoCode ? String(p.sapcoCode).trim() : null,
+                  name: String(p.name).trim(),
+                  category: normCat,
+                  carModel: p.carModel ? String(p.carModel).trim() : null,
+                  unitId: uomId,
+                  materialId,
+                  thicknessMm,
+                  weightNetKg: weightVal,
+                  weightGrossKg: weightVal,
+                  minSafetyStock: minSafety,
+                  maxStock,
+                  leadTimeDays: leadTime,
+                });
+              }
+
+              // Deactivate any DB rows not in the canonical target set FIRST and free colliding partNumbers on obsolete rows
+              const allCanonicalIdArray = Array.from(canonicalTargetIds);
+              if (allCanonicalIdArray.length > 0) {
+                const deactRes = await pgClient.query(
+                  `UPDATE "parts" SET "active" = false, "updatedAt" = CURRENT_TIMESTAMP
+                   WHERE "active" = true AND NOT ("id" = ANY($1::text[]))`,
+                  [allCanonicalIdArray],
+                );
+                deactivatedPartsCount = deactRes.rowCount || 0;
+
+                // Free any unique partNumber held by a deactivated/non-canonical row so renames never fail
+                const targetNumberArray = Array.from(usedTargetPartNumbers);
+                if (targetNumberArray.length > 0) {
+                  await pgClient.query(
+                    `UPDATE "parts"
+                     SET "partNumber" = "partNumber" || '__OBSOLETE__' || LEFT("id", 8),
+                         "active" = false,
+                         "updatedAt" = CURRENT_TIMESTAMP
+                     WHERE NOT ("id" = ANY($1::text[]))
+                       AND "partNumber" = ANY($2::text[])`,
+                    [allCanonicalIdArray, targetNumberArray],
+                  );
+                }
+              } else {
+                const deactRes = await pgClient.query(
+                  `UPDATE "parts" SET "active" = false, "updatedAt" = CURRENT_TIMESTAMP WHERE "active" = true`,
+                );
+                deactivatedPartsCount = deactRes.rowCount || 0;
+              }
+
+              const rowsToUpdate = preparedList.filter(r => r.isExisting);
+              const rowsToInsert = preparedList.filter(r => !r.isExisting);
+              const BULK_CHUNK = 800;
+
+              for (let i = 0; i < rowsToUpdate.length; i += BULK_CHUNK) {
+                const chunk = rowsToUpdate.slice(i, i + BULK_CHUNK);
+                await pgClient.query(
+                  `UPDATE "parts" AS t
+                   SET "partNumber" = v.part_number,
+                       "supplierPartNumber" = v.supplier_part_number,
+                       "name" = v.name,
+                       "category" = v.category,
+                       "carModel" = v.car_model,
+                       "unitId" = v.unit_id,
+                       "materialId" = v.material_id,
+                       "thicknessMm" = v.thickness_mm,
+                       "weightNetKg" = v.weight_net_kg,
+                       "weightGrossKg" = v.weight_gross_kg,
+                       "minSafetyStock" = v.min_safety_stock,
+                       "maxStock" = v.max_stock,
+                       "leadTimeDays" = v.lead_time_days,
+                       "active" = true,
+                       "updatedAt" = CURRENT_TIMESTAMP
+                   FROM unnest(
+                     $1::text[], $2::text[], $3::text[], $4::text[], $5::"PartCategory"[],
+                     $6::text[], $7::text[], $8::text[], $9::numeric[], $10::numeric[],
+                     $11::numeric[], $12::numeric[], $13::numeric[], $14::int4[]
+                   ) AS v(
+                     id, part_number, supplier_part_number, name, category,
+                     car_model, unit_id, material_id, thickness_mm, weight_net_kg,
+                     weight_gross_kg, min_safety_stock, max_stock, lead_time_days
+                   )
+                   WHERE t."id" = v.id`,
+                  [
+                    chunk.map(r => r.id),
+                    chunk.map(r => r.partNumber),
+                    chunk.map(r => r.supplierPartNumber),
+                    chunk.map(r => r.name),
+                    chunk.map(r => r.category),
+                    chunk.map(r => r.carModel),
+                    chunk.map(r => r.unitId),
+                    chunk.map(r => r.materialId),
+                    chunk.map(r => r.thicknessMm),
+                    chunk.map(r => r.weightNetKg),
+                    chunk.map(r => r.weightGrossKg),
+                    chunk.map(r => r.minSafetyStock),
+                    chunk.map(r => r.maxStock),
+                    chunk.map(r => r.leadTimeDays),
+                  ],
+                );
+                relationalPartsSynced += chunk.length;
+              }
+
+              for (let i = 0; i < rowsToInsert.length; i += BULK_CHUNK) {
+                const chunk = rowsToInsert.slice(i, i + BULK_CHUNK);
+                await pgClient.query(
+                  `INSERT INTO "parts" (
+                     "id", "partNumber", "supplierPartNumber", "name", "category",
+                     "carModel", "unitId", "materialId", "thicknessMm", "weightNetKg",
+                     "weightGrossKg", "scrapNormPercent", "minSafetyStock", "maxStock",
+                     "leadTimeDays", "active", "createdAt", "updatedAt"
+                   )
+                   SELECT
+                     v.id, v.part_number, v.supplier_part_number, v.name, v.category,
+                     v.car_model, v.unit_id, v.material_id, v.thickness_mm, v.weight_net_kg,
+                     v.weight_gross_kg, 0, v.min_safety_stock, v.max_stock,
+                     v.lead_time_days, true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                   FROM unnest(
+                     $1::text[], $2::text[], $3::text[], $4::text[], $5::"PartCategory"[],
+                     $6::text[], $7::text[], $8::text[], $9::numeric[], $10::numeric[],
+                     $11::numeric[], $12::numeric[], $13::numeric[], $14::int4[]
+                   ) AS v(
+                     id, part_number, supplier_part_number, name, category,
+                     car_model, unit_id, material_id, thickness_mm, weight_net_kg,
+                     weight_gross_kg, min_safety_stock, max_stock, lead_time_days
+                   )
+                   ON CONFLICT ("partNumber") DO UPDATE SET
+                     "supplierPartNumber" = EXCLUDED."supplierPartNumber",
+                     "name" = EXCLUDED."name",
+                     "category" = EXCLUDED."category",
+                     "carModel" = EXCLUDED."carModel",
+                     "unitId" = EXCLUDED."unitId",
+                     "materialId" = EXCLUDED."materialId",
+                     "thicknessMm" = EXCLUDED."thicknessMm",
+                     "weightNetKg" = EXCLUDED."weightNetKg",
+                     "weightGrossKg" = EXCLUDED."weightGrossKg",
+                     "minSafetyStock" = EXCLUDED."minSafetyStock",
+                     "maxStock" = EXCLUDED."maxStock",
+                     "leadTimeDays" = EXCLUDED."leadTimeDays",
+                     "active" = true,
+                     "updatedAt" = CURRENT_TIMESTAMP`,
+                  [
+                    chunk.map(r => r.id),
+                    chunk.map(r => r.partNumber),
+                    chunk.map(r => r.supplierPartNumber),
+                    chunk.map(r => r.name),
+                    chunk.map(r => r.category),
+                    chunk.map(r => r.carModel),
+                    chunk.map(r => r.unitId),
+                    chunk.map(r => r.materialId),
+                    chunk.map(r => r.thicknessMm),
+                    chunk.map(r => r.weightNetKg),
+                    chunk.map(r => r.weightGrossKg),
+                    chunk.map(r => r.minSafetyStock),
+                    chunk.map(r => r.maxStock),
+                    chunk.map(r => r.leadTimeDays),
+                  ],
+                );
+                relationalPartsSynced += chunk.length;
+              }
+
               await pgClient.query('COMMIT');
             } catch (txErr) {
               await pgClient.query('ROLLBACK').catch(() => {});
@@ -4321,11 +4764,20 @@ async function writeFullSnapshotBundleToPgUrl(
             }
           }
         } catch (relErr) {
-          console.warn('[KPIMS Cloud Sync] Relational part batch sync warning:', relErr instanceof Error ? relErr.message : relErr);
+          relationalSyncWarning = relErr instanceof Error ? relErr.message : String(relErr);
+          console.warn('[KPIMS Cloud Sync] Relational part batch sync warning:', relationalSyncWarning);
         }
+      } else if (alsoSyncRelationalParts && !schemaReady) {
+        relationalSyncWarning = 'جداول رابطه‌ای PostgreSQL در پایگاه داده مقصد آماده نبود؛ اسنپ‌شات کامل ذخیره شد.';
       }
 
-      return { relationalPartsSynced, manifest, latencyMs: Date.now() - started };
+      return {
+        relationalPartsSynced,
+        deactivatedPartsCount,
+        relationalSyncWarning,
+        manifest,
+        latencyMs: Date.now() - started,
+      };
     },
     { retries: 1 },
   );
@@ -4361,6 +4813,13 @@ apiRouter.post('/db/sync/push', async (req: Request, res: Response) => {
         ? req.body.deviceLabel.trim().slice(0, 48)
         : cfg.deviceLabel || getDefaultDeviceLabel();
 
+    // Ensure all cross-module references reflect the latest part catalog before snapshotting & pushing
+    const healedBeforePush = reconcileAllPartReferencesFromCatalog();
+    if (healedBeforePush.totalUpdated > 0) {
+      await persistInventoryAppState();
+      await persistProductionWipState();
+    }
+
     const localInfo = computeLocalSyncSnapshotInfo();
     writeInventoryDiskSnapshot(localInfo.inventoryPayload);
 
@@ -4387,7 +4846,12 @@ apiRouter.post('/db/sync/push', async (req: Request, res: Response) => {
       true,
     );
 
-    const summary = `آپلود کامل (Push #${writeRes.manifest.revision}) از «${customDeviceLabel}» به دیتابیس آنلاین انجام شد (${localInfo.counts.parts} قطعه، ${localInfo.counts.manufacturingOrders} دستور تولید، ${localInfo.counts.inventoryDocs} سند انبار).`;
+    const deactivatedNote =
+      writeRes.deactivatedPartsCount > 0 ? `، ${writeRes.deactivatedPartsCount} قطعه حذف‌شده غیرفعال شد` : '';
+    const warningNote = writeRes.relationalSyncWarning
+      ? ` [هشدار جدول رابطه‌ای: ${writeRes.relationalSyncWarning}]`
+      : '';
+    const summary = `آپلود کامل (Push #${writeRes.manifest.revision}) از «${customDeviceLabel}» به دیتابیس آنلاین انجام شد (${localInfo.counts.parts} قطعه، ${localInfo.counts.manufacturingOrders} دستور تولید، ${localInfo.counts.inventoryDocs} سند انبار${deactivatedNote}).${warningNote}`;
     recordCloudSyncCompleted(writeRes.manifest, localInfo.hash, summary);
     setCloudManifestCache(cfg.cloudDbUrl, writeRes.manifest, writeRes.latencyMs);
 
@@ -4397,6 +4861,8 @@ apiRouter.post('/db/sync/push', async (req: Request, res: Response) => {
       message: summary,
       manifest: writeRes.manifest,
       relationalPartsSynced: writeRes.relationalPartsSynced,
+      deactivatedPartsCount: writeRes.deactivatedPartsCount,
+      relationalSyncWarning: writeRes.relationalSyncWarning,
       checkResult,
       status: await checkDatabaseConnection(false),
     });
@@ -4484,10 +4950,11 @@ apiRouter.post('/db/sync/pull', async (_req: Request, res: Response) => {
       replaceProductionWipStateFromSync(pulled.wipPayload, pulled.wipVersion);
     }
     const healedOnPull = reconcileAllPartReferencesFromCatalog();
+    lastLocalPartMutationMs = Date.now();
     if (pulled.invPayload || healedOnPull.totalUpdated > 0) {
       await persistInventoryAppState();
     }
-    if (healedOnPull.totalUpdated > 0) {
+    if (healedOnPull.totalUpdated > 0 || pulled.wipPayload) {
       await persistProductionWipState();
     }
 
@@ -4504,9 +4971,11 @@ apiRouter.post('/db/sync/pull', async (_req: Request, res: Response) => {
     // If a Local PostgreSQL URL is configured and reachable on this PC, push the pulled state into it too!
     let localPgUpdated = false;
     let localPgWarning: string | undefined;
+    let localRelationalSynced = 0;
+    let localDeactivatedCount = 0;
     if (isValidPostgresUrlSyntax(cfg.localDbUrl)) {
       try {
-        await writeFullSnapshotBundleToPgUrl(
+        const localWriteRes = await writeFullSnapshotBundleToPgUrl(
           cfg.localDbUrl,
           postPullInfo.inventoryPayload,
           postPullInfo.wipPayload,
@@ -4514,12 +4983,21 @@ apiRouter.post('/db/sync/pull', async (_req: Request, res: Response) => {
           true,
         );
         localPgUpdated = true;
+        localRelationalSynced = localWriteRes.relationalPartsSynced;
+        localDeactivatedCount = localWriteRes.deactivatedPartsCount;
+        if (localWriteRes.relationalSyncWarning) {
+          localPgWarning = localWriteRes.relationalSyncWarning;
+        }
       } catch (localErr) {
         localPgWarning = localErr instanceof Error ? localErr.message : String(localErr);
       }
     }
 
-    const summary = `به‌روزرسانی محلی (Pull #${resolvedManifest.revision}) از «${resolvedManifest.deviceLabel}» با موفقیت انجام شد (${postPullInfo.counts.parts} قطعه، ${postPullInfo.counts.manufacturingOrders} دستور تولید${localPgUpdated ? ' + ذخیره در PostgreSQL محلی' : ''}).`;
+    // Protect freshly-pulled snapshot from being overwritten by un-updated local or legacy cloud relational "parts" rows
+    skipDbPartsMergeAfterPull = !localPgUpdated || Boolean(localPgWarning);
+
+    const deactivatedNote = localDeactivatedCount > 0 ? `، ${localDeactivatedCount} قطعه حذف‌شده پاکسازی شد` : '';
+    const summary = `به‌روزرسانی محلی (Pull #${resolvedManifest.revision}) از «${resolvedManifest.deviceLabel}» با موفقیت انجام شد (${postPullInfo.counts.parts} قطعه، ${postPullInfo.counts.manufacturingOrders} دستور تولید${localPgUpdated ? ` + ذخیره در PostgreSQL محلی${deactivatedNote}` : ''}).`;
     recordCloudSyncCompleted(resolvedManifest, postPullInfo.hash, summary);
     setCloudManifestCache(cfg.cloudDbUrl, resolvedManifest, pullLatencyMs);
 
@@ -4529,6 +5007,8 @@ apiRouter.post('/db/sync/pull', async (_req: Request, res: Response) => {
       message: summary,
       manifest: resolvedManifest,
       localPgUpdated,
+      localRelationalSynced,
+      localDeactivatedCount,
       localPgWarning,
       counts: postPullInfo.counts,
       checkResult,
@@ -4544,6 +5024,8 @@ apiRouter.post('/db/sync/pull', async (_req: Request, res: Response) => {
 
 apiRouter.post('/db/sync', async (_req: Request, res: Response) => {
   try {
+    skipDbPartsMergeAfterPull = false;
+    lastLocalPartMutationMs = Date.now();
     await persistInventoryAppState();
     await persistProductionWipState();
     const status = await checkDatabaseConnection(false);
@@ -4572,7 +5054,7 @@ apiRouter.post('/db/sync', async (_req: Request, res: Response) => {
     const uRes = await syncUnitsToPostgres(unitsStore);
     const wRes = await syncWarehousesToPostgres(warehousesStore);
     const cuRes = await syncCustomersToPostgres(customersStore);
-    const pRes = await syncPartsToPostgres(partsStore);
+    const pRes = await syncPartsToPostgres(partsStore, undefined, { deactivateMissing: true });
     const cRes = await syncContractsToPostgres(contractsStore);
     const coilRes = await syncCoilsToPostgres(physicalCoilsStore);
     await persistInventoryAppState();
@@ -10621,6 +11103,10 @@ apiRouter.post('/inventory/import/confirm', async (req: Request, res: Response) 
         oldName: item.oldName,
         recordAuditLog: false,
       });
+    }
+    if (partsToPersistInDb.length > 0) {
+      skipDbPartsMergeAfterPull = false;
+      lastLocalPartMutationMs = Date.now();
     }
     await persistInventoryAppState();
     if (updatedExistingPartsForCascade.length > 0) {

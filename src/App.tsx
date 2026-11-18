@@ -436,7 +436,10 @@ function AppContent() {
       }
       if (json.checkResult) setCloudSyncCheck(json.checkResult);
       setDismissedRemoteHash(null);
-      setCloudSyncToast({ ok: true, text: json.message });
+      setCloudSyncToast({
+        ok: !json.relationalSyncWarning,
+        text: json.message,
+      });
     } catch (err) {
       setCloudSyncToast({
         ok: false,
@@ -458,7 +461,9 @@ function AppContent() {
       if (json.checkResult) setCloudSyncCheck(json.checkResult);
       setDismissedRemoteHash(null);
       await loadAllData();
-      setCloudSyncToast({ ok: true, text: json.message });
+      window.dispatchEvent(new CustomEvent('kpims-master-data-updated', { detail: { type: 'CLOUD_PULL' } }));
+      const warnText = json.localPgWarning ? ` (هشدار دیتابیس محلی: ${json.localPgWarning})` : '';
+      setCloudSyncToast({ ok: true, text: `${json.message}${warnText}` });
     } catch (err) {
       setCloudSyncToast({
         ok: false,
