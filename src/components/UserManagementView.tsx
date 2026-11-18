@@ -29,6 +29,7 @@ import { toPersianDigits } from '../utils/formatters';
 import { auth } from '../lib/firebase';
 import { GoogleAuthProvider, signInWithPopup, signOut } from 'firebase/auth';
 import { KpiCardsSkeleton } from './ui/Skeleton';
+import { InlinePageGuideButton } from './common/PageGuideSystem';
 
 interface UserManagementViewProps {
   currentUser: UserRoleProfile;
@@ -85,6 +86,8 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
   const [localTestResult, setLocalTestResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [cloudTestResult, setCloudTestResult] = useState<{ ok: boolean; message: string } | null>(null);
 
+  const [smartSyncBusy, setSmartSyncBusy] = useState(false);
+
   useEffect(() => {
     setActiveSubTab(initialSubTab);
   }, [initialSubTab]);
@@ -100,6 +103,9 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
   const selectSubTab = (sub: 'rbac' | 'db_architecture') => {
     setActiveSubTab(sub);
     onSubTabChange?.(sub);
+    if (sub === 'db_architecture') {
+      fetchDbStatus(true);
+    }
   };
 
   const fetchDbStatus = async (probe = false) => {
@@ -127,7 +133,7 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
   };
 
   useEffect(() => {
-    fetchDbStatus(false);
+    fetchDbStatus(true);
   }, []);
 
   const handleSaveDualDbConfig = async () => {
@@ -182,7 +188,7 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
       const res = await fetch('/api/db/test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ target, url }),
+        body: JSON.stringify({ target, url, persistOnSuccess: true }),
       });
       const json = await res.json();
       const result = { ok: Boolean(json.success), message: json.message || json.error || 'نتیجه نامشخص' };
@@ -194,12 +200,66 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
           onCheckCloudUpdates?.(true);
         }
       }
+      if (result.ok) {
+        await fetchDbStatus(true);
+      }
     } catch (err) {
       const result = { ok: false, message: err instanceof Error ? err.message : 'خطا در تست اتصال' };
       if (target === 'LOCAL') setLocalTestResult(result);
       else setCloudTestResult(result);
     } finally {
       setTestingTarget(null);
+    }
+  };
+
+  const handleSmartOneClickSync = async () => {
+    setSmartSyncBusy(true);
+    setDbFeedback(null);
+    try {
+      const checkRes = await fetch('/api/db/sync/check?force=true');
+      const checkJson = await checkRes.json();
+      if (!checkRes.ok || !checkJson.success || !checkJson.data) {
+        throw new Error(checkJson.error || 'خطا در بررسی وضعیت همگام‌سازی آنلاین');
+      }
+      const status: CloudSyncCheckResult = checkJson.data;
+      setLocalCheckOverride(status);
+
+      if (status.state === 'CLOUD_NOT_CONFIGURED' || status.state === 'CLOUD_UNREACHABLE') {
+        setDbFeedback({ ok: false, text: status.messageFa });
+        return;
+      }
+
+      if (status.state === 'IN_SYNC') {
+        setDbFeedback({
+          ok: true,
+          text: `پایگاه داده محلی و آنلاین کاملاً همگام هستند (Rev #${toPersianDigits(status.localRevision)}). نیازی به تغییر نیست.`,
+        });
+        await onCheckCloudUpdates?.(true);
+        return;
+      }
+
+      if (status.state === 'REMOTE_AHEAD') {
+        await handleGitAction('PULL');
+        return;
+      }
+
+      if (status.state === 'LOCAL_AHEAD' || status.state === 'CLOUD_EMPTY') {
+        await handleGitAction('PUSH');
+        return;
+      }
+
+      // DIVERGED: let operator choose explicitly rather than guessing
+      setDbFeedback({
+        ok: false,
+        text: 'تغییرات جدید در هر دو سیستم وجود دارد (DIVERGED). لطفاً دقیقاً یکی از دکمه‌های Pull (دریافت نسخه آنلاین) یا Push (ارسال نسخه این سیستم) را بزنید.',
+      });
+    } catch (err) {
+      setDbFeedback({
+        ok: false,
+        text: err instanceof Error ? err.message : 'خطا در همگام‌سازی یک‌کلیک',
+      });
+    } finally {
+      setSmartSyncBusy(false);
     }
   };
 
@@ -419,6 +479,11 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
               </button>
             </div>
           </div>
+
+          <InlinePageGuideButton
+            routeContext={{ tab: 'settings', settingsSubTab: activeSubTab }}
+            label="آموزش این صفحه و دکمه‌ها"
+          />
         </div>
       </div>
 
@@ -565,18 +630,25 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-3.5">
               {/* Local Database Link */}
               <div className="p-3.5 bg-[#f7f9fb] border border-[#d9e2ec] rounded-sm space-y-2.5">
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between gap-2">
                   <span className="text-xs font-bold text-[#333333] flex items-center gap-1.5">
                     <Server className="w-4 h-4 text-[#007cc0]" />
                     ۱. لینک پایگاه داده محلی (Local Server / LAN DB)
                   </span>
-                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded-sm border ${
-                    dbStatus?.data?.dualLinks?.localStatus?.isConnected
-                      ? 'bg-[#ebf7ef] text-[#107e3e] border-[#a9dfbf]'
-                      : 'bg-[#f5f5f5] text-[#666666] border-[#d9d9d9]'
-                  }`}>
-                    {dbStatus?.data?.dualLinks?.localStatus?.isConnected ? 'متصل' : dbStatus?.data?.dualLinks?.hasLocalDbUrl ? 'تنظیم‌شده' : 'تنظیم‌نشده'}
-                  </span>
+                  <div className="flex items-center gap-1.5 text-[10px] font-bold">
+                    {dbStatus?.data?.dualLinks?.hasLocalDbUrl && (
+                      <span className="text-[#107e3e] bg-[#ebf7ef] border border-[#a9dfbf] px-2 py-0.5 rounded-sm">
+                        رمز ذخیره شده ✓
+                      </span>
+                    )}
+                    <span className={`px-2 py-0.5 rounded-sm border ${
+                      dbStatus?.data?.dualLinks?.localStatus?.isConnected
+                        ? 'bg-[#ebf7ef] text-[#107e3e] border-[#a9dfbf]'
+                        : 'bg-[#f5f5f5] text-[#666666] border-[#d9d9d9]'
+                    }`}>
+                      {dbStatus?.data?.dualLinks?.localStatus?.isConnected ? 'متصل' : dbStatus?.data?.dualLinks?.hasLocalDbUrl ? 'ذخیره‌شده' : 'تنظیم‌نشده'}
+                    </span>
+                  </div>
                 </div>
                 <input
                   type="text"
@@ -586,16 +658,31 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
                   placeholder="postgresql://postgres:password@localhost:5432/kpims_db?schema=public"
                   className="w-full px-3 py-2 text-xs font-mono bg-white border border-[#bfbfbf] rounded-sm focus:outline-none focus:border-[#007cc0]"
                 />
-                <div className="flex items-center justify-between gap-2">
-                  <button
-                    type="button"
-                    onClick={() => handleTestSingleDb('LOCAL')}
-                    disabled={testingTarget === 'LOCAL' || !localDbUrl.trim()}
-                    className="sap-btn-standard text-[11px] px-3 py-1 disabled:opacity-50 cursor-pointer"
-                  >
-                    {testingTarget === 'LOCAL' ? 'در حال تست محلی...' : 'تست اتصال محلی'}
-                  </button>
-                  <span className="text-[10px] text-[#666666]">مناسب شبکه داخلی کارخانه یا Docker</span>
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => handleTestSingleDb('LOCAL')}
+                      disabled={testingTarget === 'LOCAL' || !localDbUrl.trim()}
+                      className="sap-btn-standard text-[11px] px-3 py-1 disabled:opacity-50 cursor-pointer whitespace-nowrap"
+                    >
+                      {testingTarget === 'LOCAL' ? 'در حال تست محلی...' : 'تست و ذخیره خودکار محلی'}
+                    </button>
+                    {localDbUrl.trim() && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setLocalDbUrl('');
+                          setLocalTestResult(null);
+                        }}
+                        className="text-[11px] text-[#666666] hover:text-[#bb0000] px-2 py-1 cursor-pointer whitespace-nowrap"
+                        title="پاک‌کردن فیلد برای وارد کردن لینک جدید"
+                      >
+                        تغییر لینک
+                      </button>
+                    )}
+                  </div>
+                  <span className="text-[10px] text-[#666666]">مناسب شبکه داخلی کارخانه (بدون نیاز به ورود مجدد رمز)</span>
                 </div>
                 {localTestResult && (
                   <div className={`text-[11px] p-2 rounded-sm border ${
@@ -608,18 +695,25 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
 
               {/* Cloud Database Link */}
               <div className="p-3.5 bg-[#f7f9fb] border border-[#d9e2ec] rounded-sm space-y-2.5">
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between gap-2">
                   <span className="text-xs font-bold text-[#333333] flex items-center gap-1.5">
                     <Database className="w-4 h-4 text-[#107e3e]" />
                     ۲. لینک پایگاه داده ابری (Cloud / Supabase Pooler)
                   </span>
-                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded-sm border ${
-                    dbStatus?.data?.dualLinks?.cloudStatus?.isConnected
-                      ? 'bg-[#ebf7ef] text-[#107e3e] border-[#a9dfbf]'
-                      : 'bg-[#f5f5f5] text-[#666666] border-[#d9d9d9]'
-                  }`}>
-                    {dbStatus?.data?.dualLinks?.cloudStatus?.isConnected ? 'متصل' : dbStatus?.data?.dualLinks?.hasCloudDbUrl ? 'تنظیم‌شده' : 'تنظیم‌نشده'}
-                  </span>
+                  <div className="flex items-center gap-1.5 text-[10px] font-bold">
+                    {dbStatus?.data?.dualLinks?.hasCloudDbUrl && (
+                      <span className="text-[#107e3e] bg-[#ebf7ef] border border-[#a9dfbf] px-2 py-0.5 rounded-sm">
+                        رمز ذخیره شده ✓
+                      </span>
+                    )}
+                    <span className={`px-2 py-0.5 rounded-sm border ${
+                      dbStatus?.data?.dualLinks?.cloudStatus?.isConnected
+                        ? 'bg-[#ebf7ef] text-[#107e3e] border-[#a9dfbf]'
+                        : 'bg-[#f5f5f5] text-[#666666] border-[#d9d9d9]'
+                    }`}>
+                      {dbStatus?.data?.dualLinks?.cloudStatus?.isConnected ? 'متصل' : dbStatus?.data?.dualLinks?.hasCloudDbUrl ? 'ذخیره‌شده' : 'تنظیم‌نشده'}
+                    </span>
+                  </div>
                 </div>
                 <input
                   type="text"
@@ -629,16 +723,31 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
                   placeholder="postgresql://postgres.xxxx:password@aws-0-region.pooler.supabase.com:6543/postgres"
                   className="w-full px-3 py-2 text-xs font-mono bg-white border border-[#bfbfbf] rounded-sm focus:outline-none focus:border-[#007cc0]"
                 />
-                <div className="flex items-center justify-between gap-2">
-                  <button
-                    type="button"
-                    onClick={() => handleTestSingleDb('CLOUD')}
-                    disabled={testingTarget === 'CLOUD' || !cloudDbUrl.trim()}
-                    className="sap-btn-standard text-[11px] px-3 py-1 disabled:opacity-50 cursor-pointer"
-                  >
-                    {testingTarget === 'CLOUD' ? 'در حال تست ابری...' : 'تست اتصال ابری'}
-                  </button>
-                  <span className="text-[10px] text-[#666666]">پیشنهاد شبکه اداری: لینک Session Pooler سوپابیس (دارای IPv4)</span>
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => handleTestSingleDb('CLOUD')}
+                      disabled={testingTarget === 'CLOUD' || !cloudDbUrl.trim()}
+                      className="sap-btn-standard text-[11px] px-3 py-1 disabled:opacity-50 cursor-pointer whitespace-nowrap"
+                    >
+                      {testingTarget === 'CLOUD' ? 'در حال تست ابری...' : 'تست و ذخیره خودکار ابری'}
+                    </button>
+                    {cloudDbUrl.trim() && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCloudDbUrl('');
+                          setCloudTestResult(null);
+                        }}
+                        className="text-[11px] text-[#666666] hover:text-[#bb0000] px-2 py-1 cursor-pointer whitespace-nowrap"
+                        title="پاک‌کردن فیلد برای وارد کردن لینک جدید"
+                      >
+                        تغییر لینک
+                      </button>
+                    )}
+                  </div>
+                  <span className="text-[10px] text-[#666666]">پیشنهاد: Session Pooler سوپابیس (پس از تست موفق، همیشه ذخیره می‌ماند)</span>
                 </div>
                 {cloudTestResult && (
                   <div className={`text-[11px] p-2 rounded-sm border ${
@@ -855,9 +964,19 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
               <div className="flex flex-wrap items-center gap-2.5">
                 <button
                   type="button"
+                  onClick={handleSmartOneClickSync}
+                  disabled={Boolean(activeGitBusy) || smartSyncBusy}
+                  className="sap-btn-emphasized text-xs px-4 py-1.5 flex items-center gap-1.5 cursor-pointer disabled:opacity-50 whitespace-nowrap"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${smartSyncBusy ? 'animate-spin' : ''}`} />
+                  <span>{smartSyncBusy ? 'در حال همگام‌سازی خودکار...' : 'همگام‌سازی هوشمند یک‌کلیک (خودکار)'}</span>
+                </button>
+
+                <button
+                  type="button"
                   onClick={() => handleGitAction('CHECK')}
-                  disabled={Boolean(activeGitBusy)}
-                  className="sap-btn-standard text-xs px-3 py-1.5 flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                  disabled={Boolean(activeGitBusy) || smartSyncBusy}
+                  className="sap-btn-standard text-xs px-3 py-1.5 flex items-center gap-1.5 cursor-pointer disabled:opacity-50 whitespace-nowrap"
                 >
                   <RefreshCw className={`w-3.5 h-3.5 ${activeGitBusy === 'CHECK' ? 'animate-spin' : ''}`} />
                   <span>{activeGitBusy === 'CHECK' ? 'در حال بررسی...' : '۱. بررسی نسخه آنلاین (Fetch Check)'}</span>
@@ -866,21 +985,21 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
                 <button
                   type="button"
                   onClick={() => handleGitAction('PUSH')}
-                  disabled={Boolean(activeGitBusy)}
-                  className="sap-btn-standard text-xs px-3.5 py-1.5 flex items-center gap-1.5 cursor-pointer text-[#007cc0] border-[#007cc0] bg-white hover:bg-[#e5f3fa] disabled:opacity-50"
+                  disabled={Boolean(activeGitBusy) || smartSyncBusy}
+                  className="sap-btn-standard text-xs px-3.5 py-1.5 flex items-center gap-1.5 cursor-pointer text-[#007cc0] border-[#007cc0] bg-white hover:bg-[#e5f3fa] disabled:opacity-50 whitespace-nowrap"
                 >
                   <CloudUpload className="w-4 h-4" />
-                  <span>{activeGitBusy === 'PUSH' ? 'در حال آپلود به آنلاین...' : '۲. آپلود کامل از این سیستم به آنلاین (Push ↑)'}</span>
+                  <span>{activeGitBusy === 'PUSH' ? 'در حال آپلود به آنلاین...' : '۲. آپلود از این سیستم به آنلاین (Push ↑)'}</span>
                 </button>
 
                 <button
                   type="button"
                   onClick={() => handleGitAction('PULL')}
-                  disabled={Boolean(activeGitBusy)}
-                  className="sap-btn-emphasized text-xs px-4 py-1.5 flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                  disabled={Boolean(activeGitBusy) || smartSyncBusy}
+                  className="sap-btn-standard text-xs px-3.5 py-1.5 flex items-center gap-1.5 cursor-pointer text-[#107e3e] border-[#107e3e] bg-white hover:bg-[#ebf7ef] disabled:opacity-50 whitespace-nowrap"
                 >
                   <CloudDownload className="w-4 h-4" />
-                  <span>{activeGitBusy === 'PULL' ? 'در حال به‌روزرسانی سیستم...' : '۳. به‌روزرسانی دیتابیس محلی از آنلاین (Pull ↓)'}</span>
+                  <span>{activeGitBusy === 'PULL' ? 'در حال به‌روزرسانی سیستم...' : '۳. دریافت از آنلاین به محلی (Pull ↓)'}</span>
                 </button>
               </div>
             </div>

@@ -58,6 +58,7 @@ import {
   fetchCloudSyncManifestLightweight,
   isValidPostgresUrlSyntax,
   getDefaultDeviceLabel,
+  resolveCandidateDbUrl,
 } from './db/prisma';
 import { CreateProductionPlanSchema, CreateSapcoReceiptSchema } from './validation/index';
 import { formatToJalali } from '../utils/jalali';
@@ -3237,20 +3238,46 @@ apiRouter.put('/db/config', async (req: Request, res: Response) => {
 
 apiRouter.post('/db/test', async (req: Request, res: Response) => {
   try {
-    const { target, url } = req.body || {};
-    const stored = readDualDbStoredConfig();
-    let urlToTest = typeof url === 'string' ? url.trim() : '';
-    if (!urlToTest || urlToTest.includes(':****@')) {
-      urlToTest = target === 'LOCAL' ? stored.localDbUrl : target === 'CLOUD' ? stored.cloudDbUrl : '';
+    const { target, url, persistOnSuccess = true } = req.body || {};
+    const validTarget = target === 'LOCAL' || target === 'CLOUD' ? target : undefined;
+    const candidate = resolveCandidateDbUrl(validTarget, typeof url === 'string' ? url : undefined);
+    if (candidate.missingStoredPassword) {
+      return res.status(400).json({
+        success: false,
+        error: 'لینک دارای رمز ماسک‌شده (****) است و رمز قبلی برای آن ذخیره نشده؛ لطفاً یک‌بار لینک کامل را همراه با رمز عبور واقعی وارد و تست کنید تا برای همیشه ذخیره شود.',
+      });
     }
-    if (!urlToTest) {
+    if (!candidate.url) {
       return res.status(400).json({
         success: false,
         error: 'لینک اتصال پایگاه داده برای تست وارد نشده است.',
       });
     }
-    const result = await testSingleDatabaseUrl(urlToTest, 8000);
-    res.status(result.success ? 200 : 400).json(result);
+
+    const result = await testSingleDatabaseUrl(candidate.url, 8000);
+    let autoSaved = false;
+    let dualLinks: Awaited<ReturnType<typeof getDualDbPublicStatus>> | undefined;
+
+    if (result.success && persistOnSuccess !== false && validTarget) {
+      const stored = readDualDbStoredConfig();
+      const prevUrl = validTarget === 'LOCAL' ? stored.localDbUrl : stored.cloudDbUrl;
+      if (candidate.url !== prevUrl) {
+        dualLinks = await saveDualDbConfig(
+          validTarget === 'LOCAL' ? { localDbUrl: candidate.url } : { cloudDbUrl: candidate.url },
+        );
+        autoSaved = true;
+      }
+    }
+
+    res.status(result.success ? 200 : 400).json({
+      ...result,
+      autoSaved,
+      usedStoredPassword: candidate.usedStoredPassword,
+      dualLinks,
+      message: autoSaved
+        ? `${result.message} لینک و رمز عبور به‌صورت دائمی در این سیستم ذخیره شد.`
+        : result.message,
+    });
   } catch (error) {
     res.status(500).json({
       success: false,

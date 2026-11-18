@@ -42,6 +42,7 @@ import { formatToJalali } from '../../utils/jalali';
 import { PlanningModuleSkeleton } from '../ui/Skeleton';
 import { useEnterpriseUx } from '../../context/EnterpriseUxContext';
 import { useErpRouter } from '../../context/RouterContext';
+import { InlinePageGuideButton } from '../common/PageGuideSystem';
 
 export type PlanningSubTabKey =
   | 'erp_workbench'
@@ -500,7 +501,11 @@ export const ProductionPlanningModuleView: React.FC<ProductionPlanningModuleView
             </p>
           </div>
 
-          <div className="flex items-center gap-2 self-end sm:self-auto">
+          <div className="flex items-center gap-2 self-end sm:self-auto flex-wrap">
+            <InlinePageGuideButton
+              routeContext={{ tab: 'planning', planningSubTab: activeSubTab }}
+              label="آموزش این تب و دکمه‌ها"
+            />
             <button
               type="button"
               onClick={loadPlanningData}

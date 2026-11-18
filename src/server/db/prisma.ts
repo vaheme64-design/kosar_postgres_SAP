@@ -461,6 +461,7 @@ const EMBEDDED_MODEL_MAP: Record<string, keyof EmbeddedSapPpStore> = {
 };
 
 const DUAL_DB_CONFIG_PATH = path.resolve(process.cwd(), 'data', 'kpims-db-connections.json');
+const DUAL_DB_LOCAL_CONFIG_PATH = path.resolve(process.cwd(), 'data', 'kpims-db-connections.local.json');
 
 export type DbTargetMode = 'AUTO' | 'LOCAL' | 'CLOUD' | 'HYBRID_DISK';
 
@@ -580,6 +581,33 @@ const normalizePgUrl = (raw?: string): string => {
   return val;
 };
 
+export const hasMaskedPasswordPlaceholder = (rawUrl?: string): boolean => {
+  const val = normalizePgUrl(rawUrl);
+  if (!val) return false;
+  return /:[\*]{2,}@/.test(val);
+};
+
+export const spliceStoredPasswordIntoUrl = (incomingUrl: string, storedUrl?: string): string => {
+  const incoming = normalizePgUrl(incomingUrl);
+  if (!incoming) return '';
+  if (!hasMaskedPasswordPlaceholder(incoming)) return incoming;
+
+  const stored = normalizePgUrl(storedUrl);
+  if (!stored || hasMaskedPasswordPlaceholder(stored)) return '';
+
+  try {
+    const prevParsed = new URL(stored);
+    if (!prevParsed.password) return '';
+    const nextParsed = new URL(incoming);
+    nextParsed.password = prevParsed.password;
+    return nextParsed.toString();
+  } catch {
+    const match = stored.match(/^([^:]+:\/\/[^:]+:)([^@]+)(@.+)$/);
+    if (!match) return '';
+    return incoming.replace(/:[\*]{2,}@/, `:${match[2]}@`);
+  }
+};
+
 export const maskDatabaseUrl = (rawUrl?: string): string => {
   const val = normalizePgUrl(rawUrl);
   if (!val) return '';
@@ -685,6 +713,26 @@ export const getDefaultDeviceLabel = (): string => {
   }
 };
 
+const readRawJsonConfigFile = (filePath: string): Record<string, any> | null => {
+  try {
+    if (!fs.existsSync(filePath)) return null;
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+};
+
+const pickValidStoredUrl = (...candidates: Array<unknown>): string => {
+  for (const item of candidates) {
+    if (typeof item !== 'string') continue;
+    const norm = normalizePgUrl(item);
+    if (!norm || hasMaskedPasswordPlaceholder(norm)) continue;
+    if (isValidPostgresUrlSyntax(norm)) return norm;
+  }
+  return '';
+};
+
 export const readDualDbStoredConfig = (): DualDbStoredConfig => {
   const envUrl = readDatabaseUrlFromDotEnv() || normalizePgUrl(process.env.DATABASE_URL);
   const envIsValid = isValidPostgresUrlSyntax(envUrl);
@@ -692,57 +740,80 @@ export const readDualDbStoredConfig = (): DualDbStoredConfig => {
   const defaultCloud = envIsValid && !isLocalhostUrl(envUrl) ? envUrl : '';
   const fallbackDevice = getDefaultDeviceLabel();
 
-  try {
-    if (fs.existsSync(DUAL_DB_CONFIG_PATH)) {
-      const parsed = JSON.parse(fs.readFileSync(DUAL_DB_CONFIG_PATH, 'utf-8'));
-      const activeTarget: DbTargetMode =
-        parsed?.activeTarget === 'LOCAL' ||
-        parsed?.activeTarget === 'CLOUD' ||
-        parsed?.activeTarget === 'HYBRID_DISK' ||
-        parsed?.activeTarget === 'AUTO'
-          ? parsed.activeTarget
-          : 'AUTO';
-      const interval = Number(parsed?.cloudCheckIntervalSec);
-      return {
-        localDbUrl: normalizePgUrl(parsed?.localDbUrl) || defaultLocal,
-        cloudDbUrl: normalizePgUrl(parsed?.cloudDbUrl) || defaultCloud,
-        activeTarget,
-        autoCheckCloudUpdates: Boolean(parsed?.autoCheckCloudUpdates ?? false),
-        cloudCheckIntervalSec: Number.isFinite(interval) && interval >= 30 && interval <= 3600 ? Math.round(interval) : 120,
-        deviceLabel: typeof parsed?.deviceLabel === 'string' && parsed.deviceLabel.trim() ? parsed.deviceLabel.trim() : fallbackDevice,
-        lastSyncedCloudHash: typeof parsed?.lastSyncedCloudHash === 'string' ? parsed.lastSyncedCloudHash : undefined,
-        lastSyncedLocalHash: typeof parsed?.lastSyncedLocalHash === 'string' ? parsed.lastSyncedLocalHash : undefined,
-        lastSyncedCloudRevision: typeof parsed?.lastSyncedCloudRevision === 'number' ? parsed.lastSyncedCloudRevision : undefined,
-        lastSyncedCloudAt: typeof parsed?.lastSyncedCloudAt === 'string' ? parsed.lastSyncedCloudAt : undefined,
-        lastLocalHash: typeof parsed?.lastLocalHash === 'string' ? parsed.lastLocalHash : undefined,
-        lastLocalRevision: typeof parsed?.lastLocalRevision === 'number' ? parsed.lastLocalRevision : undefined,
-        lastLocalUpdatedAt: typeof parsed?.lastLocalUpdatedAt === 'string' ? parsed.lastLocalUpdatedAt : undefined,
-        lastSyncAt: typeof parsed?.lastSyncAt === 'string' ? parsed.lastSyncAt : undefined,
-        lastSyncSummary: typeof parsed?.lastSyncSummary === 'string' ? parsed.lastSyncSummary : undefined,
-        updatedAt: typeof parsed?.updatedAt === 'string' ? parsed.updatedAt : undefined,
-      };
-    }
-  } catch {
-    // fall back to env defaults
-  }
+  const localParsed = readRawJsonConfigFile(DUAL_DB_LOCAL_CONFIG_PATH);
+  const sharedParsed = readRawJsonConfigFile(DUAL_DB_CONFIG_PATH);
+  const primary = localParsed || sharedParsed;
+
+  const rawTarget = localParsed?.activeTarget ?? sharedParsed?.activeTarget;
+  const activeTarget: DbTargetMode =
+    rawTarget === 'LOCAL' ||
+    rawTarget === 'CLOUD' ||
+    rawTarget === 'HYBRID_DISK' ||
+    rawTarget === 'AUTO'
+      ? rawTarget
+      : 'AUTO';
+
+  const rawInterval = Number(localParsed?.cloudCheckIntervalSec ?? sharedParsed?.cloudCheckIntervalSec);
+  const cloudCheckIntervalSec =
+    Number.isFinite(rawInterval) && rawInterval >= 30 && rawInterval <= 3600 ? Math.round(rawInterval) : 120;
+
+  const localDbUrl = pickValidStoredUrl(localParsed?.localDbUrl, sharedParsed?.localDbUrl, defaultLocal);
+  const cloudDbUrl = pickValidStoredUrl(localParsed?.cloudDbUrl, sharedParsed?.cloudDbUrl, defaultCloud);
+
+  const pickString = (k: keyof DualDbStoredConfig): string | undefined => {
+    const a = localParsed?.[k];
+    if (typeof a === 'string' && a.trim()) return a.trim();
+    const b = sharedParsed?.[k];
+    if (typeof b === 'string' && b.trim()) return b.trim();
+    return undefined;
+  };
+
+  const pickNumber = (k: keyof DualDbStoredConfig): number | undefined => {
+    const a = localParsed?.[k];
+    if (typeof a === 'number' && Number.isFinite(a)) return a;
+    const b = sharedParsed?.[k];
+    if (typeof b === 'number' && Number.isFinite(b)) return b;
+    return undefined;
+  };
 
   return {
-    localDbUrl: defaultLocal,
-    cloudDbUrl: defaultCloud,
-    activeTarget: 'AUTO',
-    autoCheckCloudUpdates: false,
-    cloudCheckIntervalSec: 120,
-    deviceLabel: fallbackDevice,
+    localDbUrl,
+    cloudDbUrl,
+    activeTarget,
+    autoCheckCloudUpdates: Boolean(
+      localParsed?.autoCheckCloudUpdates ?? sharedParsed?.autoCheckCloudUpdates ?? false,
+    ),
+    cloudCheckIntervalSec,
+    deviceLabel: pickString('deviceLabel') || fallbackDevice,
+    lastSyncedCloudHash: pickString('lastSyncedCloudHash'),
+    lastSyncedLocalHash: pickString('lastSyncedLocalHash'),
+    lastSyncedCloudRevision: pickNumber('lastSyncedCloudRevision'),
+    lastSyncedCloudAt: pickString('lastSyncedCloudAt'),
+    lastLocalHash: pickString('lastLocalHash'),
+    lastLocalRevision: pickNumber('lastLocalRevision'),
+    lastLocalUpdatedAt: pickString('lastLocalUpdatedAt'),
+    lastSyncAt: pickString('lastSyncAt'),
+    lastSyncSummary: pickString('lastSyncSummary'),
+    updatedAt: primary && typeof primary.updatedAt === 'string' ? primary.updatedAt : undefined,
   };
 };
 
 const writeDualDbStoredConfig = (cfg: DualDbStoredConfig): void => {
-  try {
-    const dir = path.dirname(DUAL_DB_CONFIG_PATH);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(DUAL_DB_CONFIG_PATH, JSON.stringify(cfg, null, 2), 'utf-8');
-  } catch {
-    // ignore write failures
+  // Never allow masked placeholder passwords to be persisted to disk
+  const safeCfg: DualDbStoredConfig = {
+    ...cfg,
+    localDbUrl: hasMaskedPasswordPlaceholder(cfg.localDbUrl) ? '' : cfg.localDbUrl,
+    cloudDbUrl: hasMaskedPasswordPlaceholder(cfg.cloudDbUrl) ? '' : cfg.cloudDbUrl,
+  };
+  const payload = JSON.stringify(safeCfg, null, 2);
+  for (const targetPath of [DUAL_DB_LOCAL_CONFIG_PATH, DUAL_DB_CONFIG_PATH]) {
+    try {
+      const dir = path.dirname(targetPath);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(targetPath, payload, 'utf-8');
+    } catch {
+      // ignore write failures
+    }
   }
 };
 
@@ -1096,6 +1167,31 @@ export async function testSingleDatabaseUrl(rawUrl: string, timeoutMs = 8000): P
   }
 }
 
+export const resolveCandidateDbUrl = (
+  target: 'LOCAL' | 'CLOUD' | undefined,
+  incomingUrl?: string,
+): { url: string; usedStoredPassword: boolean; missingStoredPassword: boolean } => {
+  const stored = readDualDbStoredConfig();
+  const prev = target === 'LOCAL' ? stored.localDbUrl : target === 'CLOUD' ? stored.cloudDbUrl : '';
+  const trimmed = normalizePgUrl(incomingUrl);
+
+  if (!trimmed) {
+    return {
+      url: prev,
+      usedStoredPassword: Boolean(prev),
+      missingStoredPassword: false,
+    };
+  }
+  if (hasMaskedPasswordPlaceholder(trimmed)) {
+    const spliced = spliceStoredPasswordIntoUrl(trimmed, prev);
+    if (spliced) {
+      return { url: spliced, usedStoredPassword: true, missingStoredPassword: false };
+    }
+    return { url: '', usedStoredPassword: false, missingStoredPassword: true };
+  }
+  return { url: trimmed, usedStoredPassword: false, missingStoredPassword: false };
+};
+
 export async function saveDualDbConfig(input: {
   localDbUrl?: string;
   cloudDbUrl?: string;
@@ -1105,13 +1201,16 @@ export async function saveDualDbConfig(input: {
   deviceLabel?: string;
 }): Promise<DualDbPublicStatus> {
   const existing = readDualDbStoredConfig();
-  const resolveUrlUpdate = (incoming: string | undefined, prev: string): string => {
+  const resolveUrlUpdate = (incoming: string | undefined, prev: string, label: string): string => {
     if (incoming === undefined) return prev;
     const trimmed = normalizePgUrl(incoming);
     if (!trimmed) return '';
-    // Keep stored secret if user submitted the masked placeholder unchanged
-    if (trimmed.includes(':****@') && prev && maskDatabaseUrl(prev) === trimmed) {
-      return prev;
+    if (hasMaskedPasswordPlaceholder(trimmed)) {
+      const spliced = spliceStoredPasswordIntoUrl(trimmed, prev);
+      if (spliced) return spliced;
+      throw new Error(
+        `لینک ${label} دارای رمز ماسک‌شده (****) است و رمز قبلی در حافظه این سیستم ذخیره نشده؛ لطفاً یک‌بار لینک کامل با رمز عبور واقعی را وارد نمایید.`,
+      );
     }
     return trimmed;
   };
@@ -1123,8 +1222,8 @@ export async function saveDualDbConfig(input: {
 
   const nextConfig: DualDbStoredConfig = {
     ...existing,
-    localDbUrl: resolveUrlUpdate(input.localDbUrl, existing.localDbUrl),
-    cloudDbUrl: resolveUrlUpdate(input.cloudDbUrl, existing.cloudDbUrl),
+    localDbUrl: resolveUrlUpdate(input.localDbUrl, existing.localDbUrl, 'پایگاه داده محلی'),
+    cloudDbUrl: resolveUrlUpdate(input.cloudDbUrl, existing.cloudDbUrl, 'پایگاه داده ابری'),
     activeTarget:
       input.activeTarget && ['AUTO', 'LOCAL', 'CLOUD', 'HYBRID_DISK'].includes(input.activeTarget)
         ? input.activeTarget

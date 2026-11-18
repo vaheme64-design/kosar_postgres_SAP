@@ -381,13 +381,52 @@ export const Navbar: React.FC<NavbarProps> = ({
           <button
             type="button"
             onClick={onOpenHelpModal}
-            className="sap-btn-standard px-2.5 py-1 text-xs flex items-center gap-1.5 cursor-pointer text-[#007cc0] bg-[#e5f3fa] hover:bg-[#b3ddf2] border border-[#b3ddf2]"
-            title="راهنمای تعاملی سناریوها و نقشه ماژول‌ها"
+            className="sap-btn-standard px-2.5 py-1 text-xs flex items-center gap-1.5 cursor-pointer text-[#007cc0] bg-[#e5f3fa] hover:bg-[#b3ddf2] border border-[#b3ddf2] whitespace-nowrap shrink-0"
+            title="راهنمای تعاملی سناریوها، آموزش صفحه به صفحه و دکمه‌ها"
           >
             <Compass className="w-3.5 h-3.5 text-[#007cc0]" />
-            <span className="hidden md:inline">راهنمای سیستم و سناریوها</span>
+            <span className="hidden md:inline">راهنمای سیستم و آموزش صفحات</span>
           </button>
         )}
+
+        <button
+          type="button"
+          onClick={() => {
+            if (cloudSyncCheck?.state === 'REMOTE_AHEAD' && onCloudPull) {
+              onCloudPull();
+            } else if (cloudSyncCheck?.state === 'LOCAL_AHEAD' && onCloudPush) {
+              onCloudPush();
+            } else {
+              onOpenErpModal();
+            }
+          }}
+          disabled={Boolean(cloudSyncBusy)}
+          className={`hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-sm text-[11px] font-semibold border transition-colors cursor-pointer whitespace-nowrap shrink-0 disabled:opacity-50 ${
+            cloudSyncCheck?.state === 'REMOTE_AHEAD'
+              ? 'bg-[#fff4e5] text-[#b45309] border-[#f5cba7] hover:bg-[#ffe8cc]'
+              : cloudSyncCheck?.state === 'LOCAL_AHEAD'
+              ? 'bg-[#e5f3fa] text-[#007cc0] border-[#b3ddf2] hover:bg-[#d2eaf7]'
+              : cloudSyncCheck?.state === 'IN_SYNC'
+              ? 'bg-[#ebf7ef] text-[#107e3e] border-[#a9dfbf] hover:bg-[#dcf2e4]'
+              : 'bg-[#f5f5f5] text-[#333333] border-[#d9d9d9] hover:bg-[#e5f3fa]'
+          }`}
+          title="همگام‌سازی یک‌کلیک پایگاه داده محلی و ابری"
+        >
+          <RefreshCw className={`w-3 h-3 ${cloudSyncBusy ? 'animate-spin' : ''}`} />
+          <span>
+            {cloudSyncBusy === 'PULL'
+              ? 'دریافت از آنلاین...'
+              : cloudSyncBusy === 'PUSH'
+              ? 'ارسال به آنلاین...'
+              : cloudSyncCheck?.state === 'REMOTE_AHEAD'
+              ? 'آپدیت از آنلاین (Pull)'
+              : cloudSyncCheck?.state === 'LOCAL_AHEAD'
+              ? 'ارسال به آنلاین (Push)'
+              : cloudSyncCheck?.state === 'IN_SYNC'
+              ? 'همگام با آنلاین'
+              : 'همگام‌سازی DB'}
+          </span>
+        </button>
 
         {reorderAlertsCount > 0 && (
           <button

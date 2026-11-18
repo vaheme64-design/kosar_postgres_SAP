@@ -20,6 +20,7 @@ import { toPersianDigits } from '../../utils/formatters';
 import { SearchableSelect } from '../common/SearchableSelect';
 import { useErpRouter } from '../../context/RouterContext';
 import { useEnterpriseUx } from '../../context/EnterpriseUxContext';
+import { InlinePageGuideButton } from '../common/PageGuideSystem';
 
 export interface SubComponentNode {
   id: string;
@@ -545,11 +546,17 @@ export const ProductStructureView: React.FC<ProductStructureViewProps> = ({ part
                 'ساختار درختی محصول در سرور و ماژول برنامه‌ریزی تولید (MRP) ذخیره شد.'
               )
             }
+            title="ثبت درخت فعلی و همگام‌سازی مستقیم ضرایب مصرف با موتور نیازسنجی مواد (MRP)"
             className="sap-btn-emphasized flex items-center gap-1.5 px-3.5 py-1.5 text-xs cursor-pointer disabled:opacity-50 whitespace-nowrap"
           >
             <CheckCircle2 className="w-3.5 h-3.5" />
             <span>{isSyncing ? 'در حال ذخیره...' : 'ذخیره در MRP'}</span>
           </button>
+
+          <InlinePageGuideButton
+            routeContext={{ tab: 'master_data', masterSubSection: 'PRODUCT_STRUCTURE' }}
+            label="آموزش این صفحه و دکمه‌ها"
+          />
         </div>
       </div>
 

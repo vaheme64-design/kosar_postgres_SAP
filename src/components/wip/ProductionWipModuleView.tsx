@@ -48,6 +48,7 @@ import { InventoryReportView } from '../InventoryReportView';
 import { WipModuleSkeleton, Skeleton } from '../ui/Skeleton';
 import { TraceabilityInquiryView } from './TraceabilityInquiryView';
 import { useErpRouter } from '../../context/RouterContext';
+import { InlinePageGuideButton } from '../common/PageGuideSystem';
 
 export type WipViewMode =
   | 'UNIFIED_DIRECTORY'
@@ -108,6 +109,14 @@ export const ProductionWipModuleView: React.FC<ProductionWipModuleViewProps> = (
       setActiveView(initialView);
     }
   }, [initialView]);
+
+  const handleChangeView = useCallback(
+    (next: WipViewMode) => {
+      setActiveView(next);
+      router.navigate({ wipSubTab: next });
+    },
+    [router],
+  );
 
   useEffect(() => {
     if (initialTraceQuery !== undefined && initialTraceQuery !== '') {
@@ -635,6 +644,10 @@ export const ProductionWipModuleView: React.FC<ProductionWipModuleViewProps> = (
           </div>
 
           <div className="flex items-center gap-2 flex-wrap self-end sm:self-auto">
+            <InlinePageGuideButton
+              routeContext={{ tab: 'wip', wipSubTab: activeView }}
+              label="آموزش این صفحه و دکمه‌ها"
+            />
             <button
               type="button"
               onClick={loadWipData}
@@ -675,7 +688,7 @@ export const ProductionWipModuleView: React.FC<ProductionWipModuleViewProps> = (
                 <span className="text-[#666666]">نمای بخش:</span>
                 <select
                   value={activeView}
-                  onChange={e => setActiveView(e.target.value as WipViewMode)}
+                  onChange={e => handleChangeView(e.target.value as WipViewMode)}
                   className="bg-transparent text-xs font-semibold text-[#333333] focus:outline-none cursor-pointer"
                 >
                   <option value="UNIFIED_DIRECTORY">
@@ -727,7 +740,7 @@ export const ProductionWipModuleView: React.FC<ProductionWipModuleViewProps> = (
               <button
                 type="button"
                 onClick={() =>
-                  setActiveView(prev => (prev === 'BOTTLENECK' ? 'UNIFIED_DIRECTORY' : 'BOTTLENECK'))
+                  handleChangeView(activeView === 'BOTTLENECK' ? 'UNIFIED_DIRECTORY' : 'BOTTLENECK')
                 }
                 className={`px-2.5 py-1 rounded border text-[11px] font-semibold cursor-pointer flex items-center gap-1.5 transition-colors ${
                   activeView === 'BOTTLENECK'
@@ -745,7 +758,7 @@ export const ProductionWipModuleView: React.FC<ProductionWipModuleViewProps> = (
               {activeView !== 'UNIFIED_DIRECTORY' && (
                 <button
                   type="button"
-                  onClick={() => setActiveView('UNIFIED_DIRECTORY')}
+                  onClick={() => handleChangeView('UNIFIED_DIRECTORY')}
                   className="sap-btn-standard text-[11px] font-semibold cursor-pointer"
                 >
                   بازگشت به نمای درختی یکپارچه

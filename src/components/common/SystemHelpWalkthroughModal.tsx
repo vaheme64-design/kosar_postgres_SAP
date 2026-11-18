@@ -18,9 +18,11 @@ import {
   ChevronUp,
   ExternalLink,
   Play,
+  MousePointerClick,
 } from 'lucide-react';
 import { toPersianDigits } from '../../utils/formatters';
 import { WizardScenarioId } from './AdvancedIndustrialScenarioWizardModal';
+import { PAGE_TRAINING_CATALOG } from '../../data/pageTrainingCatalog';
 
 export interface HelpWizardLaunchParams {
   scenarioId?: WizardScenarioId;
@@ -177,7 +179,9 @@ export const SystemHelpWalkthroughModal: React.FC<SystemHelpWalkthroughModalProp
   onNavigate,
   onOpenAdvancedWizard,
 }) => {
-  const [activeTab, setActiveTab] = useState<'SCENARIOS' | 'KPI_MATRIX' | 'DIRECTORY' | 'HYBRID_SYNC'>('SCENARIOS');
+  const [activeTab, setActiveTab] = useState<'SCENARIOS' | 'PAGE_ATLAS' | 'KPI_MATRIX' | 'DIRECTORY' | 'HYBRID_SYNC'>('SCENARIOS');
+  const [atlasSearch, setAtlasSearch] = useState('');
+  const [selectedAtlasKey, setSelectedAtlasKey] = useState<string>('master_data:PRODUCT_STRUCTURE');
   const [scenarios, setScenarios] = useState<CatalogScenarioItem[]>([]);
   const [partHints, setPartHints] = useState<Array<{ code: string; name: string }>>([]);
   const [kpis, setKpis] = useState<IndustrialKpiMetric[]>([]);
@@ -264,6 +268,28 @@ export const SystemHelpWalkthroughModal: React.FC<SystemHelpWalkthroughModalProp
     if (kpiCategoryFilter === 'ALL') return kpis;
     return kpis.filter(k => k.category === kpiCategoryFilter);
   }, [kpis, kpiCategoryFilter]);
+
+  const filteredAtlasPages = useMemo(() => {
+    const q = atlasSearch.trim().toLowerCase();
+    if (!q) return PAGE_TRAINING_CATALOG;
+    return PAGE_TRAINING_CATALOG.filter(
+      p =>
+        p.title.toLowerCase().includes(q) ||
+        p.moduleGroup.toLowerCase().includes(q) ||
+        p.shortGoal.toLowerCase().includes(q) ||
+        p.buttonsAndLinks.some(
+          b => b.label.toLowerCase().includes(q) || b.purpose.toLowerCase().includes(q),
+        ),
+    );
+  }, [atlasSearch]);
+
+  const activeAtlasPage = useMemo(() => {
+    return (
+      filteredAtlasPages.find(p => p.key === selectedAtlasKey) ||
+      filteredAtlasPages[0] ||
+      PAGE_TRAINING_CATALOG[0]
+    );
+  }, [filteredAtlasPages, selectedAtlasKey]);
 
   if (!isOpen) return null;
 
@@ -425,6 +451,17 @@ export const SystemHelpWalkthroughModal: React.FC<SystemHelpWalkthroughModalProp
           >
             <Workflow className="w-3.5 h-3.5" />
             <span>نقشه لینک‌دار کل ماژول‌ها (Directory)</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab('PAGE_ATLAS')}
+            className={`px-3 py-1.5 rounded cursor-pointer transition flex items-center gap-1.5 whitespace-nowrap ${
+              activeTab === 'PAGE_ATLAS' ? 'bg-[#007cc0] text-white' : 'bg-white text-[#333333] border border-[#d9d9d9] hover:bg-[#e5f3fa]'
+            }`}
+          >
+            <MousePointerClick className="w-3.5 h-3.5" />
+            <span>آموزش صفحات و دکمه‌ها ({toPersianDigits(PAGE_TRAINING_CATALOG.length)} صفحه)</span>
           </button>
 
           <button
@@ -707,6 +744,98 @@ export const SystemHelpWalkthroughModal: React.FC<SystemHelpWalkthroughModalProp
                     </div>
                   </div>
                 ))}
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'PAGE_ATLAS' && (
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="text-xs text-[#555555]">
+                  مرجع کامل تمام صفحات، بخش‌ها، دکمه‌ها و لینک‌های کل نرم‌افزار (مثلاً «ذخیره در MRP» در ساختار درختی محصول یا همگام‌سازی پایگاه داده):
+                </div>
+                <div className="relative min-w-[260px]">
+                  <Search className="w-3.5 h-3.5 text-[#666666] absolute right-2.5 top-2" />
+                  <input
+                    type="text"
+                    value={atlasSearch}
+                    onChange={e => setAtlasSearch(e.target.value)}
+                    placeholder="جستجوی صفحه یا نام دکمه (مثلاً: ذخیره در MRP)..."
+                    className="w-full bg-white border border-[#bfbfbf] rounded-sm pr-8 pl-3 py-1.5 text-xs text-[#333333] focus:outline-none focus:border-[#007cc0]"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-3.5">
+                {/* Page List */}
+                <div className="border border-[#d9d9d9] rounded-sm bg-[#f7f7f7] p-2 space-y-1 max-h-[420px] overflow-y-auto">
+                  {filteredAtlasPages.map(p => {
+                    const isSel = p.key === activeAtlasPage.key;
+                    return (
+                      <button
+                        key={p.key}
+                        type="button"
+                        onClick={() => setSelectedAtlasKey(p.key)}
+                        className={`w-full text-right p-2 rounded-sm border text-xs transition cursor-pointer ${
+                          isSel
+                            ? 'bg-[#e5f3fa] border-[#007cc0] text-[#007cc0] font-bold'
+                            : 'bg-white border-[#e5e5e5] text-[#333333] hover:bg-[#f0f4f8]'
+                        }`}
+                      >
+                        <div className="truncate">{p.title}</div>
+                        <div className="text-[10px] font-normal text-[#666666] truncate mt-0.5">
+                          {p.moduleGroup} · {toPersianDigits(p.buttonsAndLinks.length)} دکمه و لینک
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Selected Page Deep Guide */}
+                <div className="lg:col-span-2 border border-[#d9d9d9] rounded-sm bg-white p-4 space-y-3 max-h-[420px] overflow-y-auto">
+                  <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-[#e8e8e8]">
+                    <div>
+                      <div className="text-[11px] text-[#666666]">
+                        {activeAtlasPage.moduleGroup} · <span className="font-mono" dir="ltr">{activeAtlasPage.sapRef}</span>
+                      </div>
+                      <h4 className="text-sm font-bold text-[#333333]">{activeAtlasPage.title}</h4>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onNavigate(activeAtlasPage.tab, activeAtlasPage.subTab);
+                        onClose();
+                      }}
+                      className="sap-btn-emphasized px-3 py-1.5 text-xs flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                    >
+                      <span>ورود مستقیم به این صفحه</span>
+                      <ExternalLink className="w-3 h-3" />
+                    </button>
+                  </div>
+
+                  <div className="text-xs text-[#333333] leading-relaxed bg-[#f7f9fb] border border-[#d9e2ec] rounded-sm p-3">
+                    <span className="font-bold text-[#007cc0]">منظور و کاربرد صفحه: </span>
+                    {activeAtlasPage.fullPurpose}
+                  </div>
+
+                  <div className="space-y-2">
+                    <div className="text-xs font-bold text-[#333333]">دکمه‌ها، لینک‌ها و ابزارهای این صفحه:</div>
+                    <div className="space-y-2">
+                      {activeAtlasPage.buttonsAndLinks.map((btn, i) => (
+                        <div key={i} className="border border-[#e8e8e8] rounded-sm p-2.5 space-y-1">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="font-bold text-xs text-[#007cc0]">{btn.label}</span>
+                            <span className="text-[10px] font-semibold px-1.5 py-0.5 border border-[#d9d9d9] bg-[#f7f7f7] rounded-sm">
+                              {btn.kind}
+                            </span>
+                          </div>
+                          <div className="text-xs text-[#444444] leading-relaxed">{btn.purpose}</div>
+                          <div className="text-[11px] text-[#666666]">زمان استفاده: {btn.whenToUse}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
           )}

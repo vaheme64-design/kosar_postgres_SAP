@@ -29,6 +29,7 @@ import { ContractsManagementView } from '../inventory/ContractsManagementView';
 import { formatNumber, toPersianDigits } from '../../utils/formatters';
 import { useEnterpriseUx } from '../../context/EnterpriseUxContext';
 import { useErpRouter } from '../../context/RouterContext';
+import { InlinePageGuideButton } from '../common/PageGuideSystem';
 
 export type ContractsSubTab = 'CONTRACTS_QUOTAS' | 'CUSTOMER_ORDERS';
 
@@ -106,6 +107,14 @@ export const SalesContractsModuleView: React.FC<SalesContractsModuleViewProps> =
   const [editOrderNotes, setEditOrderNotes] = useState('');
   const [editOrderRevReason, setEditOrderRevReason] = useState('');
 
+  const handleChangeContractsTab = useCallback(
+    (nextTab: ContractsSubTab) => {
+      setActiveTab(nextTab);
+      navigate({ contractsSubTab: nextTab });
+    },
+    [navigate],
+  );
+
   useEffect(() => {
     setActiveTab(initialSubTab);
   }, [initialSubTab]);
@@ -121,12 +130,12 @@ export const SalesContractsModuleView: React.FC<SalesContractsModuleViewProps> =
         o => o.orderNumber.toLowerCase().includes(q) || o.contractNumber.toLowerCase().includes(q)
       );
       if (matchesOrder && !matchesContract) {
-        setActiveTab('CUSTOMER_ORDERS');
+        handleChangeContractsTab('CUSTOMER_ORDERS');
       } else if (matchesContract) {
-        setActiveTab('CONTRACTS_QUOTAS');
+        handleChangeContractsTab('CONTRACTS_QUOTAS');
       }
     }
-  }, [route.docQuery, contracts, customerOrders]);
+  }, [route.docQuery, contracts, customerOrders, handleChangeContractsTab]);
 
   const filteredCustomerOrders = useMemo(() => {
     const q = orderSearchQuery.trim().toLowerCase();
@@ -411,13 +420,19 @@ export const SalesContractsModuleView: React.FC<SalesContractsModuleViewProps> =
               ثبت و ویرایش کامل قراردادها، پیگیری تاریخچه تغییرات تیراژ (Revisions) و اتصال مستقیم اسناد به کاردکس و تولید
             </p>
           </div>
+          <div className="shrink-0">
+            <InlinePageGuideButton
+              routeContext={{ tab: 'contracts', contractsSubTab: activeTab }}
+              label="آموزش این بخش و دکمه‌ها"
+            />
+          </div>
         </div>
 
         {/* Sub-module SAP IconTabBar */}
         <div className="sap-icon-tab-bar px-3">
           <button
             type="button"
-            onClick={() => setActiveTab('CONTRACTS_QUOTAS')}
+            onClick={() => handleChangeContractsTab('CONTRACTS_QUOTAS')}
             className={`sap-icon-tab ${activeTab === 'CONTRACTS_QUOTAS' ? 'sap-icon-tab-active' : ''}`}
           >
             <FileSignature className="w-3.5 h-3.5" />
@@ -426,7 +441,7 @@ export const SalesContractsModuleView: React.FC<SalesContractsModuleViewProps> =
 
           <button
             type="button"
-            onClick={() => setActiveTab('CUSTOMER_ORDERS')}
+            onClick={() => handleChangeContractsTab('CUSTOMER_ORDERS')}
             className={`sap-icon-tab ${activeTab === 'CUSTOMER_ORDERS' ? 'sap-icon-tab-active' : ''}`}
           >
             <ShoppingBag className="w-3.5 h-3.5" />

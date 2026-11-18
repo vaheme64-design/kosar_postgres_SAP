@@ -19,6 +19,7 @@ import { AiAssistantModal } from './components/AiAssistantModal';
 import { SystemHelpWalkthroughModal, HelpWizardLaunchParams } from './components/common/SystemHelpWalkthroughModal';
 import { AdvancedIndustrialScenarioWizardModal } from './components/common/AdvancedIndustrialScenarioWizardModal';
 import { ContextualActionMenu } from './components/common/ContextualActionMenu';
+import { PageGuideBar } from './components/common/PageGuideSystem';
 import { OfflineIndicator } from './components/pwa/PWAInstallButton';
 import { AiActionPayload } from './types/ai';
 import { ErpLayoutTemplate, ErpColorTheme } from './types/theme';
@@ -824,6 +825,7 @@ function AppContent() {
       resolvedTab = 'wip';
       const wipMap: Record<string, any> = {
         ORDERS: 'ORDERS',
+        BOTTLENECK: 'BOTTLENECK',
         TRACEABILITY: 'TRACEABILITY',
         DASHBOARD: 'DASHBOARD',
         TRANSFERS: 'TRANSFERS',
@@ -1130,6 +1132,25 @@ function AppContent() {
           </button>
         </div>
       )}
+
+      {/* Zero-Lag Contextual Page & Button Training Bar (All Site Views) */}
+      <PageGuideBar
+        context={{
+          tab: activeTab,
+          masterSubSection: activeMasterSubSection,
+          inventorySubTab: activeInventorySubTab,
+          planningSubTab: activePlanningSubTab,
+          productionViewMode,
+          productionModuleTab: activeProductionModuleTab,
+          wipSubTab: router.route.wipSubTab,
+          machineSubTab: activeMachineSubTab,
+          contractsSubTab: router.route.contractsSubTab,
+          settingsSubTab: activeSettingsSubTab,
+          reportSubTab: activeReportSubTab,
+        }}
+        onNavigate={(tab, subTab) => handleDeepNavigate(tab, subTab)}
+      />
+
       {/* 1. SAP Fiori Launchpad Home */}
       {activeTab === 'dashboard' && (
         <FioriLaunchpadView

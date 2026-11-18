@@ -7,7 +7,7 @@ import { DrawerTabKey } from '../components/workflow/OrderDetailsDrawer';
 import { MasterSubSection } from '../components/MasterDataHubView';
 
 export type ErpModalType = 'create-mo' | 'wip-check' | 'edit-mo' | 'timeline' | 'log-step' | null;
-export type WipSubTabKey = 'UNIFIED_DIRECTORY' | 'TRACEABILITY' | 'DASHBOARD' | 'ORDERS' | 'TRANSFERS' | 'STAGES';
+export type WipSubTabKey = 'UNIFIED_DIRECTORY' | 'BOTTLENECK' | 'TRACEABILITY' | 'DASHBOARD' | 'ORDERS' | 'TRANSFERS' | 'STAGES';
 
 export interface RouteState {
   tab: TabKey;
