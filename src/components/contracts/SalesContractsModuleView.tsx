@@ -129,13 +129,13 @@ export const SalesContractsModuleView: React.FC<SalesContractsModuleViewProps> =
       const matchesOrder = customerOrders.some(
         o => o.orderNumber.toLowerCase().includes(q) || o.contractNumber.toLowerCase().includes(q)
       );
-      if (matchesOrder && !matchesContract) {
+      if (matchesOrder && !matchesContract && activeTab !== 'CUSTOMER_ORDERS') {
         handleChangeContractsTab('CUSTOMER_ORDERS');
-      } else if (matchesContract) {
+      } else if (matchesContract && activeTab !== 'CONTRACTS_QUOTAS') {
         handleChangeContractsTab('CONTRACTS_QUOTAS');
       }
     }
-  }, [route.docQuery, contracts, customerOrders, handleChangeContractsTab]);
+  }, [route.docQuery, contracts, customerOrders, activeTab, handleChangeContractsTab]);
 
   const filteredCustomerOrders = useMemo(() => {
     const q = orderSearchQuery.trim().toLowerCase();

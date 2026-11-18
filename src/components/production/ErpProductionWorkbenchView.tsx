@@ -60,6 +60,7 @@ import { DynamicSelect } from '../common/DynamicSelect';
 import { D3MaterialFlowDiagram } from './D3MaterialFlowDiagram';
 import { MachineOverlapAlertWidget } from '../planning/MachineOverlapAlertWidget';
 import { InlinePageGuideButton } from '../common/PageGuideSystem';
+import { ManufacturingOrdersManagementView } from './ManufacturingOrdersManagementView';
 
 export interface ScheduledOpStep {
   opId: string;
@@ -118,6 +119,7 @@ export interface MultiPartScheduleItem {
 }
 
 export type ProductionWorkbenchSubTab =
+  | 'MANUFACTURING_ORDERS_LIST'
   | 'MULTI_PART_SCHEDULER'
   | 'DAILY_DISPATCH_SHEET'
   | 'LIVE_WIP_OP_TRACKER'
@@ -1962,6 +1964,7 @@ export const ErpProductionWorkbenchView: React.FC<ErpProductionWorkbenchViewProp
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2 px-3 border-b border-[#D9DFE5]">
           <div className="sap-icon-tab-bar border-b-0 flex-1">
             {[
+              { id: 'MANUFACTURING_ORDERS_LIST' as const, title: 'مدیریت دستورات ساخت (MO) و سرکلاف', icon: Layers },
               { id: 'MULTI_PART_SCHEDULER' as const, title: '۱. برنامه مراحل تولید (OP)', icon: Calendar },
               { id: 'DAILY_DISPATCH_SHEET' as const, title: '۲. برگه کار روزانه شیفت', icon: Printer },
               { id: 'LIVE_WIP_OP_TRACKER' as const, title: '۳. موجودی پای خط (WIP)', icon: ArrowRightLeft },
@@ -2127,6 +2130,17 @@ export const ErpProductionWorkbenchView: React.FC<ErpProductionWorkbenchViewProp
             بستن
           </button>
         </div>
+      )}
+
+      {/* ==================================================================== */}
+      {/* TAB 0: DEDICATED MANUFACTURING ORDERS (MO) MANAGEMENT & GUIDE        */}
+      {/* ==================================================================== */}
+      {activeModuleTab === 'MANUFACTURING_ORDERS_LIST' && (
+        <ManufacturingOrdersManagementView
+          parts={parts}
+          routings={routings}
+          onRefreshData={onRefreshData}
+        />
       )}
 
       {/* ==================================================================== */}

@@ -274,12 +274,6 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
     if (onSectionChange) onSectionChange(sec);
   };
 
-  useEffect(() => {
-    if (onSectionChange) {
-      onSectionChange(activeSection);
-    }
-  }, [activeSection, onSectionChange]);
-
   // Sync automatically when user switches global template
   useEffect(() => {
     if (layoutTemplate === 'HUB_WORKSPACE') {

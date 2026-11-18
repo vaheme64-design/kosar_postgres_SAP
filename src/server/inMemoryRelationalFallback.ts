@@ -1269,7 +1269,9 @@ export async function postFallbackWipOperationProduction(
     let sourceWhId = 'WH-RAW';
     let sourceWhName = 'انبار مرکزی رول و ورق مواد اولیه';
 
-    if (mo.partCode === 'WIP-ECU-MAIN-BRK') {
+    if (mo.partCode === 'WIP-ECU-MAIN-BRK' || mo.partId === 'PRT-WIP-ECU-MAIN' || mo.partCode === '700014') {
+      const coilPart = parts.find(p => p.id === 'PRT-RAW-ECU-COIL');
+      const nutPart = parts.find(p => p.id === 'PRT-FST-NUT-M6');
       if (isFirstOp) {
         const consumedKg = Number(((goodQty + scrapQty) * 0.98).toFixed(2));
         const meta = pickLotMeta('PRT-RAW-ECU-COIL', sourceWhId, coilNumber, 'LOC-RAW-A1', 'SAPCO_SUPPLIER_OWNED');
@@ -1278,8 +1280,8 @@ export async function postFallbackWipOperationProduction(
           documentId: `DOC-WIP-BF-${suffix}`,
           lineNumber: 1,
           partId: 'PRT-RAW-ECU-COIL',
-          partCode: 'RM-COIL-DC01A-2.0-1140',
-          partName: 'رول ورق روغنی DC01A ضخامت 2mm با عرض 1140mm',
+          partCode: coilPart?.code || 'RM-COIL-DC01A-2.0-1140',
+          partName: coilPart?.name || 'رول ورق روغنی DC01A ضخامت 2mm با عرض 1140mm',
           lotNumber: meta.lotNumber,
           heatNumber: meta.heatNumber,
           ownership: meta.ownership,
@@ -1299,8 +1301,8 @@ export async function postFallbackWipOperationProduction(
           documentId: `DOC-WIP-BF-${suffix}`,
           lineNumber: 1,
           partId: 'PRT-FST-NUT-M6',
-          partCode: 'FST-NUT-WELD-M6',
-          partName: 'مهره جوشی چهارگوش پایه‌دار M6',
+          partCode: nutPart?.code || 'FST-NUT-WELD-M6',
+          partName: nutPart?.name || 'مهره جوشی چهارگوش پایه‌دار M6',
           lotNumber: meta.lotNumber,
           heatNumber: meta.heatNumber || 'HT-FST-M6',
           ownership: meta.ownership,
@@ -1313,7 +1315,9 @@ export async function postFallbackWipOperationProduction(
           notes: `مصرف خودکار ۱۵ عدد مهره M6 به ازای هر براکت در ${op.stepCode}`,
         });
       }
-    } else if (mo.partCode === 'WIP-ECU-COMP-BRK') {
+    } else if (mo.partCode === 'WIP-ECU-COMP-BRK' || mo.partId === 'PRT-WIP-ECU-COMP' || mo.partCode === '700026') {
+      const coilPart = parts.find(p => p.id === 'PRT-RAW-ECU-COIL');
+      const boltPart = parts.find(p => p.id === 'PRT-FST-BLT-M6-20');
       if (isFirstOp) {
         const consumedKg = Number(((goodQty + scrapQty) * 0.47).toFixed(2));
         const meta = pickLotMeta('PRT-RAW-ECU-COIL', sourceWhId, coilNumber, 'LOC-RAW-A1', 'SAPCO_SUPPLIER_OWNED');
@@ -1322,8 +1326,8 @@ export async function postFallbackWipOperationProduction(
           documentId: `DOC-WIP-BF-${suffix}`,
           lineNumber: 1,
           partId: 'PRT-RAW-ECU-COIL',
-          partCode: 'RM-COIL-DC01A-2.0-1140',
-          partName: 'رول ورق روغنی DC01A ضخامت 2mm با عرض 1140mm',
+          partCode: coilPart?.code || 'RM-COIL-DC01A-2.0-1140',
+          partName: coilPart?.name || 'رول ورق روغنی DC01A ضخامت 2mm با عرض 1140mm',
           lotNumber: meta.lotNumber,
           heatNumber: meta.heatNumber,
           ownership: meta.ownership,
@@ -1343,8 +1347,8 @@ export async function postFallbackWipOperationProduction(
           documentId: `DOC-WIP-BF-${suffix}`,
           lineNumber: 1,
           partId: 'PRT-FST-BLT-M6-20',
-          partCode: 'FST-BOLT-WELD-M6-20',
-          partName: 'پیچ پایه جوشی مقاومتی M6x20',
+          partCode: boltPart?.code || 'FST-BOLT-WELD-M6-20',
+          partName: boltPart?.name || 'پیچ پایه جوشی مقاومتی M6x20',
           lotNumber: meta.lotNumber,
           heatNumber: meta.heatNumber || 'HT-FST-M620',
           ownership: meta.ownership,
@@ -1357,7 +1361,9 @@ export async function postFallbackWipOperationProduction(
           notes: `مصرف خودکار ۲ عدد پیچ ۶×۲۰ به ازای هر قطعه در ${op.stepCode}`,
         });
       }
-    } else if (mo.partCode === 'SAPCO-ASY-ECU-BRK-01' && isFirstOp) {
+    } else if ((mo.partCode === 'SAPCO-ASY-ECU-BRK-01' || mo.partId === 'PRT-FG-ECU-ASY' || mo.partCode === '611408') && isFirstOp) {
+      const mainPart = parts.find(p => p.id === 'PRT-WIP-ECU-MAIN');
+      const compPart = parts.find(p => p.id === 'PRT-WIP-ECU-COMP');
       sourceWhId = 'WH-WIP-WELD';
       sourceWhName = 'انبار پای کار جوش و مونتاژ (WIP)';
       const mainMeta = pickLotMeta('PRT-WIP-ECU-MAIN', sourceWhId, 'LOT-ECU-MAIN-W1', 'LOC-WIP-WELD-01', 'COMPANY_OWNED');
@@ -1368,8 +1374,8 @@ export async function postFallbackWipOperationProduction(
           documentId: `DOC-WIP-BF-${suffix}`,
           lineNumber: 1,
           partId: 'PRT-WIP-ECU-MAIN',
-          partCode: 'WIP-ECU-MAIN-BRK',
-          partName: 'صفحه براکت اصلی ضدسرقت رایانه موتور',
+          partCode: mainPart?.code || 'WIP-ECU-MAIN-BRK',
+          partName: mainPart?.name || 'صفحه براکت اصلی ضدسرقت رایانه موتور',
           lotNumber: mainMeta.lotNumber,
           heatNumber: mainMeta.heatNumber,
           ownership: mainMeta.ownership,
@@ -1385,8 +1391,8 @@ export async function postFallbackWipOperationProduction(
           documentId: `DOC-WIP-BF-${suffix}`,
           lineNumber: 2,
           partId: 'PRT-WIP-ECU-COMP',
-          partCode: 'WIP-ECU-COMP-BRK',
-          partName: 'مکمل براکت ضدسرقت رایانه موتور',
+          partCode: compPart?.code || 'WIP-ECU-COMP-BRK',
+          partName: compPart?.name || 'مکمل براکت ضدسرقت رایانه موتور',
           lotNumber: compMeta.lotNumber,
           heatNumber: compMeta.heatNumber,
           ownership: compMeta.ownership,
@@ -1548,7 +1554,9 @@ export async function postFallbackWipOperationProduction(
             partId: matchedPart?.id || mo.partId,
             partCode: mo.partCode,
             partName: mo.partName,
-            lotNumber: isWip ? (mo.partCode === 'WIP-ECU-MAIN-BRK' ? 'LOT-ECU-MAIN-W1' : 'LOT-ECU-COMP-W1') : `LOT-FG-${suffix}`,
+            lotNumber: isWip
+              ? ((mo.partCode === 'WIP-ECU-MAIN-BRK' || mo.partId === 'PRT-WIP-ECU-MAIN' || mo.partCode === '700014') ? 'LOT-ECU-MAIN-W1' : 'LOT-ECU-COMP-W1')
+              : `LOT-FG-${suffix}`,
             heatNumber,
             ownership: 'COMPANY_OWNED',
             locationCode: isWip ? 'LOC-WIP-WELD-01' : 'LOC-FIN-P1',

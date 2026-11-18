@@ -113,6 +113,9 @@ const RouterContext = createContext<RouterContextType | null>(null);
 
 // Production SubTab slug mapping for clean URLs like /#/production/matrix or /#/production/wip
 const PROD_SLUG_TO_SUBTAB: Record<string, ProductionWorkbenchSubTab> = {
+  orders: 'MANUFACTURING_ORDERS_LIST',
+  mo: 'MANUFACTURING_ORDERS_LIST',
+  mos: 'MANUFACTURING_ORDERS_LIST',
   matrix: 'MULTI_PART_SCHEDULER',
   scheduler: 'MULTI_PART_SCHEDULER',
   ops: 'MULTI_PART_SCHEDULER',
@@ -129,6 +132,7 @@ const PROD_SLUG_TO_SUBTAB: Record<string, ProductionWorkbenchSubTab> = {
 };
 
 const PROD_SUBTAB_TO_SLUG: Record<ProductionWorkbenchSubTab, string> = {
+  MANUFACTURING_ORDERS_LIST: 'orders',
   MULTI_PART_SCHEDULER: 'matrix',
   DAILY_DISPATCH_SHEET: 'dispatch',
   LIVE_WIP_OP_TRACKER: 'wip',
@@ -464,6 +468,7 @@ const INV_SUB_LABELS: Record<string, string> = {
 };
 
 const PROD_SUB_LABELS: Record<string, string> = {
+  MANUFACTURING_ORDERS_LIST: 'فهرست و مدیریت دستورات ساخت (MO) و سرکلاف',
   MULTI_PART_SCHEDULER: 'برنامه‌ریزی و زمان‌بندی چندقطعه',
   DAILY_DISPATCH_SHEET: 'برگه اعزام روزانه خط تولید',
   LIVE_WIP_OP_TRACKER: 'ردیابی زنده عملیات WIP',
@@ -567,7 +572,11 @@ export const ErpRouterProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       const prevKey = serializeRouteToHash(prev);
       const nextKey = serializeRouteToHash(next);
 
-      if (!options?.replace && nextKey !== prevKey) {
+      if (nextKey === prevKey) {
+        return prev;
+      }
+
+      if (!options?.replace) {
         setHistoryStack(stack => {
           const entry: HistorySnapshotEntry = {
             id: `HIST-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
@@ -586,7 +595,7 @@ export const ErpRouterProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       if (typeof window !== 'undefined') {
         if (options?.replace) {
           window.history.replaceState(null, '', nextKey);
-        } else if (nextKey !== prevKey) {
+        } else {
           window.history.pushState(null, '', nextKey);
         }
       }

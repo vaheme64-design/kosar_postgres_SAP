@@ -52,9 +52,13 @@ export const OperationProductionModal: React.FC<OperationProductionModalProps> =
         if (cancelled) return;
         if (!result.success) throw new Error(result.error || 'خطا در دریافت اطلاعات ثبت تولید');
         setPostingContext(result.data);
-        setRelationalManufacturingOrderId(result.data.identityLink?.manufacturingOrderId || '');
-        setShiftId(result.data.shifts?.length === 1 ? result.data.shifts[0].id : '');
-        setCreatedByUserId(result.data.users?.length === 1 ? result.data.users[0].id : '');
+        setRelationalManufacturingOrderId(
+          result.data.identityLink?.manufacturingOrderId ||
+            result.data.manufacturingOrders?.[0]?.id ||
+            ''
+        );
+        setShiftId(result.data.shifts?.[0]?.id || '');
+        setCreatedByUserId(result.data.users?.[0]?.id || '');
       })
       .catch(error => {
         if (!cancelled) setErrorMsg(error.message || 'خطا در دریافت اطلاعات ثبت تولید');
@@ -83,14 +87,16 @@ export const OperationProductionModal: React.FC<OperationProductionModalProps> =
 
   if (!isOpen || !operation) return null;
 
-  const inProgressTotal = operation.inProgressQty;
+  const inProgressTotal = operation.inProgressQty || 0;
+  const waitingTotal = operation.waitingInputQty || 0;
+  const effectiveAvailableTotal = inProgressTotal + waitingTotal;
 
   const good = Math.max(0, Number(goodQty) || 0);
   const scrap = Math.max(0, Number(scrapQty) || 0);
   const rework = Math.max(0, Number(reworkQty) || 0);
   const rejected = Math.max(0, Number(rejectedQty) || 0);
   const totalAccounted = good + scrap + rework + rejected;
-  const remainingInProgress = inProgressTotal - totalAccounted;
+  const remainingInProgress = effectiveAvailableTotal - totalAccounted;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -100,9 +106,9 @@ export const OperationProductionModal: React.FC<OperationProductionModalProps> =
       return;
     }
 
-    if (totalAccounted > inProgressTotal) {
+    if (totalAccounted > effectiveAvailableTotal) {
       setErrorMsg(
-        `مجموع قطعات اعلام‌شده (${formatNumber(totalAccounted)}) از موجودی در حال ساخت پای دستگاه (${formatNumber(inProgressTotal)}) بیشتر است.`
+        `مجموع قطعات اعلام‌شده (${formatNumber(totalAccounted)}) از مجموع موجودی قابل پردازش ایستگاه (${formatNumber(effectiveAvailableTotal)}) بیشتر است.`
       );
       return;
     }
@@ -197,9 +203,11 @@ export const OperationProductionModal: React.FC<OperationProductionModalProps> =
         {/* In-Progress Status Card */}
         <div className="p-3 bg-[#fafafa] rounded border border-[#d9d9d9] flex items-center justify-between text-xs">
           <div>
-            <span className="text-[#666666] text-[11px] block">موجودی در حال ساخت پای دستگاه:</span>
+            <span className="text-[#666666] text-[11px] block">
+              موجودی قابل پردازش ایستگاه (پای دستگاه: {formatNumber(inProgressTotal)} + صف ورودی: {formatNumber(waitingTotal)}):
+            </span>
             <span className="font-mono font-bold text-[#333333] text-base">
-              {formatNumber(inProgressTotal)} <span className="text-xs font-normal text-[#666666]">PCS</span>
+              {formatNumber(effectiveAvailableTotal)} <span className="text-xs font-normal text-[#666666]">PCS</span>
             </span>
           </div>
           <div className="text-left">
@@ -217,7 +225,7 @@ export const OperationProductionModal: React.FC<OperationProductionModalProps> =
               <select value={relationalManufacturingOrderId} onChange={e => setRelationalManufacturingOrderId(e.target.value)} disabled={contextLoading || isSubmitting} className="w-full bg-white border border-[#bfbfbf] rounded p-2 text-xs text-[#333333] focus:outline-none focus:border-[#007cc0]">
                 <option value="">انتخاب دستور ساخت...</option>
                 {(postingContext?.manufacturingOrders || []).map((row: any) => (
-                  <option key={row.id} value={row.id}>{row.moNumber} — {row.part?.partNumber}</option>
+                  <option key={row.id} value={row.id}>{row.moNumber} — {row.part?.partNumber} ({row.part?.name})</option>
                 ))}
               </select>
             </div>
@@ -252,7 +260,7 @@ export const OperationProductionModal: React.FC<OperationProductionModalProps> =
             )}
             {contextLoading && <p className="text-xs text-[#666666]">در حال دریافت شیفت‌ها، کاربران و دستورهای ساخت...</p>}
             {!contextLoading && postingContext?.manufacturingOrders?.length === 0 && (
-              <p className="text-xs text-[#bb0000] sm:col-span-2">برای این کد قطعه دستور ساخت relational متناظر پیدا نشد؛ ابتدا باید دستور ساخت معتبر در دیتابیس ایجاد شود.</p>
+              <p className="text-xs text-[#bb0000] sm:col-span-2">برای این کد قطعه دستور ساخت فعالی در دیتابیس یافت نشد؛ ابتدا از طریق «برنامه‌ریزی MRP ← پیشنهاد برنامه» یا «مدیریت دستورات ساخت (MO)» دستور ساخت صادر نمایید.</p>
             )}
           </div>
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">

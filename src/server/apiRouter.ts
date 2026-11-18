@@ -6194,14 +6194,23 @@ apiRouter.post('/inventory/documents/:id/reverse', async (req: Request, res: Res
     }
 
     if (isDatabaseUrlConfigured()) {
-      const dbResult = await postDocumentInDbTransaction(reversalResult.reversalDocument, revUser);
-      if (!dbResult.success) {
-        targetDoc.postingStatus = previousState.postingStatus;
-        targetDoc.updatedAt = previousState.updatedAt;
-        return res.status(409).json({
-          success: false,
-          error: dbResult.error || 'ثبت سند اصلاحی در PostgreSQL ناموفق بود؛ وضعیت سند به حالت قبل بازگردانده شد.',
-        });
+      const prisma = getPrismaClient();
+      const dbTargetDoc = await prisma.inventoryDocument
+        .findFirst({
+          where: { OR: [{ id: targetDoc.id }, { documentNumber: targetDoc.documentNumber }] },
+          select: { id: true, postingStatus: true },
+        })
+        .catch(() => null);
+      if (dbTargetDoc && dbTargetDoc.postingStatus === 'POSTED') {
+        const dbResult = await postDocumentInDbTransaction(reversalResult.reversalDocument, revUser);
+        if (!dbResult.success) {
+          targetDoc.postingStatus = previousState.postingStatus;
+          targetDoc.updatedAt = previousState.updatedAt;
+          return res.status(409).json({
+            success: false,
+            error: dbResult.error || 'ثبت سند اصلاحی در PostgreSQL ناموفق بود؛ وضعیت سند به حالت قبل بازگردانده شد.',
+          });
+        }
       }
     }
 
@@ -11876,13 +11885,22 @@ apiRouter.delete('/wip/manufacturing-orders/:id', async (req: Request, res: Resp
       }
 
       if (isDatabaseUrlConfigured()) {
-        const dbRes = await postDocumentInDbTransaction(revRes.reversalDocument, revUser);
-        if (!dbRes.success) {
-          targetDoc.postingStatus = 'POSTED';
-          return res.status(409).json({
-            success: false,
-            error: dbRes.error || `ثبت سند برگشتی «${targetDoc.documentNumber}» در PostgreSQL ناموفق بود.`,
-          });
+        const prisma = getPrismaClient();
+        const dbTargetDoc = await prisma.inventoryDocument
+          .findFirst({
+            where: { OR: [{ id: targetDoc.id }, { documentNumber: targetDoc.documentNumber }] },
+            select: { id: true, postingStatus: true },
+          })
+          .catch(() => null);
+        if (dbTargetDoc && dbTargetDoc.postingStatus === 'POSTED') {
+          const dbRes = await postDocumentInDbTransaction(revRes.reversalDocument, revUser);
+          if (!dbRes.success) {
+            targetDoc.postingStatus = 'POSTED';
+            return res.status(409).json({
+              success: false,
+              error: dbRes.error || `ثبت سند برگشتی «${targetDoc.documentNumber}» در PostgreSQL ناموفق بود.`,
+            });
+          }
         }
       }
 
@@ -12087,7 +12105,15 @@ apiRouter.post('/wip/operations/production', async (req: Request, res: Response)
         }).catch(() => null)
       : null;
 
-    if (!isDatabaseUrlConfigured() || (!existingIdentityLink && !relationalManufacturingOrderId)) {
+    const targetRelMoId = existingIdentityLink?.manufacturingOrderId || relationalManufacturingOrderId;
+    const dbRelationalOrder = prisma && targetRelMoId
+      ? await prisma.manufacturingOrder.findUnique({
+          where: { id: targetRelMoId },
+          select: { id: true },
+        }).catch(() => null)
+      : null;
+
+    if (!isDatabaseUrlConfigured() || !dbRelationalOrder) {
       const resp = await postFallbackWipOperationProduction(
         body,
         partsStore,
@@ -16936,13 +16962,14 @@ apiRouter.get('/wip/production-posting-context', async (req: Request, res: Respo
     const wipOrder = manufacturingOrdersStore.find(order => order.id === wipMoId);
     if (!wipOrder) return res.status(404).json({ success: false, error: 'دستور WIP یافت نشد.' });
 
+    const fallbackCtx = getFallbackWipPostingContext(wipMoId, shiftsStore, operatorsStore, machinesStore);
+
     if (!isDatabaseUrlConfigured()) {
-      const ctx = getFallbackWipPostingContext(wipMoId, shiftsStore, operatorsStore, machinesStore);
-      return res.json({ success: true, data: ctx });
+      return res.json({ success: true, data: fallbackCtx });
     }
 
     const prisma = getPrismaClient();
-    const [manufacturingOrders, shifts, users, machines, identityLink] = await Promise.all([
+    const [dbManufacturingOrders, dbShifts, dbUsers, dbMachines, dbIdentityLink] = await Promise.all([
       prisma.manufacturingOrder.findMany({
         where: { part: { partNumber: wipOrder.partCode } },
         include: {
@@ -16954,15 +16981,24 @@ apiRouter.get('/wip/production-posting-context', async (req: Request, res: Respo
         },
         orderBy: { createdAt: 'desc' },
         take: 100,
-      }),
-      prisma.shift.findMany({ where: { active: true }, select: { id: true, code: true, name: true, startTime: true, endTime: true }, orderBy: { startTime: 'asc' } }),
-      prisma.user.findMany({ where: { active: true }, select: { id: true, username: true, fullName: true, personnelCode: true }, orderBy: { fullName: 'asc' } }),
-      prisma.machine.findMany({ where: { active: true, status: 'ACTIVE' }, select: { id: true, code: true, name: true }, orderBy: { code: 'asc' } }),
+      }).catch(() => []),
+      prisma.shift.findMany({ where: { active: true }, select: { id: true, code: true, name: true, startTime: true, endTime: true }, orderBy: { startTime: 'asc' } }).catch(() => []),
+      prisma.user.findMany({ where: { active: true }, select: { id: true, username: true, fullName: true, personnelCode: true }, orderBy: { fullName: 'asc' } }).catch(() => []),
+      prisma.machine.findMany({ where: { active: true, status: 'ACTIVE' }, select: { id: true, code: true, name: true }, orderBy: { code: 'asc' } }).catch(() => []),
       prisma.wipManufacturingOrderLink.findUnique({
         where: { wipManufacturingOrderId: wipMoId },
         select: { manufacturingOrderId: true },
-      }),
+      }).catch(() => null),
     ]);
+
+    const manufacturingOrders = dbManufacturingOrders.length > 0
+      ? dbManufacturingOrders
+      : (fallbackCtx?.manufacturingOrders || []);
+    const shifts = dbShifts.length > 0 ? dbShifts : (fallbackCtx?.shifts || []);
+    const users = dbUsers.length > 0 ? dbUsers : (fallbackCtx?.users || []);
+    const machines = dbMachines.length > 0 ? dbMachines : (fallbackCtx?.machines || []);
+    const identityLink = dbIdentityLink || fallbackCtx?.identityLink || (manufacturingOrders[0] ? { manufacturingOrderId: manufacturingOrders[0].id } : null);
+
     return res.json({ success: true, data: { manufacturingOrders, shifts, users, machines, identityLink } });
   } catch (error) {
     return res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در دریافت اطلاعات ثبت تولید' });

@@ -280,6 +280,17 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const productionSubModules: SubModuleLink[] = useMemo(
     () => [
       {
+        id: 'sub-prod-mo-list',
+        tab: 'production',
+        navParams: {
+          productionViewMode: 'ERP_WORKBENCH',
+          productionModuleTab: 'MANUFACTURING_ORDERS_LIST',
+        },
+        label: 'مدیریت دستورات ساخت (MO)',
+        keywords: 'لیست دستورات ساخت mo فیلتر وضعیت حذف دستور ساخت پیشرفت تولید سرکلاف راهنمای op10',
+        icon: Layers,
+      },
+      {
         id: 'sub-prod-scheduler',
         tab: 'production',
         navParams: {
@@ -583,14 +594,23 @@ export const Sidebar: React.FC<SidebarProps> = ({
         tab: 'production' as TabKey,
         defaultNavParams: {
           productionViewMode: 'ERP_WORKBENCH',
-          productionModuleTab: 'MULTI_PART_SCHEDULER',
+          productionModuleTab: 'MANUFACTURING_ORDERS_LIST',
         },
-        label: 'خط تولید و مراحل (OP)',
-        flatLabel: 'خط تولید و مراحل (OP)',
-        keywords: 'تولید فرآیند جامع سفارش تا برنامه روزانه مانده کار ثبت تکی اسناد کارگاهی پرسکاری wip دیسپچ',
+        label: 'خط تولید و دستورات ساخت (MO/OP)',
+        flatLabel: 'خط تولید و دستورات ساخت (MO/OP)',
+        keywords: 'تولید دستورات ساخت mo سرکلاف فرآیند جامع سفارش تا برنامه روزانه مانده کار ثبت تکی اسناد کارگاهی پرسکاری wip دیسپچ',
         icon: Hammer,
         roles: ['ADMIN', 'PRODUCTION_MANAGER', 'LINE_SUPERVISOR', 'QC_INSPECTOR'] as UserRoleProfile['role'][],
         subModules: productionSubModules,
+      },
+      {
+        id: 'flat-wip',
+        tab: 'wip' as TabKey,
+        label: 'رهگیری جریان ساخت (WIP)',
+        flatLabel: 'رهگیری جریان ساخت (WIP)',
+        keywords: 'جریان ساخت wip کارتابل دستورات کار mo حذف دستور ساخت درخت تولید ثبت خروجی op10',
+        icon: GitCommit,
+        roles: ['ADMIN', 'PRODUCTION_MANAGER', 'LINE_SUPERVISOR', 'QC_INSPECTOR'] as UserRoleProfile['role'][],
       },
       {
         id: 'flat-machines',
