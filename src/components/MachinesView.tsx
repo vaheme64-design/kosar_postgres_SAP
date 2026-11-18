@@ -45,6 +45,7 @@ import { StandardTable, StandardTableHeader, StandardTableRow, StandardTableCell
 import { SearchableSelect } from './common/SearchableSelect';
 import { useEnterpriseUx } from '../context/EnterpriseUxContext';
 import { useErpRouter } from '../context/RouterContext';
+import { InlinePageGuideButton } from './common/PageGuideSystem';
 
 interface MachinesViewProps {
   machines: Machine[];
@@ -627,7 +628,11 @@ export const MachinesView: React.FC<MachinesViewProps> = ({
           </div>
 
           {/* Primary Action Button */}
-          <div className="flex items-center gap-2 self-end md:self-auto">
+          <div className="flex items-center gap-2 self-end md:self-auto flex-wrap">
+            <InlinePageGuideButton
+              routeContext={{ tab: 'machines', machineSubTab: activeSubTab }}
+              label="آموزش این بخش و سناریوها"
+            />
             {activeSubTab === 'machines' && (
               <button
                 onClick={handleOpenNewMachine}

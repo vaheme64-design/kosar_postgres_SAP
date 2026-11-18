@@ -31,6 +31,7 @@ import { InventoryModuleSkeleton } from './ui/Skeleton';
 import { SearchableSelect } from './common/SearchableSelect';
 import { formatToJalali } from '../utils/jalali';
 import { useErpRouter } from '../context/RouterContext';
+import { InlinePageGuideButton } from './common/PageGuideSystem';
 
 interface SapcoMaterialsViewProps {
   coils: SapcoCoilReceipt[];
@@ -656,7 +657,11 @@ export const SapcoMaterialsView: React.FC<SapcoMaterialsViewProps> = ({
             ثبت شماره ذوب فولاد مبارکه، شماره بچ ورود کلاف و پیوند مستقیم ماده اولیه با بچ‌های ساخت (MO) در خط تولید
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          <InlinePageGuideButton
+            routeContext={{ tab: 'sapco' }}
+            label="آموزش ردیابی ذوب و سناریوها"
+          />
           <button
             type="button"
             onClick={handleExport}

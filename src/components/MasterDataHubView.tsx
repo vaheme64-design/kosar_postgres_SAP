@@ -60,6 +60,7 @@ import { toPersianDigits } from '../utils/formatters';
 import { MasterDataSkeleton } from './ui/Skeleton';
 import { useEnterpriseUx } from '../context/EnterpriseUxContext';
 import { useErpRouter } from '../context/RouterContext';
+import { InlinePageGuideButton } from './common/PageGuideSystem';
 
 export type MasterSubSection =
   | 'HUB'
@@ -272,6 +273,12 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
     setActiveSection(sec);
     if (onSectionChange) onSectionChange(sec);
   };
+
+  useEffect(() => {
+    if (onSectionChange) {
+      onSectionChange(activeSection);
+    }
+  }, [activeSection, onSectionChange]);
 
   // Sync automatically when user switches global template
   useEffect(() => {
@@ -1157,6 +1164,11 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
                 <span>نمای جدولی مستقیم</span>
               </button>
             </div>
+
+            <InlinePageGuideButton
+              routeContext={{ tab: 'master_data', masterSubSection: activeSection }}
+              label="آموزش این بخش و دکمه‌ها"
+            />
 
             <button
               type="button"

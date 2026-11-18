@@ -57,6 +57,7 @@ import { useAuditAction } from '../../hooks/useAuditAction';
 import { DynamicSelect } from '../common/DynamicSelect';
 import { D3MaterialFlowDiagram } from './D3MaterialFlowDiagram';
 import { MachineOverlapAlertWidget } from '../planning/MachineOverlapAlertWidget';
+import { InlinePageGuideButton } from '../common/PageGuideSystem';
 
 export interface ScheduledOpStep {
   opId: string;
@@ -1950,7 +1951,15 @@ export const ErpProductionWorkbenchView: React.FC<ErpProductionWorkbenchViewProp
             })}
           </div>
 
-          <div className="flex items-center gap-2 shrink-0 py-2 lg:py-0">
+          <div className="flex items-center gap-2 shrink-0 py-2 lg:py-0 flex-wrap">
+            <InlinePageGuideButton
+              routeContext={{
+                tab: 'production',
+                productionViewMode: 'ERP_WORKBENCH',
+                productionModuleTab: activeModuleTab,
+              }}
+              label="آموزش این تب و سناریوها"
+            />
             <button
               type="button"
               onClick={() => {

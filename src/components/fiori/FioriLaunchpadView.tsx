@@ -31,6 +31,7 @@ import { InventorySubTab } from '../inventory/InventoryModuleView';
 import { DashboardView } from '../DashboardView';
 import { FioriDocumentFlowPanel } from './FioriDocumentFlowPanel';
 import { toPersianDigits } from '../../utils/formatters';
+import { InlinePageGuideButton } from '../common/PageGuideSystem';
 
 interface FioriLaunchpadViewProps {
   currentUser: UserRoleProfile;
@@ -378,7 +379,12 @@ export const FioriLaunchpadView: React.FC<FioriLaunchpadViewProps> = ({
         </div>
 
         {/* Fast MIGO Operational Shortcuts */}
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex items-center gap-2 shrink-0 flex-wrap">
+          <InlinePageGuideButton
+            routeContext={{ tab: 'dashboard' }}
+            label="آموزش داشبورد و سناریوها"
+            onNavigate={(tab, subTab) => onNavigateToTab(tab, subTab)}
+          />
           <button
             type="button"
             onClick={() => onNavigateToTab('inventory', 'DASHBOARD', 'RECEIPT')}

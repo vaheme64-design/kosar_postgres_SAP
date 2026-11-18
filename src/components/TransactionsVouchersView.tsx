@@ -38,6 +38,7 @@ import { formatNumber, formatWeightKg, getVoucherTypeLabel, toPersianDigits } fr
 import { QuickEntryModals, QuickCreateEntityType } from './common/QuickEntryModals';
 import { MasterDataSkeleton } from './ui/Skeleton';
 import { DynamicSelect } from './common/DynamicSelect';
+import { InlinePageGuideButton } from './common/PageGuideSystem';
 
 interface TransactionsVouchersViewProps {
   parts: Part[];
@@ -389,9 +390,15 @@ export const TransactionsVouchersView: React.FC<TransactionsVouchersViewProps> =
             </div>
           </div>
 
-          <div className="flex items-center gap-2 text-xs text-[#666666] bg-[#f5f5f5] px-3 py-1.5 rounded border border-[#d9d9d9]">
-            <span>وضعیت دفتر کل:</span>
-            <span className="font-bold text-[#107e3e]">ثبت آنی و کنترل موجودی فعال</span>
+          <div className="flex items-center gap-2 flex-wrap">
+            <InlinePageGuideButton
+              routeContext={{ tab: 'production', productionViewMode: 'VOUCHERS' }}
+              label="آموزش انواع قبض و سناریوها"
+            />
+            <div className="flex items-center gap-2 text-xs text-[#666666] bg-[#f5f5f5] px-3 py-1.5 rounded border border-[#d9d9d9]">
+              <span>وضعیت دفتر کل:</span>
+              <span className="font-bold text-[#107e3e]">ثبت آنی و کنترل موجودی فعال</span>
+            </div>
           </div>
         </div>
 

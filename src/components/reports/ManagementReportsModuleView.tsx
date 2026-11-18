@@ -58,6 +58,7 @@ import { PlantMaintenanceModuleView } from '../maintenance/PlantMaintenanceModul
 import { CustomReportsView } from '../inventory/CustomReportsView';
 import { TableSkeleton, KpiCardsSkeleton, ChartSkeleton } from '../ui/Skeleton';
 import { useErpRouter } from '../../context/RouterContext';
+import { InlinePageGuideButton } from '../common/PageGuideSystem';
 
 export type ReportTypeKey =
   | 'plan_vs_actual'
@@ -122,7 +123,6 @@ export const ManagementReportsModuleView: React.FC<ManagementReportsModuleViewPr
     setActiveReport(rep);
     onReportTypeChange?.(rep);
   };
-  void handleSelectReport;
 
   // Report Data Stores
   const [planVsActualData, setPlanVsActualData] = useState<PlanVsActualItem[]>([]);
@@ -658,6 +658,10 @@ export const ManagementReportsModuleView: React.FC<ManagementReportsModuleViewPr
           </div>
 
           <div className="flex flex-wrap items-center gap-2 self-end lg:self-auto">
+            <InlinePageGuideButton
+              routeContext={{ tab: 'reports', reportSubTab: activeReport }}
+              label="آموزش این گزارش و سناریوها"
+            />
             <button
               onClick={() => window.print()}
               className="sap-btn-standard flex items-center gap-1.5 px-3 py-1.5 text-xs cursor-pointer"
@@ -687,7 +691,7 @@ export const ManagementReportsModuleView: React.FC<ManagementReportsModuleViewPr
               <span className="text-[#666666] font-medium">انتخاب گزارش / ماژول:</span>
               <select
                 value={activeReport}
-                onChange={e => setActiveReport(e.target.value as ReportTypeKey)}
+                onChange={e => handleSelectReport(e.target.value as ReportTypeKey)}
                 className="bg-transparent font-semibold text-[#333333] focus:outline-none cursor-pointer max-w-xs sm:max-w-md truncate"
               >
                 {filteredReports.map(r => (
@@ -708,7 +712,7 @@ export const ManagementReportsModuleView: React.FC<ManagementReportsModuleViewPr
                     r => catId === 'ALL' || r.category === catId
                   );
                   if (firstInCat && activeReport !== firstInCat.id) {
-                    setActiveReport(firstInCat.id);
+                    handleSelectReport(firstInCat.id);
                   }
                 }}
                 className="bg-transparent text-xs font-medium text-[#333333] focus:outline-none cursor-pointer"
