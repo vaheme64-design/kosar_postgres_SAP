@@ -46,6 +46,11 @@ import {
   syncSavedDbSettingsWithBackend,
 } from './utils/dbConnectionStorage';
 import {
+  getActiveFactoryUser,
+  setActiveFactoryUser,
+  updateActiveUserRole,
+} from './utils/userDirectoryStorage';
+import {
   CloudDownload,
   CloudUpload,
   RefreshCw,
@@ -165,51 +170,34 @@ function AppContent() {
   const [coils, setCoils] = useState<SapcoCoilReceipt[]>([]);
   const [summary, setSummary] = useState<any>(null);
 
-  // Auth & Role (persisted in localStorage)
+  // Active real factory user & customizable access level (persisted in localStorage, no password required)
   const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
-  const [currentUser, setCurrentUser] = useState<UserRoleProfile>(() => {
-    const validRoles: UserRoleProfile['role'][] = [
-      'ADMIN',
-      'PRODUCTION_MANAGER',
-      'WAREHOUSE_KEEPER',
-      'LINE_SUPERVISOR',
-      'QC_INSPECTOR',
-    ];
-    const savedRole = typeof window !== 'undefined' ? (localStorage.getItem('kpims_active_role') as UserRoleProfile['role'] | null) : null;
-    const role: UserRoleProfile['role'] = savedRole && validRoles.includes(savedRole) ? savedRole : 'ADMIN';
-    if (typeof window !== 'undefined') {
-      localStorage.setItem('kpims_active_role', role);
-      localStorage.setItem('kpims_active_uid', 'USR-PROD-01');
-    }
-    return {
-      uid: 'USR-PROD-01',
-      email: 'admin.factory@sapco-supplier.ir',
-      displayName: 'مهندس حسینی (مدیر تولید)',
-      role,
-      active: true,
-      createdAt: new Date().toISOString(),
+  const [currentUser, setCurrentUser] = useState<UserRoleProfile>(() => getActiveFactoryUser());
+
+  useEffect(() => {
+    const syncActiveUser = () => {
+      setCurrentUser(getActiveFactoryUser());
     };
-  });
+    window.addEventListener('kpims-users-updated', syncActiveUser);
+    return () => window.removeEventListener('kpims-users-updated', syncActiveUser);
+  }, []);
 
   const handleRoleChange = (role: UserRoleProfile['role']) => {
-    localStorage.setItem('kpims_active_role', role);
-    setCurrentUser(prev => ({ ...prev, role }));
+    const updated = updateActiveUserRole(role);
+    setCurrentUser(updated);
   };
 
-  // Listen to Firebase Auth state
+  const handleSelectUser = (uid: string) => {
+    const nextUser = setActiveFactoryUser(uid);
+    setCurrentUser(nextUser);
+  };
+
+  // Listen to Firebase Auth state (optional; does not override customized real factory user names)
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(
       auth,
       user => {
         setFirebaseUser(user);
-        if (user) {
-          setCurrentUser(prev => ({
-            ...prev,
-            uid: user.uid,
-            email: user.email || prev.email,
-            displayName: user.displayName || prev.displayName,
-          }));
-        }
       },
       () => {
         setFirebaseUser(null);
@@ -999,6 +987,7 @@ function AppContent() {
       reorderAlertsCount={reorderAlertsCount}
       criticalAlertsCount={criticalAlertsCount}
       onRoleChange={handleRoleChange}
+      onSelectUser={handleSelectUser}
       onNavigate={handleDeepNavigate}
       onOpenTemplateModal={() => setIsTemplateModalOpen(true)}
       onQuickTemplateChange={handleSelectTemplate}
@@ -1413,7 +1402,8 @@ function AppContent() {
           {activeTab === 'settings' && (
             <UserManagementView
               currentUser={currentUser}
-              onRoleChange={role => setCurrentUser(prev => ({ ...prev, role }))}
+              onRoleChange={handleRoleChange}
+              onSelectUser={handleSelectUser}
               firebaseUser={firebaseUser}
               initialSubTab={activeSettingsSubTab}
               onSubTabChange={sub => {

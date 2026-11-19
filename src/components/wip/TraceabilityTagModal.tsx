@@ -19,6 +19,7 @@ import {
 import { Part, Machine, DieMold, Operator } from '../../types/inventory';
 import { TraceabilityTagData } from '../../types/bomAndParallelFlow';
 import { toPersianDigits } from '../../utils/formatters';
+import { getActiveFactoryUser } from '../../utils/userDirectoryStorage';
 
 interface TraceabilityTagModalProps {
   isOpen: boolean;
@@ -49,8 +50,8 @@ export const TraceabilityTagModal: React.FC<TraceabilityTagModalProps> = ({
   const [machineCode, setMachineCode] = useState(machines[0]?.code || 'PRS-800-01');
   const [dieMoldCode, setDieMoldCode] = useState(dies[0]?.code || 'DIE-206-SEC-OP20');
   const [shift, setShift] = useState<'MORNING' | 'EVENING' | 'NIGHT'>('MORNING');
-  const [operatorName, setOperatorName] = useState(operators[0]?.fullName || 'علی رضایی (کد ۴۱۰۲)');
-  const [supervisorName, setSupervisorName] = useState('مهندس حسینی (سرپرست خط)');
+  const [operatorName, setOperatorName] = useState(operators[0]?.fullName || 'اپراتور خط تولید');
+  const [supervisorName, setSupervisorName] = useState(() => getActiveFactoryUser().displayName);
   const [sourceCoilPack, setSourceCoilPack] = useState('CP-1002 / COIL-ST14-1.5');
   const [heatNumber, setHeatNumber] = useState('HEAT-7712-MOB');
   const [quantity, setQuantity] = useState(250);

@@ -22,6 +22,8 @@ import {
   ShieldAlert,
   Lock,
   Unlock,
+  ClipboardList,
+  ListTree,
 } from 'lucide-react';
 import {
   DetailedStockBalance,
@@ -96,7 +98,7 @@ export const StockInquiryView: React.FC<StockInquiryViewProps> = ({
   onQmTransferApplied,
 }) => {
   const { showUndoToast, recordAudit } = useEnterpriseUx();
-  const { route, traceDocument, clearDocQuery } = useErpRouter();
+  const { route, traceDocument, clearDocQuery, navigate } = useErpRouter();
   const [qcHoldMap, setQcHoldMap] = useState<Record<string, QcHoldRecord>>(() => loadQcHoldMap());
   const [vipMap, setVipMap] = useState<Record<string, boolean>>(() => loadVipPartsMap());
   const [optimisticOverrides, setOptimisticOverrides] = useState<Record<string, Partial<DetailedStockBalance>>>({});
@@ -1090,6 +1092,39 @@ export const StockInquiryView: React.FC<StockInquiryViewProps> = ({
                           </span>
                         )}
                       </p>
+                      <div className="flex items-center gap-1.5 flex-wrap pt-1">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            navigate({
+                              tab: 'production',
+                              productionViewMode: 'ERP_WORKBENCH',
+                              productionModuleTab: 'MANUFACTURING_ORDERS_LIST',
+                              docQuery: activeCardexPartSummary.part.code,
+                            })
+                          }
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-[#e5f3fa] hover:bg-[#d2eaf7] text-[#007cc0] border border-[#b3ddf2] text-[11px] font-semibold cursor-pointer transition-colors"
+                          title="مشاهده دستورات ساخت (MO) مرتبط با این کد کالا"
+                        >
+                          <ClipboardList className="w-3 h-3" />
+                          <span>مشاهده دستور ساخت مرتبط (MO)</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            navigate({
+                              tab: 'master_data',
+                              masterSubSection: 'BOM',
+                              docQuery: activeCardexPartSummary.part.code,
+                            })
+                          }
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-white hover:bg-[#e5f3fa] text-[#333333] hover:text-[#007cc0] border border-[#d9d9d9] text-[11px] font-semibold cursor-pointer transition-colors"
+                          title="مشاهده درخت محصول (BOM) مرتبط با این کد کالا"
+                        >
+                          <ListTree className="w-3 h-3 text-[#007cc0]" />
+                          <span>درخت محصول (BOM)</span>
+                        </button>
+                      </div>
                     </div>
 
                     {/* Clean Inline KPI Strip */}

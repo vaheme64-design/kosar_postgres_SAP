@@ -28,6 +28,7 @@ import {
 } from 'lucide-react';
 import { MultiPartScheduleItem, WORK_DAYS } from './ErpProductionWorkbenchView';
 import { formatNumber, toPersianDigits, exportToCsv } from '../../utils/formatters';
+import { getActiveFactoryUser } from '../../utils/userDirectoryStorage';
 import { useErpRouter } from '../../context/RouterContext';
 
 interface MaterialRequirementProjectionViewProps {
@@ -394,7 +395,7 @@ export const MaterialRequirementProjectionView: React.FC<MaterialRequirementProj
       quantityKg: prQty,
       priority: prPriority,
       note: prNote,
-      requestedBy: 'مهندس حسینی (مدیر تولید و برنامه‌ریزی MRP)',
+      requestedBy: getActiveFactoryUser().displayName,
       issueDate: '۱۴۰۴/۰۲/۲۰',
       status: 'ISSUED_PENDING_APPROVAL',
       createdAt: new Date().toISOString(),

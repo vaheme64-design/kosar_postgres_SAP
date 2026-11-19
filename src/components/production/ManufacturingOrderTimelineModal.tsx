@@ -28,6 +28,7 @@ import {
 } from 'lucide-react';
 import { MultiPartScheduleItem, ScheduledOpStep, WORK_DAYS } from './ErpProductionWorkbenchView';
 import { formatNumber, toPersianDigits, exportToCsv } from '../../utils/formatters';
+import { getActiveFactoryUser } from '../../utils/userDirectoryStorage';
 import { useErpRouter } from '../../context/RouterContext';
 
 interface ManufacturingOrderTimelineModalProps {
@@ -154,7 +155,7 @@ export const ManufacturingOrderTimelineModal: React.FC<ManufacturingOrderTimelin
       details: {
         docNumber: activeOrder.orderCode,
         targetQty: activeOrder.weeklyTargetQty,
-        operator: 'مهندس حسینی (واحد برنامه‌ریزی تولید)',
+        operator: getActiveFactoryUser().displayName,
       },
     });
 

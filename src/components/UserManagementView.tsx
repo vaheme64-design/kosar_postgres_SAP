@@ -7,8 +7,6 @@ import {
   UserCheck,
   Building,
   KeyRound,
-  LogIn,
-  LogOut,
   Database,
   Terminal,
   Server,
@@ -22,14 +20,16 @@ import {
   GitBranch,
   RefreshCw,
   Laptop,
+  UserPlus,
+  Edit3,
+  Trash2,
+  Save,
+  X,
 } from 'lucide-react';
 import { UserRoleProfile } from '../types/inventory';
 import { CloudSyncCheckResult } from '../types/dbSync';
 import { toPersianDigits } from '../utils/formatters';
-import { auth } from '../lib/firebase';
-import { GoogleAuthProvider, signInWithPopup, signOut } from 'firebase/auth';
 import { KpiCardsSkeleton } from './ui/Skeleton';
-import { InlinePageGuideButton } from './common/PageGuideSystem';
 import { useEnterpriseUx } from '../context/EnterpriseUxContext';
 import {
   clearSavedDbConnectionUrl,
@@ -40,10 +40,21 @@ import {
   saveDbConnectionSettings,
   syncSavedDbSettingsWithBackend,
 } from '../utils/dbConnectionStorage';
+import {
+  CustomFactoryUser,
+  DEFAULT_ROLE_TITLES,
+  deleteCustomUser,
+  loadCustomRoleTitles,
+  loadCustomUsers,
+  saveCustomRoleTitles,
+  setActiveFactoryUser,
+  upsertCustomUser,
+} from '../utils/userDirectoryStorage';
 
 interface UserManagementViewProps {
   currentUser: UserRoleProfile;
   onRoleChange: (role: UserRoleProfile['role']) => void;
+  onSelectUser?: (uid: string) => void;
   firebaseUser: any;
   initialSubTab?: 'rbac' | 'db_architecture';
   onSubTabChange?: (sub: 'rbac' | 'db_architecture') => void;
@@ -61,7 +72,8 @@ interface UserManagementViewProps {
 export const UserManagementView: React.FC<UserManagementViewProps> = ({
   currentUser,
   onRoleChange,
-  firebaseUser,
+  onSelectUser,
+  firebaseUser: _firebaseUser,
   initialSubTab = 'rbac',
   onSubTabChange,
   cloudSyncCheck,
@@ -79,7 +91,30 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
   const [dbStatus, setDbStatus] = useState<any>(null);
   const [loadingDb, setLoadingDb] = useState<boolean>(true);
   const [copiedCmd, setCopiedCmd] = useState<string | null>(null);
-  const [authErrorMsg, setAuthErrorMsg] = useState<string | null>(null);
+
+  // Customizable Real Factory Users & Access Level Titles
+  const [customUsers, setCustomUsers] = useState<CustomFactoryUser[]>(() => loadCustomUsers());
+  const [roleTitles, setRoleTitles] = useState<Record<UserRoleProfile['role'], string>>(() =>
+    loadCustomRoleTitles()
+  );
+  const [userFormOpen, setUserFormOpen] = useState(false);
+  const [editingUid, setEditingUid] = useState<string | null>(null);
+  const [formDisplayName, setFormDisplayName] = useState('');
+  const [formJobTitle, setFormJobTitle] = useState('');
+  const [formDepartment, setFormDepartment] = useState('');
+  const [formRole, setFormRole] = useState<UserRoleProfile['role']>('PRODUCTION_MANAGER');
+  const [userFeedback, setUserFeedback] = useState<string | null>(null);
+  const [editingRoleKey, setEditingRoleKey] = useState<UserRoleProfile['role'] | null>(null);
+  const [editingRoleDraft, setEditingRoleDraft] = useState('');
+
+  useEffect(() => {
+    const sync = () => {
+      setCustomUsers(loadCustomUsers());
+      setRoleTitles(loadCustomRoleTitles());
+    };
+    window.addEventListener('kpims-users-updated', sync);
+    return () => window.removeEventListener('kpims-users-updated', sync);
+  }, []);
 
   // Dual DB Connection & Git-Style Sync State (pre-filled synchronously from browser storage)
   const [initialSavedCfg] = useState(() => loadSavedDbConnectionSettings());
@@ -481,65 +516,126 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
   }[] = [
     {
       role: 'ADMIN',
-      title: 'مدیر ارشد کارخانه (System Administrator)',
+      title: roleTitles.ADMIN || DEFAULT_ROLE_TITLES.ADMIN,
       description: 'دسترسی نامحدود به تمامی ماژول‌ها، تعریف کاربران، ابطال اسناد، پاکسازی داده‌ها و کالیبراسیون انبارگردانی',
       permissions: ['صدور کلیه اسناد', 'ابطال و صدور سند معکوس', 'تعریف قطعه و مسیر', 'تعریف ماشین‌آلات', 'پاکسازی امن دمو', 'مدیریت کاربران'],
       color: 'border-[#f9d6a7] bg-[#fff4e5] text-[#e9730c]',
     },
     {
       role: 'PRODUCTION_MANAGER',
-      title: 'مدیر برنامه‌ریزی تولید (Production Manager)',
+      title: roleTitles.PRODUCTION_MANAGER || DEFAULT_ROLE_TITLES.PRODUCTION_MANAGER,
       description: 'نظارت بر ایستگاه‌های پرسکاری و جوش، تعریف مسیرهای تولید، کنترل گلوگاه‌ها و مانیتورینگ WIP',
       permissions: ['ثبت تولید سالم', 'ثبت انتقال بین مراحل', 'تعریف و اصلاح مسیر تولید', 'گزارش‌گیری کامل WIP', 'مشاهده ماشین‌آلات'],
       color: 'border-[#b3ddf2] bg-[#e5f3fa] text-[#007cc0]',
     },
     {
       role: 'WAREHOUSE_KEEPER',
-      title: 'مسئول انبار و تدارکات ساپکو (Warehouse Keeper)',
-      description: 'مدیریت کویل‌ها و شیت‌های ورودی ساپکو، صدور رسید بارنامه، حواله خروج به خطوط برش و انبار محصول نهایی',
-      permissions: ['صدور رسید ورود ورق ساپکو', 'صدور حواله مصرف مواد اولیه', 'انبارگردانی اول دوره', 'مشاهده موجودی انبار مواد و محصول'],
+      title: roleTitles.WAREHOUSE_KEEPER || DEFAULT_ROLE_TITLES.WAREHOUSE_KEEPER,
+      description: 'مدیریت کویل‌ها و شیت‌های ورودی، صدور رسید بارنامه، حواله خروج به خطوط برش و انبار محصول نهایی',
+      permissions: ['صدور رسید ورود ورق و قطعات', 'صدور حواله مصرف مواد اولیه', 'انبارگردانی اول دوره', 'مشاهده موجودی انبار مواد و محصول'],
       color: 'border-[#a9dfbf] bg-[#ebf7ef] text-[#107e3e]',
     },
     {
       role: 'LINE_SUPERVISOR',
-      title: 'سرپرست سالن پرس و جوشکاری (Line Supervisor)',
+      title: roleTitles.LINE_SUPERVISOR || DEFAULT_ROLE_TITLES.LINE_SUPERVISOR,
       description: 'ثبت تیراژ شیفت، تخصیص اپراتورها و ماشین‌آلات، صدور کارت انتقال قطعه (کانبان) و تحویل در ایستگاه‌ها',
       permissions: ['ثبت تولید شیفت', 'ثبت خروج و ورود بین مراحل', 'مشاهده موجودی لحظه‌ای ایستگاه', 'تغییر وضعیت آمادگی ماشین'],
       color: 'border-[#d9d9d9] bg-[#f5f5f5] text-[#333333]',
     },
     {
       role: 'QC_INSPECTOR',
-      title: 'بازرس کنترل کیفیت ساپکو (QC Inspector)',
-      description: 'بازرسی ابعادی و متالورژی، کنترل پیچش مهره جوش، تست رنگ کاتافورز و ثبت ضایعات با کد علت نقص',
+      title: roleTitles.QC_INSPECTOR || DEFAULT_ROLE_TITLES.QC_INSPECTOR,
+      description: 'بازرسی ابعادی و متالورژی، کنترل پیچش مهره جوش، تست رنگ و ثبت ضایعات با کد علت نقص',
       permissions: ['ثبت ضایعات قطعات', 'ثبت علل عیوب قالب و کشش', 'مشاهده گزارش نرخ ضایعات', 'دسترسی فقط‌خواندنی به کاتالوگ'],
       color: 'border-[#f5b7b1] bg-[#ffecec] text-[#bb0000]',
     },
   ];
 
-  const handleGoogleSignIn = async () => {
-    setAuthErrorMsg(null);
-    try {
-      const provider = new GoogleAuthProvider();
-      await signInWithPopup(auth, provider);
-    } catch (error: any) {
-      const msg = error?.message || String(error);
-      if (msg.includes('token-service-api')) {
-        setAuthErrorMsg(
-          'سرویس Token Service API در پروژه کلود غیرفعال است. می‌توانید بدون نیاز به ورود ابری، مستقیماً از انتخابگر نقش‌های کارخانه در پایین استفاده کنید.'
-        );
+  const openAddUserForm = () => {
+    setEditingUid(null);
+    setFormDisplayName('');
+    setFormJobTitle('');
+    setFormDepartment('');
+    setFormRole('PRODUCTION_MANAGER');
+    setUserFormOpen(true);
+  };
+
+  const openEditUserForm = (u: CustomFactoryUser) => {
+    setEditingUid(u.uid);
+    setFormDisplayName(u.displayName);
+    setFormJobTitle(u.jobTitle || '');
+    setFormDepartment(u.department || '');
+    setFormRole(u.role);
+    setUserFormOpen(true);
+  };
+
+  const handleSaveUserForm = (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmedName = formDisplayName.trim();
+    if (!trimmedName) return;
+
+    const uid = editingUid || `USR-${Date.now().toString(36).toUpperCase()}`;
+    const updatedList = upsertCustomUser({
+      uid,
+      displayName: trimmedName,
+      jobTitle: formJobTitle.trim() || undefined,
+      department: formDepartment.trim() || undefined,
+      email: `${uid.toLowerCase()}@factory.local`,
+      role: formRole,
+      active: true,
+      createdAt: new Date().toISOString(),
+    });
+    setCustomUsers(updatedList);
+    if (!editingUid || currentUser.uid === uid) {
+      if (onSelectUser) {
+        onSelectUser(uid);
       } else {
-        setAuthErrorMsg('ورود با حساب گوگل انجام نشد. می‌توانید از نقش‌های داخلی سامانه استفاده نمایید.');
+        setActiveFactoryUser(uid);
       }
+    }
+    setUserFormOpen(false);
+    setEditingUid(null);
+    setUserFeedback(
+      editingUid
+        ? `مشخصات کاربر «${trimmedName}» با موفقیت به‌روزرسانی شد.`
+        : `کاربر جدید «${trimmedName}» به فهرست کارخانه اضافه و فعال شد.`
+    );
+    setTimeout(() => setUserFeedback(null), 4000);
+  };
+
+  const handleDeleteUser = (u: CustomFactoryUser) => {
+    if (customUsers.length <= 1) return;
+    requestConfirm({
+      title: `حذف کاربر «${u.displayName}»`,
+      message: 'آیا از حذف این کاربر از فهرست کاربران کارخانه اطمینان دارید؟',
+      confirmLabel: 'بله، حذف کاربر',
+      cancelLabel: 'انصراف',
+      variant: 'danger',
+      onConfirm: () => {
+        const updated = deleteCustomUser(u.uid);
+        setCustomUsers(updated);
+        setUserFeedback(`کاربر «${u.displayName}» از فهرست حذف شد.`);
+        setTimeout(() => setUserFeedback(null), 4000);
+      },
+    });
+  };
+
+  const handleActivateUser = (uid: string) => {
+    if (onSelectUser) {
+      onSelectUser(uid);
+    } else {
+      setActiveFactoryUser(uid);
     }
   };
 
-  const handleSignOut = async () => {
-    setAuthErrorMsg(null);
-    try {
-      await signOut(auth);
-    } catch {
-      // Ignore sign-out errors
-    }
+  const handleSaveRoleTitle = (roleKey: UserRoleProfile['role']) => {
+    const clean = editingRoleDraft.trim();
+    if (!clean) return;
+    const nextTitles = saveCustomRoleTitles({ ...roleTitles, [roleKey]: clean });
+    setRoleTitles(nextTitles);
+    setEditingRoleKey(null);
+    setUserFeedback(`عنوان سطح دسترسی به «${clean}» تغییر یافت.`);
+    setTimeout(() => setUserFeedback(null), 3500);
   };
 
   const copyToClipboard = (text: string) => {
@@ -609,114 +705,372 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
               </button>
             </div>
           </div>
-
-          <InlinePageGuideButton
-            routeContext={{ tab: 'settings', settingsSubTab: activeSubTab }}
-            label="آموزش این صفحه و دکمه‌ها"
-          />
         </div>
       </div>
 
       {activeSubTab === 'rbac' ? (
         <div className="space-y-4">
-          {/* Active Profile Info */}
-          <div className="sap-card p-4 flex items-center justify-between">
+          {/* Active Profile Bar */}
+          <div className="sap-card p-4 flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-sm bg-[#e5f3fa] border border-[#b3ddf2] text-[#007cc0] flex items-center justify-center font-bold">
-                <UserCheck className="w-5 h-5" />
+              <div className="w-10 h-10 rounded-full bg-[#007cc0] text-white flex items-center justify-center font-bold text-sm shrink-0">
+                {currentUser.displayName ? currentUser.displayName[0] : 'ک'}
               </div>
               <div>
-                <div className="text-sm font-bold text-[#333333]">
-                  کاربر فعال در این نشست: {currentUser.displayName}
+                <div className="text-sm font-bold text-[#333333] flex items-center gap-2 flex-wrap">
+                  <span>کاربر فعال نشست: {currentUser.displayName}</span>
+                  <span className="text-[10px] font-semibold px-2 py-0.5 rounded bg-[#ebf7ef] text-[#107e3e] border border-[#a9dfbf]">
+                    ورود مستقیم بدون رمز عبور
+                  </span>
                 </div>
-                <div className="text-xs text-[#666666]">
-                  نقش عملیاتی فعلی: <span className="text-[#007cc0] font-bold">{currentUser.role}</span>
+                <div className="text-xs text-[#666666] mt-0.5">
+                  سطح دسترسی فعال:{' '}
+                  <span className="text-[#007cc0] font-bold">
+                    {roleTitles[currentUser.role] || DEFAULT_ROLE_TITLES[currentUser.role]}
+                  </span>
                 </div>
               </div>
             </div>
 
-            {firebaseUser ? (
-              <div className="flex items-center gap-2 bg-[#f5f5f5] px-3 py-1.5 rounded-sm border border-[#d9d9d9]">
-                <div className="w-2 h-2 rounded-full bg-[#107e3e]" />
-                <span className="text-xs text-[#333333]">{firebaseUser.email}</span>
+            <div className="flex items-center gap-2 flex-wrap">
+              {customUsers.find(u => u.uid === currentUser.uid) && (
                 <button
-                  onClick={handleSignOut}
-                  className="mr-2 p-1 text-[#666666] hover:text-[#bb0000] cursor-pointer"
-                  title="خروج از حساب"
+                  type="button"
+                  onClick={() => {
+                    const activeObj = customUsers.find(u => u.uid === currentUser.uid);
+                    if (activeObj) openEditUserForm(activeObj);
+                  }}
+                  className="sap-btn-standard flex items-center gap-1.5 px-3 py-1.5 text-xs cursor-pointer"
                 >
-                  <LogOut className="w-4 h-4" />
+                  <Edit3 className="w-3.5 h-3.5 text-[#007cc0]" />
+                  <span>ویرایش نام کاربر فعال</span>
                 </button>
-              </div>
-            ) : (
+              )}
               <button
-                onClick={handleGoogleSignIn}
-                className="sap-btn-emphasized flex items-center gap-1.5 px-3.5 py-1.5 text-xs"
+                type="button"
+                onClick={openAddUserForm}
+                className="sap-btn-emphasized flex items-center gap-1.5 px-3.5 py-1.5 text-xs cursor-pointer"
               >
-                <LogIn className="w-4 h-4" />
-                <span>ورود با Google / Firebase</span>
+                <UserPlus className="w-3.5 h-3.5" />
+                <span>افزودن کاربر واقعی جدید</span>
               </button>
-            )}
+            </div>
           </div>
 
-          {authErrorMsg && (
-            <div className="bg-[#fff4e5] border border-[#f9d6a7] text-[#e9730c] text-xs p-3 rounded-sm flex items-center gap-2">
-              <AlertCircle className="w-4 h-4 shrink-0" />
-              <span>{authErrorMsg}</span>
+          {userFeedback && (
+            <div className="bg-[#ebf7ef] border border-[#a9dfbf] text-[#107e3e] text-xs p-3 rounded-sm flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 shrink-0" />
+              <span className="font-semibold">{userFeedback}</span>
             </div>
           )}
 
-          {/* Role Cards Matrix */}
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
-            {rolesInfo.map(info => {
-              const isSelected = currentUser.role === info.role;
-              return (
-                <div
-                  key={info.role}
-                  className={`sap-card p-4 flex flex-col justify-between transition-all ${
-                    isSelected
-                      ? 'border-[#007cc0] ring-1 ring-[#007cc0]'
-                      : 'hover:border-[#bfbfbf]'
-                  }`}
+          {/* Add / Edit Real Factory User Form */}
+          {userFormOpen && (
+            <form
+              onSubmit={handleSaveUserForm}
+              className="sap-card p-4 border-[#007cc0] bg-[#f7fbff] space-y-3"
+            >
+              <div className="flex items-center justify-between border-b border-[#d9e9f5] pb-2">
+                <span className="text-xs font-bold text-[#004e7a] flex items-center gap-1.5">
+                  {editingUid ? <Edit3 className="w-4 h-4" /> : <UserPlus className="w-4 h-4" />}
+                  {editingUid ? 'ویرایش مشخصات و نام واقعی کاربر' : 'تعریف کاربر واقعی جدید در کارخانه'}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setUserFormOpen(false)}
+                  className="text-[#666666] hover:text-[#333333] cursor-pointer"
                 >
-                  <div>
-                    <div className="flex items-center justify-between mb-3">
-                      <span className={`text-[11px] font-bold px-2 py-0.5 rounded-sm border ${info.color}`}>
-                        {info.role}
-                      </span>
-                      {isSelected && (
-                        <span className="flex items-center gap-1 text-[11px] text-[#007cc0] font-bold">
-                          <CheckCircle2 className="w-3.5 h-3.5" />
-                          نقش فعال شما
-                        </span>
-                      )}
-                    </div>
-                    <h3 className="text-sm font-bold text-[#333333] mb-1.5">{info.title}</h3>
-                    <p className="text-xs text-[#666666] leading-relaxed mb-3">{info.description}</p>
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
 
-                    <div className="space-y-1.5 border-t border-[#e8e8e8] pt-3">
-                      <div className="text-[11px] font-bold text-[#666666]">مجوزهای عملیاتی:</div>
-                      {info.permissions.map((perm, idx) => (
-                        <div key={idx} className="flex items-center gap-1.5 text-xs text-[#333333]">
-                          <CheckCircle2 className="w-3 h-3 text-[#107e3e] shrink-0" />
-                          <span>{perm}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
+                <div>
+                  <label className="block text-[11px] font-bold text-[#333333] mb-1">
+                    نام و نام خانوادگی واقعی *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={formDisplayName}
+                    onChange={e => setFormDisplayName(e.target.value)}
+                    placeholder="نام واقعی همکار را وارد کنید..."
+                    className="w-full px-2.5 py-1.5 bg-white border border-[#bfbfbf] rounded-sm focus:outline-none focus:border-[#007cc0]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold text-[#333333] mb-1">
+                    سمت شغلی (اختیاری)
+                  </label>
+                  <input
+                    type="text"
+                    value={formJobTitle}
+                    onChange={e => setFormJobTitle(e.target.value)}
+                    placeholder="مثلاً: مدیر تولید، انباردار..."
+                    className="w-full px-2.5 py-1.5 bg-white border border-[#bfbfbf] rounded-sm focus:outline-none focus:border-[#007cc0]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold text-[#333333] mb-1">
+                    واحد / سالن (اختیاری)
+                  </label>
+                  <input
+                    type="text"
+                    value={formDepartment}
+                    onChange={e => setFormDepartment(e.target.value)}
+                    placeholder="مثلاً: سالن پرس ۱، انبار مرکزی..."
+                    className="w-full px-2.5 py-1.5 bg-white border border-[#bfbfbf] rounded-sm focus:outline-none focus:border-[#007cc0]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold text-[#333333] mb-1">
+                    سطح دسترسی (نقش) *
+                  </label>
+                  <select
+                    value={formRole}
+                    onChange={e => setFormRole(e.target.value as UserRoleProfile['role'])}
+                    className="w-full px-2.5 py-1.5 bg-white border border-[#bfbfbf] rounded-sm font-semibold focus:outline-none focus:border-[#007cc0] cursor-pointer"
+                  >
+                    {rolesInfo.map(r => (
+                      <option key={r.role} value={r.role}>
+                        {r.title}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
 
-                  <button
-                    onClick={() => onRoleChange(info.role)}
-                    className={`mt-4 w-full py-1.5 text-xs transition-all cursor-pointer ${
+              <div className="flex items-center justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setUserFormOpen(false)}
+                  className="sap-btn-standard px-3 py-1.5 text-xs cursor-pointer"
+                >
+                  انصراف
+                </button>
+                <button
+                  type="submit"
+                  className="sap-btn-emphasized px-4 py-1.5 text-xs flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Save className="w-3.5 h-3.5" />
+                  <span>{editingUid ? 'ذخیره تغییرات کاربر' : 'ثبت و فعال‌سازی کاربر'}</span>
+                </button>
+              </div>
+            </form>
+          )}
+
+          {/* Real Factory Users Table */}
+          <div className="sap-card overflow-hidden">
+            <div className="px-4 py-2.5 bg-[#f7f9fb] border-b border-[#d9d9d9] flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h3 className="text-xs font-bold text-[#333333]">
+                  فهرست کاربران کارخانه ({toPersianDigits(customUsers.length)} نفر)
+                </h3>
+                <p className="text-[11px] text-[#666666]">
+                  نام، سمت و سطح دسترسی هر فرد را مستقیماً شخصی‌سازی کنید. سیستم پسورد فعلاً غیرفعال است و انتخاب کاربر بلافاصله نشست را تغییر می‌دهد.
+                </p>
+              </div>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="sap-table-compact w-full text-right text-xs">
+                <thead className="bg-white border-b border-[#d9d9d9] text-[#555555]">
+                  <tr>
+                    <th className="py-2 px-3">نام و نام خانوادگی</th>
+                    <th className="py-2 px-3">سمت و واحد</th>
+                    <th className="py-2 px-3">سطح دسترسی</th>
+                    <th className="py-2 px-3 w-28">وضعیت نشست</th>
+                    <th className="py-2 px-3 text-left">عملیات</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#eeeeee]">
+                  {customUsers.map(u => {
+                    const isActive = currentUser.uid === u.uid;
+                    const roleMeta = rolesInfo.find(r => r.role === u.role);
+                    return (
+                      <tr
+                        key={u.uid}
+                        className={isActive ? 'bg-[#f4f9fd]' : 'hover:bg-[#fafafa]'}
+                      >
+                        <td className="py-2 px-3 font-bold text-[#333333]">
+                          <div className="flex items-center gap-2">
+                            <span className={`w-6 h-6 rounded-full text-[11px] flex items-center justify-center font-bold shrink-0 ${
+                              isActive ? 'bg-[#007cc0] text-white' : 'bg-[#e8edf2] text-[#333333]'
+                            }`}>
+                              {u.displayName ? u.displayName[0] : 'ک'}
+                            </span>
+                            <span>{u.displayName}</span>
+                          </div>
+                        </td>
+                        <td className="py-2 px-3 text-[#555555]">
+                          {[u.jobTitle, u.department].filter(Boolean).join(' · ') || '—'}
+                        </td>
+                        <td className="py-2 px-3">
+                          <span className={`inline-block text-[11px] font-semibold px-2 py-0.5 rounded-sm border ${
+                            roleMeta?.color || 'border-[#d9d9d9] bg-[#f5f5f5] text-[#333333]'
+                          }`}>
+                            {roleTitles[u.role] || DEFAULT_ROLE_TITLES[u.role]}
+                          </span>
+                        </td>
+                        <td className="py-2 px-3">
+                          {isActive ? (
+                            <span className="inline-flex items-center gap-1 text-[11px] font-bold text-[#107e3e]">
+                              <CheckCircle2 className="w-3.5 h-3.5" />
+                              کاربر فعال
+                            </span>
+                          ) : (
+                            <span className="text-[11px] text-[#888888]">آماده انتخاب</span>
+                          )}
+                        </td>
+                        <td className="py-2 px-3">
+                          <div className="flex items-center justify-end gap-1.5">
+                            {!isActive && (
+                              <button
+                                type="button"
+                                onClick={() => handleActivateUser(u.uid)}
+                                className="sap-btn-standard px-2.5 py-1 text-[11px] font-semibold text-[#007cc0] cursor-pointer"
+                              >
+                                فعال‌سازی این کاربر
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => openEditUserForm(u)}
+                              className="sap-btn-standard px-2 py-1 text-[11px] flex items-center gap-1 cursor-pointer"
+                              title="ویرایش نام و سطح دسترسی"
+                            >
+                              <Edit3 className="w-3 h-3 text-[#007cc0]" />
+                              <span>ویرایش</span>
+                            </button>
+                            {customUsers.length > 1 && (
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteUser(u)}
+                                className="px-2 py-1 rounded border border-[#f5b8b8] bg-[#fde8e8] hover:bg-[#fbd0d0] text-[#bb0000] text-[11px] flex items-center gap-1 cursor-pointer"
+                                title="حذف کاربر"
+                              >
+                                <Trash2 className="w-3 h-3" />
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Customizable Access Levels Matrix */}
+          <div className="space-y-2.5">
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <h3 className="text-xs font-bold text-[#333333] flex items-center gap-1.5">
+                <ShieldCheck className="w-4 h-4 text-[#007cc0]" />
+                <span>ماتریس سطوح دسترسی کارخانه (عناوین قابل شخصی‌سازی)</span>
+              </h3>
+              <span className="text-[11px] text-[#666666]">
+                برای تغییر نام هر سطح دسترسی روی دکمه «ویرایش عنوان» کلیک کنید.
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
+              {rolesInfo.map(info => {
+                const isSelected = currentUser.role === info.role;
+                const isEditingTitle = editingRoleKey === info.role;
+                return (
+                  <div
+                    key={info.role}
+                    className={`sap-card p-4 flex flex-col justify-between transition-all ${
                       isSelected
-                        ? 'sap-btn-emphasized'
-                        : 'sap-btn-standard'
+                        ? 'border-[#007cc0] ring-1 ring-[#007cc0]'
+                        : 'hover:border-[#bfbfbf]'
                     }`}
                   >
-                    {isSelected ? 'نقش فعال است' : 'تغییر به این نقش'}
-                  </button>
-                </div>
-              );
-            })}
+                    <div>
+                      <div className="flex items-center justify-between gap-2 mb-2.5">
+                        <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded-sm border ${info.color}`}>
+                          {info.role}
+                        </span>
+                        {isSelected && (
+                          <span className="flex items-center gap-1 text-[11px] text-[#007cc0] font-bold">
+                            <CheckCircle2 className="w-3.5 h-3.5" />
+                            سطح فعال
+                          </span>
+                        )}
+                      </div>
+
+                      {isEditingTitle ? (
+                        <div className="flex items-center gap-1.5 mb-2">
+                          <input
+                            type="text"
+                            value={editingRoleDraft}
+                            onChange={e => setEditingRoleDraft(e.target.value)}
+                            className="flex-1 px-2 py-1 text-xs font-bold bg-white border border-[#007cc0] rounded-sm focus:outline-none"
+                            autoFocus
+                          />
+                          <button
+                            type="button"
+                            onClick={() => handleSaveRoleTitle(info.role)}
+                            className="sap-btn-emphasized px-2 py-1 text-[11px] cursor-pointer"
+                            title="ذخیره عنوان"
+                          >
+                            <Save className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setEditingRoleKey(null)}
+                            className="sap-btn-standard px-1.5 py-1 text-[11px] cursor-pointer"
+                            title="انصراف"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="flex items-center justify-between gap-2 mb-1.5">
+                          <h4 className="text-sm font-bold text-[#333333]">{info.title}</h4>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEditingRoleKey(info.role);
+                              setEditingRoleDraft(info.title);
+                            }}
+                            className="text-[10px] text-[#007cc0] hover:underline flex items-center gap-0.5 shrink-0 cursor-pointer"
+                          >
+                            <Edit3 className="w-3 h-3" />
+                            <span>ویرایش عنوان</span>
+                          </button>
+                        </div>
+                      )}
+
+                      <p className="text-xs text-[#666666] leading-relaxed mb-3">{info.description}</p>
+
+                      <div className="space-y-1.5 border-t border-[#e8e8e8] pt-3">
+                        <div className="text-[11px] font-bold text-[#666666]">مجوزهای عملیاتی:</div>
+                        {info.permissions.map((perm, idx) => (
+                          <div key={idx} className="flex items-center gap-1.5 text-xs text-[#333333]">
+                            <CheckCircle2 className="w-3 h-3 text-[#107e3e] shrink-0" />
+                            <span>{perm}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => onRoleChange(info.role)}
+                      className={`mt-4 w-full py-1.5 text-xs transition-all cursor-pointer ${
+                        isSelected
+                          ? 'sap-btn-emphasized'
+                          : 'sap-btn-standard'
+                      }`}
+                    >
+                      {isSelected ? 'سطح دسترسی کاربر فعال است' : 'تخصیص این سطح دسترسی به کاربر فعال'}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
           </div>
         </div>
       ) : (
@@ -959,7 +1313,7 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
                       setDeviceLabel(val);
                       saveDbConnectionSettings({ deviceLabel: val });
                     }}
-                    placeholder="مثلاً: لپتاپ مهندس حسینی یا کامپیوتر کارخانه"
+                    placeholder="مثلاً: سیستم واحد تولید یا کامپیوتر انبار"
                     className="w-full px-3 py-1.5 text-xs bg-white border border-[#bfbfbf] rounded-sm focus:outline-none focus:border-[#007cc0]"
                   />
                 </div>

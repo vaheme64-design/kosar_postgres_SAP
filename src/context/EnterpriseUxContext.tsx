@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { toPersianDigits } from '../utils/formatters';
 import { formatToJalali } from '../utils/jalali';
+import { getActiveFactoryUser } from '../utils/userDirectoryStorage';
 
 export interface AuditTrailEntry {
   id: string;
@@ -117,7 +118,7 @@ const INITIAL_AUDIT_LOGS: AuditTrailEntry[] = [
     actionType: 'CREATE',
     title: 'صدور دستور تولید MO-1404-2001 برای براکت ضدسرقت ECU',
     details: 'تخصیص کلاف MOB-2025-DC01-409 با شماره ذوب HT-99412-MOB به تیراژ ۵,۰۰۰ عدد',
-    actor: 'مهندس حسینی (مدیر تولید)',
+    actor: 'مدیر تولید و برنامه‌ریزی',
     timestamp: '۱۴۰۴/۰۲/۲۰ - ۰۷:۳۰',
   },
   {
@@ -210,7 +211,7 @@ export const EnterpriseUxProvider: React.FC<{ children: React.ReactNode }> = ({ 
         actionType: entry.actionType,
         title: entry.title || entry.summaryFa || 'ثبت رویداد سیستمی',
         details: entry.details || entry.detailsFa || '',
-        actor: entry.actor || 'مهندس حسینی (مدیر تولید)',
+        actor: entry.actor || getActiveFactoryUser().displayName,
         timestamp: getNowPersianTimestamp(),
       };
       setAuditLogs(prev => [newEntry, ...prev]);

@@ -60,7 +60,6 @@ import { toPersianDigits } from '../utils/formatters';
 import { MasterDataSkeleton } from './ui/Skeleton';
 import { useEnterpriseUx } from '../context/EnterpriseUxContext';
 import { useErpRouter } from '../context/RouterContext';
-import { InlinePageGuideButton } from './common/PageGuideSystem';
 
 export type MasterSubSection =
   | 'HUB'
@@ -271,6 +270,7 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
 
   const handleSelectSection = (sec: MasterSubSection) => {
     setActiveSection(sec);
+    setViewMode(sec === 'HUB' ? 'CARDS_HUB' : 'SEGMENTED_TABS');
     if (onSectionChange) onSectionChange(sec);
   };
 
@@ -1129,10 +1129,7 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
             <div className="inline-flex items-center bg-[#F2F4F7] p-1 rounded-md border border-[#D9DFE5]">
               <button
                 type="button"
-                onClick={() => {
-                  setViewMode('CARDS_HUB');
-                  setActiveSection('HUB');
-                }}
+                onClick={() => handleSelectSection('HUB')}
                 className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium transition-all cursor-pointer ${
                   viewMode === 'CARDS_HUB' && activeSection === 'HUB'
                     ? 'bg-[#0070F2] text-white'
@@ -1146,7 +1143,7 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
                 type="button"
                 onClick={() => {
                   setViewMode('SEGMENTED_TABS');
-                  if (activeSection === 'HUB') setActiveSection('RAW_MATERIALS');
+                  if (activeSection === 'HUB') handleSelectSection('RAW_MATERIALS');
                 }}
                 className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium transition-all cursor-pointer ${
                   activeSection !== 'HUB'
@@ -1158,11 +1155,6 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
                 <span>نمای جدولی مستقیم</span>
               </button>
             </div>
-
-            <InlinePageGuideButton
-              routeContext={{ tab: 'master_data', masterSubSection: activeSection }}
-              label="آموزش این بخش و دکمه‌ها"
-            />
 
             <button
               type="button"
@@ -1182,11 +1174,7 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
               <span className="text-[#556B82] font-normal">جدول:</span>
               <select
                 value={activeSection}
-                onChange={e => {
-                  const val = e.target.value as MasterSubSection;
-                  setActiveSection(val);
-                  if (val !== 'HUB') setViewMode('SEGMENTED_TABS');
-                }}
+                onChange={e => handleSelectSection(e.target.value as MasterSubSection)}
                 className="bg-transparent font-semibold text-[#1D2D3E] focus:outline-none cursor-pointer"
               >
                 <option value="HUB">پیشخوان همه جداول اطلاعات پایه (۱۳ بخش)</option>
@@ -1213,10 +1201,7 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
                 <button
                   key={tab.id}
                   type="button"
-                  onClick={() => {
-                    setActiveSection(tab.id as MasterSubSection);
-                    setViewMode('SEGMENTED_TABS');
-                  }}
+                  onClick={() => handleSelectSection(tab.id as MasterSubSection)}
                   className={`sap-icon-tab ${activeSection === tab.id ? 'sap-icon-tab-active' : ''}`}
                 >
                   {tab.label}
@@ -1228,10 +1213,7 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
           {activeSection !== 'HUB' && (
             <button
               type="button"
-              onClick={() => {
-                setViewMode('CARDS_HUB');
-                setActiveSection('HUB');
-              }}
+              onClick={() => handleSelectSection('HUB')}
               className="inline-flex items-center gap-1 text-xs font-medium text-[#0064D9] hover:underline cursor-pointer py-1.5"
             >
               <ArrowRight className="w-3.5 h-3.5" />
@@ -1250,10 +1232,7 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
               return (
                 <div
                   key={card.id}
-                  onClick={() => {
-                    setActiveSection(card.id);
-                    setViewMode('SEGMENTED_TABS');
-                  }}
+                  onClick={() => handleSelectSection(card.id)}
                   className="group bg-white hover:bg-[#F5F6F7]/70 border border-[#D9DFE5] hover:border-[#0070F2] rounded-lg p-4 flex flex-col justify-between transition-all cursor-pointer shadow-2xs"
                 >
                   <div>

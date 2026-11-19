@@ -21,10 +21,13 @@ import {
   ShieldAlert,
   X,
   PackagePlus,
+  ListTree,
+  Warehouse,
 } from 'lucide-react';
 import { Part, Routing } from '../../types/inventory';
 import { ManufacturingOrder, ManufacturingOperation, ManufacturingOrderStatus } from '../../types/productionWip';
 import { formatNumber, toPersianDigits } from '../../utils/formatters';
+import { getActiveFactoryUser } from '../../utils/userDirectoryStorage';
 import { useErpRouter } from '../../context/RouterContext';
 import { CreateMoModal } from '../wip/CreateMoModal';
 import { OperationProductionModal } from '../wip/OperationProductionModal';
@@ -72,8 +75,14 @@ export const ManufacturingOrdersManagementView: React.FC<ManufacturingOrdersMana
   const [orders, setOrders] = useState<ManufacturingOrder[]>([]);
   const [loading, setLoading] = useState(false);
   const [statusFilter, setStatusFilter] = useState<'ALL' | ManufacturingOrderStatus>('ALL');
-  const [searchQuery, setSearchQuery] = useState('');
+  const [searchQuery, setSearchQuery] = useState(() => router.route.docQuery || '');
   const [showGuide, setShowGuide] = useState(false);
+
+  useEffect(() => {
+    if (router.route.docQuery !== undefined && router.route.docQuery !== null) {
+      setSearchQuery(router.route.docQuery);
+    }
+  }, [router.route.docQuery]);
   const [isVisualGuideOpen, setIsVisualGuideOpen] = useState(false);
   const [notice, setNotice] = useState<{ type: 'success' | 'warning' | 'error'; title: string; detail: string } | null>(null);
 
@@ -220,13 +229,14 @@ export const ManufacturingOrdersManagementView: React.FC<ManufacturingOrdersMana
     setIsLoadingMaterial(true);
     try {
       const firstOp = [...loadMaterialOrder.operations].sort((a, b) => a.stepNumber - b.stepNumber)[0];
+      const activeUser = getActiveFactoryUser();
       const res = await fetch(`/api/wip/manufacturing-orders/${encodeURIComponent(loadMaterialOrder.id)}/load-material`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           operationId: firstOp?.id,
           quantity: qty,
-          operatorName: 'سرپرست خط برش و پرس',
+          operatorName: activeUser.displayName,
           notes: loadMaterialNotes.trim() || `تغذیه سرکلاف / شیت ورودی به ${firstOp?.stepCode || 'OP10'}`,
         }),
       });
@@ -287,14 +297,15 @@ export const ManufacturingOrdersManagementView: React.FC<ManufacturingOrdersMana
 
     setIsDeleting(true);
     try {
+      const activeUser = getActiveFactoryUser();
       const res = await fetch(`/api/wip/manufacturing-orders/${encodeURIComponent(deleteTargetOrder.id)}`, {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           cascadeSubMos,
           reason: deleteReason.trim(),
-          userId: 'USR-PROD-MGR',
-          userName: 'مدیر تولید و برنامه‌ریزی',
+          userId: activeUser.uid,
+          userName: activeUser.displayName,
         }),
       });
       const json = await res.json();
@@ -609,8 +620,21 @@ export const ManufacturingOrdersManagementView: React.FC<ManufacturingOrdersMana
                 value={searchQuery}
                 onChange={e => setSearchQuery(e.target.value)}
                 placeholder="جستجوی شماره MO، کد یا نام قطعه..."
-                className="w-full bg-white border border-[#bfbfbf] rounded pr-8 pl-3 py-1.5 text-xs text-[#333333] focus:outline-none focus:border-[#007cc0]"
+                className="w-full bg-white border border-[#bfbfbf] rounded pr-8 pl-7 py-1.5 text-xs text-[#333333] focus:outline-none focus:border-[#007cc0]"
               />
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSearchQuery('');
+                    if (router.route.docQuery) router.clearDocQuery();
+                  }}
+                  title="پاک‌کردن فیلتر جستجو"
+                  className="absolute left-2 top-1.5 text-[#666666] hover:text-[#bb0000] cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
             </div>
 
             <button
@@ -797,6 +821,38 @@ export const ManufacturingOrdersManagementView: React.FC<ManufacturingOrdersMana
                       >
                         <GitBranch className="w-3.5 h-3.5" />
                         <span>رهگیری در WIP</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() =>
+                          router.navigate({
+                            tab: 'master_data',
+                            masterSubSection: 'BOM',
+                            docQuery: mo.partCode,
+                          })
+                        }
+                        className="sap-btn-standard px-2.5 py-1.5 text-[11px] font-semibold flex items-center gap-1 cursor-pointer text-[#007cc0]"
+                        title="مشاهده درخت محصول (BOM) مرتبط با این قطعه"
+                      >
+                        <ListTree className="w-3.5 h-3.5" />
+                        <span>درخت محصول (BOM)</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() =>
+                          router.navigate({
+                            tab: 'inventory',
+                            inventorySubTab: 'INQUIRY',
+                            docQuery: mo.partCode,
+                          })
+                        }
+                        className="sap-btn-standard px-2.5 py-1.5 text-[11px] font-semibold flex items-center gap-1 cursor-pointer"
+                        title="مشاهده موجودی انبار و کاردکس مرتبط با این قطعه"
+                      >
+                        <Warehouse className="w-3.5 h-3.5 text-[#107e3e]" />
+                        <span>کاردکس انبار</span>
                       </button>
 
                       <button

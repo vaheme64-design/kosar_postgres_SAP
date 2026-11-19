@@ -24,6 +24,8 @@ import {
   Search,
   Filter,
   X,
+  ClipboardList,
+  Warehouse,
 } from 'lucide-react';
 import { Part, Routing } from '../../types/inventory';
 import {
@@ -732,6 +734,55 @@ export const AdvancedBomModuleView: React.FC<AdvancedBomModuleViewProps> = ({
                   توضیحات مهندسی: {activeBom.notes}
                 </p>
               )}
+              {/* Direct SAP Fiori Cross-Links scoped to this BOM Part */}
+              <div className="flex flex-wrap items-center gap-1.5 mt-2.5">
+                <button
+                  type="button"
+                  onClick={() =>
+                    navigate({
+                      tab: 'production',
+                      productionViewMode: 'ERP_WORKBENCH',
+                      productionModuleTab: 'MANUFACTURING_ORDERS_LIST',
+                      docQuery: activeBom.assemblyPartCode,
+                    })
+                  }
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-semibold bg-[#e5f3fa] hover:bg-[#d2eaf7] text-[#0057b8] border border-[#b3ddf2] transition-colors cursor-pointer"
+                  title="مشاهده دستورات ساخت مرتبط با این قطعه در ماژول تولید (PP)"
+                >
+                  <ClipboardList className="w-3.5 h-3.5" />
+                  <span>مشاهده دستور ساخت مرتبط (MO)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    navigate({
+                      tab: 'master_data',
+                      masterSubSection: 'ROUTINGS',
+                      docQuery: activeBom.assemblyPartCode,
+                    })
+                  }
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-medium bg-white hover:bg-[#f0f6fd] text-[#333333] border border-[#d9d9d9] hover:border-[#007cc0] transition-colors cursor-pointer"
+                  title="مشاهده مسیر تولید و ایستگاه‌های ساخت این قطعه"
+                >
+                  <GitFork className="w-3.5 h-3.5 text-[#007cc0]" />
+                  <span>مسیر تولید (Routing)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    navigate({
+                      tab: 'inventory',
+                      inventorySubTab: 'INQUIRY',
+                      docQuery: activeBom.assemblyPartCode,
+                    })
+                  }
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-medium bg-white hover:bg-[#f1f8f3] text-[#333333] border border-[#d9d9d9] hover:border-[#107e3e] transition-colors cursor-pointer"
+                  title="استعلام موجودی انبار و کاردکس این قطعه"
+                >
+                  <Warehouse className="w-3.5 h-3.5 text-[#107e3e]" />
+                  <span>موجودی انبار مرتبط</span>
+                </button>
+              </div>
             </div>
 
             {/* Action Buttons for Active BOM */}

@@ -57,7 +57,6 @@ import { InventoryModuleSkeleton } from '../ui/Skeleton';
 import { FioriAnalyticalListPage, AlpVisualKpiItem } from '../fiori/FioriAnalyticalListPage';
 import { QualityUsageDecisionView } from '../quality/QualityUsageDecisionView';
 import { useErpRouter } from '../../context/RouterContext';
-import { InlinePageGuideButton } from '../common/PageGuideSystem';
 
 export type InventorySubTab =
   | 'DASHBOARD'
@@ -591,10 +590,6 @@ export const InventoryModuleView: React.FC<InventoryModuleViewProps> = ({
 
           {/* Primary Task-Oriented Operations + Progressive Disclosure Menu */}
           <div className="flex items-center gap-2 flex-wrap shrink-0 py-2 xl:py-0">
-            <InlinePageGuideButton
-              routeContext={{ tab: 'inventory', inventorySubTab: activeSubTab }}
-              label="آموزش این بخش"
-            />
             <button
               type="button"
               onClick={() => setIsReceiptOpen(true)}

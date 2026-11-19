@@ -27,8 +27,16 @@ import {
   Sparkles,
   Plus,
   Disc,
+  Users,
+  Edit3,
 } from 'lucide-react';
 import { Part, UserRoleProfile } from '../types/inventory';
+import {
+  CustomFactoryUser,
+  loadCustomRoleTitles,
+  loadCustomUsers,
+  setActiveFactoryUser,
+} from '../utils/userDirectoryStorage';
 import { GlobalSearchPaletteModal } from './common/GlobalSearchPaletteModal';
 import {
   ErpLayoutTemplate,
@@ -52,6 +60,7 @@ interface NavbarProps {
   reorderAlertsCount?: number;
   criticalAlertsCount?: number;
   onRoleChange: (role: UserRoleProfile['role']) => void;
+  onSelectUser?: (uid: string) => void;
   onNavigate?: (
     tab: TabKey,
     subTab?: string,
@@ -106,6 +115,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   reorderAlertsCount = 0,
   criticalAlertsCount = 0,
   onRoleChange,
+  onSelectUser,
   onNavigate,
   onOpenTemplateModal,
   onQuickTemplateChange,
@@ -170,13 +180,19 @@ export const Navbar: React.FC<NavbarProps> = ({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [onOpenAiAssistant]);
 
-  const roleLabels: Record<UserRoleProfile['role'], string> = {
-    WAREHOUSE_KEEPER: 'مسئول انبار و کنترل موجودی',
-    PRODUCTION_MANAGER: 'مدیر تولید و برنامه‌ریزی',
-    LINE_SUPERVISOR: 'سرپرست سالن تولید و پرس',
-    QC_INSPECTOR: 'بازرس کنترل کیفیت (QC)',
-    ADMIN: 'مدیر سیستم (دسترسی کامل)',
-  };
+  const [customUsers, setCustomUsers] = useState<CustomFactoryUser[]>(() => loadCustomUsers());
+  const [roleLabels, setRoleLabels] = useState<Record<UserRoleProfile['role'], string>>(() =>
+    loadCustomRoleTitles()
+  );
+
+  useEffect(() => {
+    const syncUsers = () => {
+      setCustomUsers(loadCustomUsers());
+      setRoleLabels(loadCustomRoleTitles());
+    };
+    window.addEventListener('kpims-users-updated', syncUsers);
+    return () => window.removeEventListener('kpims-users-updated', syncUsers);
+  }, []);
 
   const allModulesAndSubModules: SearchableModuleItem[] = [
     { label: 'داشبورد و خلاصه وضعیت روزانه', category: 'ماژول اصلی', keywords: 'داشبورد خانه میز کار خلاصه', tab: 'dashboard' },
@@ -631,10 +647,10 @@ export const Navbar: React.FC<NavbarProps> = ({
               {currentUser.displayName ? currentUser.displayName[0] : 'ک'}
             </div>
             <div className="hidden lg:block text-right leading-tight">
-              <div className="text-[11px] font-semibold text-[#333333] truncate max-w-[110px]">
-                {currentUser.displayName || 'مدیر تولید'}
+              <div className="text-[11px] font-semibold text-[#333333] truncate max-w-[130px]">
+                {currentUser.displayName || 'کاربر سیستم'}
               </div>
-              <div className="text-[10px] text-[#666666] truncate max-w-[110px]">
+              <div className="text-[10px] text-[#666666] truncate max-w-[130px]">
                 {roleLabels[currentUser.role] || 'مدیر سیستم'}
               </div>
             </div>
@@ -642,24 +658,50 @@ export const Navbar: React.FC<NavbarProps> = ({
 
           {showUserMenu && (
             <div
-              className="absolute left-0 top-full mt-2 w-72 bg-white text-[#333333] border border-[#d9d9d9] rounded-md shadow-xl p-3 z-50 text-xs space-y-3"
+              className="absolute left-0 top-full mt-2 w-80 bg-white text-[#333333] border border-[#d9d9d9] rounded-md shadow-xl p-3 z-50 text-xs space-y-3"
               onClick={e => e.stopPropagation()}
             >
                 {/* User Info Header */}
-                <div className="border-b border-[#e8e8e8] pb-2 flex items-center justify-between">
-                  <div>
-                    <div className="font-bold text-[#333333]">{currentUser.displayName || 'مدیر کارخانه کوثر'}</div>
-                    <div className="text-[11px] text-[#666666]">{roleLabels[currentUser.role]}</div>
+                <div className="border-b border-[#e8e8e8] pb-2 flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="font-bold text-[#333333] truncate">{currentUser.displayName || 'کاربر سیستم'}</div>
+                    <div className="text-[11px] text-[#666666] truncate">{roleLabels[currentUser.role]}</div>
                   </div>
-                  <div className="text-[10px] text-[#666666] font-mono tabular-nums">
+                  <div className="text-[10px] text-[#666666] font-mono tabular-nums shrink-0">
                     {timeStr} · {jalaliNumeric}
                   </div>
+                </div>
+
+                {/* Active Real Factory User Switcher (No Password Required) */}
+                <div>
+                  <label className="text-[11px] font-bold text-[#666666] block mb-1">
+                    کاربر فعال نشست (انتخاب نام واقعی):
+                  </label>
+                  <select
+                    value={currentUser.uid}
+                    onChange={e => {
+                      const nextUid = e.target.value;
+                      if (onSelectUser) {
+                        onSelectUser(nextUid);
+                      } else {
+                        setActiveFactoryUser(nextUid);
+                      }
+                      setShowUserMenu(false);
+                    }}
+                    className="w-full p-1.5 rounded bg-[#ffffff] border border-[#d9d9d9] text-xs font-semibold text-[#333333] focus:outline-none focus:border-[#007cc0] cursor-pointer"
+                  >
+                    {customUsers.map(u => (
+                      <option key={u.uid} value={u.uid}>
+                        {u.displayName} — {roleLabels[u.role]}
+                      </option>
+                    ))}
+                  </select>
                 </div>
 
                 {/* Role Switcher */}
                 <div>
                   <label className="text-[11px] font-bold text-[#666666] block mb-1">
-                    تغییر نقش کاربری (دسترسی):
+                    تغییر سطح دسترسی کاربر فعال:
                   </label>
                   <select
                     value={currentUser.role}
@@ -676,6 +718,19 @@ export const Navbar: React.FC<NavbarProps> = ({
                     ))}
                   </select>
                 </div>
+
+                {/* Manage Real Users & Custom Access Levels Deep Link */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowUserMenu(false);
+                    onNavigate?.('settings', 'rbac');
+                  }}
+                  className="w-full flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded bg-[#e5f3fa] hover:bg-[#d2eaf7] text-[#007cc0] border border-[#b3ddf2] text-[11px] font-bold cursor-pointer transition-colors"
+                >
+                  <Edit3 className="w-3.5 h-3.5" />
+                  <span>مدیریت و شخصی‌سازی اسامی کاربران و سطوح دسترسی</span>
+                </button>
 
                 {/* System & Database Quick Links */}
                 <div className="pt-2 border-t border-[#e8e8e8] space-y-1">
