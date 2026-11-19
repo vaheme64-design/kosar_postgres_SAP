@@ -353,7 +353,18 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
         const saved = localStorage.getItem('kpims_raw_sheets_v1');
         if (saved) {
           const parsed = JSON.parse(saved);
-          if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            const seenCodes = new Set<string>();
+            const deduped: RawSheetSpec[] = [];
+            for (const item of parsed) {
+              const key = String(item?.code || '').trim().toUpperCase();
+              if (!key || !seenCodes.has(key)) {
+                if (key) seenCodes.add(key);
+                deduped.push(item);
+              }
+            }
+            return deduped;
+          }
         }
       } catch {
         // fallback to defaults
@@ -374,9 +385,9 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
     const rawParts = parts.filter(p => p.category === 'RAW_MATERIAL');
     if (rawParts.length === 0) return;
     setRawSheets(prev => {
-      const existingCodes = new Set(prev.map(s => s.code));
+      const existingCodes = new Set(prev.map(s => String(s.code || '').trim().toUpperCase()));
       const syncedFromCatalog: RawSheetSpec[] = rawParts
-        .filter(p => !existingCodes.has(p.code))
+        .filter(p => !existingCodes.has(String(p.code || '').trim().toUpperCase()))
         .map(p => ({
           id: `RM-PART-${p.id}`,
           code: p.code,
@@ -403,6 +414,7 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
   const [sheetSearch, setSheetSearch] = useState('');
   const [editingSheet, setEditingSheet] = useState<RawSheetSpec | null>(null);
   const [isNewSheetModalOpen, setIsNewSheetModalOpen] = useState(false);
+  const [isSavingSheet, setIsSavingSheet] = useState(false);
   const [sheetForm, setSheetForm] = useState<Partial<RawSheetSpec>>({
     code: '',
     name: '',
@@ -1178,8 +1190,11 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
 
   const handleSaveSheetSpec = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!sheetForm.code || !sheetForm.name) return;
+    if (isSavingSheet || !sheetForm.code || !sheetForm.name) return;
 
+    const currentEditing = editingSheet;
+    const trimmedCode = sheetForm.code.trim();
+    const normalizedCodeUpper = trimmedCode.toUpperCase();
     const widthNum = Number(sheetForm.widthMm) || 0;
     const lengthNum = Number(sheetForm.lengthMm) || 0;
     const computedDim =
@@ -1192,7 +1207,7 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
 
     const normalizedSpec: Partial<RawSheetSpec> = {
       ...sheetForm,
-      code: sheetForm.code.trim(),
+      code: trimmedCode,
       name: sheetForm.name.trim(),
       grade: sheetForm.grade || materialGrades[0]?.code || 'ST12',
       supplyForm: sheetForm.supplyForm || 'SHEET',
@@ -1212,44 +1227,74 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
       active: sheetForm.active !== false,
     };
 
-    if (editingSheet) {
-      setRawSheets(prev =>
-        prev.map(item =>
-          item.id === editingSheet.id
+    // Close modal immediately to prevent lag or accidental double-submission
+    setIsSavingSheet(true);
+    setIsNewSheetModalOpen(false);
+    setShowInlineAddGrade(false);
+    setEditingSheet(null);
+
+    if (currentEditing) {
+      setRawSheets(prev => {
+        const updated = prev.map(item =>
+          item.id === currentEditing.id
             ? ({ ...item, ...normalizedSpec } as RawSheetSpec)
             : item
-        )
-      );
-      setEditingSheet(null);
+        );
+        // Ensure no duplicate row shares the same code after edit
+        const seen = new Set<string>();
+        return updated.filter(item => {
+          const k = String(item.code || '').trim().toUpperCase();
+          if (seen.has(k)) return false;
+          seen.add(k);
+          return true;
+        });
+      });
     } else {
-      const newSpec: RawSheetSpec = {
-        id: `RM-${Date.now()}`,
-        code: normalizedSpec.code!,
-        name: normalizedSpec.name!,
-        grade: normalizedSpec.grade!,
-        supplyForm: normalizedSpec.supplyForm,
-        thicknessMm: normalizedSpec.thicknessMm!,
-        widthMm: normalizedSpec.widthMm,
-        lengthMm: normalizedSpec.lengthMm,
-        dimensionsMm: normalizedSpec.dimensionsMm!,
-        densityGCm3: normalizedSpec.densityGCm3,
-        sheetWeightKg: normalizedSpec.sheetWeightKg!,
-        unit: normalizedSpec.unit!,
-        ownership: normalizedSpec.ownership,
-        supplierName: normalizedSpec.supplierName,
-        standard: normalizedSpec.standard,
-        minStock: normalizedSpec.minStock,
-        description: normalizedSpec.description,
-        contractsCount: normalizedSpec.contractsCount!,
-        active: normalizedSpec.active !== false,
-      };
-      setRawSheets(prev => [newSpec, ...prev]);
+      setRawSheets(prev => {
+        const existingIdx = prev.findIndex(
+          item => String(item.code || '').trim().toUpperCase() === normalizedCodeUpper
+        );
+        if (existingIdx >= 0) {
+          return prev.map((item, idx) =>
+            idx === existingIdx ? ({ ...item, ...normalizedSpec } as RawSheetSpec) : item
+          );
+        }
+        const newSpec: RawSheetSpec = {
+          id: `RM-${Date.now()}`,
+          code: normalizedSpec.code!,
+          name: normalizedSpec.name!,
+          grade: normalizedSpec.grade!,
+          supplyForm: normalizedSpec.supplyForm,
+          thicknessMm: normalizedSpec.thicknessMm!,
+          widthMm: normalizedSpec.widthMm,
+          lengthMm: normalizedSpec.lengthMm,
+          dimensionsMm: normalizedSpec.dimensionsMm!,
+          densityGCm3: normalizedSpec.densityGCm3,
+          sheetWeightKg: normalizedSpec.sheetWeightKg!,
+          unit: normalizedSpec.unit!,
+          ownership: normalizedSpec.ownership,
+          supplierName: normalizedSpec.supplierName,
+          standard: normalizedSpec.standard,
+          minStock: normalizedSpec.minStock,
+          description: normalizedSpec.description,
+          contractsCount: normalizedSpec.contractsCount!,
+          active: normalizedSpec.active !== false,
+        };
+        return [newSpec, ...prev];
+      });
     }
 
-    // Automatically sync with global parts catalog as RAW_MATERIAL
+    // Automatically sync with global parts catalog (update existing Part by ID when editing)
+    const oldCodeUpper = String(currentEditing?.code || '').trim().toUpperCase();
+    const matchedCatalogPart = parts.find(p => {
+      const pCodeUpper = String(p.code || '').trim().toUpperCase();
+      return (oldCodeUpper && pCodeUpper === oldCodeUpper) || pCodeUpper === normalizedCodeUpper;
+    });
     const resolvedUnit = normalizedSpec.unit === 'عدد' || normalizedSpec.unit === 'برگ' ? 'PCS' : 'KG';
+
     try {
-      await onSavePart({
+      const syncResult = await onSavePart({
+        ...(matchedCatalogPart ? { id: matchedCatalogPart.id } : {}),
         code: normalizedSpec.code,
         name: normalizedSpec.name,
         category: 'RAW_MATERIAL',
@@ -1274,13 +1319,25 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
           .filter(Boolean)
           .join(' | '),
       });
-      notifyMaster('success', `ماده اولیه «${normalizedSpec.code}» ذخیره و با کاتالوگ انبار قطعات همگام‌سازی شد.`);
+      if (syncResult && !syncResult.success) {
+        notifyMaster(
+          'error',
+          `تغییرات در جدول مواد اولیه ذخیره شد، اما همگام‌سازی با کاتالوگ انبار خطا داد: ${syncResult.error || 'خطای ناشناخته'}`
+        );
+      } else {
+        notifyMaster(
+          'success',
+          currentEditing
+            ? `ویرایش ماده اولیه «${normalizedSpec.code}» ذخیره و با کاتالوگ انبار قطعات همگام‌سازی شد.`
+            : `ماده اولیه «${normalizedSpec.code}» ثبت و با کاتالوگ انبار قطعات همگام‌سازی شد.`
+        );
+      }
     } catch (err) {
       console.warn('Could not auto-sync sheet with parts catalog:', err);
+      notifyMaster('success', `ماده اولیه «${normalizedSpec.code}» در جدول مواد اولیه ذخیره شد.`);
+    } finally {
+      setIsSavingSheet(false);
     }
-
-    setIsNewSheetModalOpen(false);
-    setShowInlineAddGrade(false);
   };
 
   const filteredRawSheets = rawSheets.filter(
@@ -2650,6 +2707,7 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
                 type="button"
                 onClick={() => {
                   setIsNewSheetModalOpen(false);
+                  setEditingSheet(null);
                   setShowInlineAddGrade(false);
                 }}
                 className="text-[#666666] hover:text-[#1d2d3e] cursor-pointer"
@@ -3034,6 +3092,7 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
                   type="button"
                   onClick={() => {
                     setIsNewSheetModalOpen(false);
+                    setEditingSheet(null);
                     setShowInlineAddGrade(false);
                   }}
                   className="sap-btn-standard px-4 py-1.5 text-xs cursor-pointer"
@@ -3042,9 +3101,10 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
                 </button>
                 <button
                   type="submit"
-                  className="sap-btn-emphasized px-5 py-1.5 text-xs font-bold cursor-pointer"
+                  disabled={isSavingSheet}
+                  className="sap-btn-emphasized px-5 py-1.5 text-xs font-bold cursor-pointer disabled:opacity-50"
                 >
-                  ذخیره مشخصات و همگام‌سازی با انبار قطعات
+                  {isSavingSheet ? 'در حال ذخیره...' : 'ذخیره مشخصات و همگام‌سازی با انبار قطعات'}
                 </button>
               </div>
             </form>
