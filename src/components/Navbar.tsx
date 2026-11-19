@@ -54,7 +54,7 @@ interface NavbarProps {
   onRoleChange: (role: UserRoleProfile['role']) => void;
   onNavigate?: (
     tab: TabKey,
-    subTab?: InventorySubTab,
+    subTab?: string,
     actionModal?: 'RECEIPT' | 'ISSUE' | 'RETURN' | 'TRANSFER'
   ) => void;
   onOpenTemplateModal: () => void;
@@ -274,7 +274,7 @@ export const Navbar: React.FC<NavbarProps> = ({
           </button>
 
           {showAppMatrix && (
-            <div className="absolute right-0 top-full mt-2 w-80 bg-white text-[#333333] border border-[#d9d9d9] rounded-md shadow-xl p-3.5 z-50">
+            <div className="absolute right-0 top-full mt-2 w-[340px] sm:w-[420px] bg-white text-[#333333] border border-[#d9d9d9] rounded-md shadow-xl p-3.5 z-50">
               <div className="flex items-center justify-between border-b border-[#e8e8e8] pb-2 mb-2.5">
                 <span className="text-xs font-semibold text-[#333333]">
                   کاتالوگ ماژول‌های SAP HANA
@@ -314,6 +314,35 @@ export const Navbar: React.FC<NavbarProps> = ({
                     </button>
                   );
                 })}
+              </div>
+
+              {/* Direct Sub-Page Deep Links */}
+              <div className="mt-3 pt-2.5 border-t border-[#e8e8e8]">
+                <div className="text-[10px] font-bold text-[#666666] mb-1.5">
+                  دسترسی مستقیم به زیرصفحه‌های کلیدی (لینک مستقیم):
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {[
+                    { label: 'مدیریت دستورات ساخت (MO)', tab: 'production' as TabKey, sub: 'MANUFACTURING_ORDERS_LIST' },
+                    { label: 'رول‌های ورق و سرکلاف', tab: 'inventory' as TabKey, sub: 'COILS' },
+                    { label: 'پیشنهاد و صدور MO (MRP)', tab: 'planning' as TabKey, sub: 'recommendations' },
+                    { label: 'کارت دستورات WIP', tab: 'wip' as TabKey, sub: 'ORDERS' },
+                    { label: 'درخت محصول (BOM)', tab: 'master_data' as TabKey, sub: 'BOM' },
+                    { label: 'کنترل کیفیت (QM)', tab: 'inventory' as TabKey, sub: 'QUALITY_QM' },
+                  ].map(link => (
+                    <button
+                      key={`${link.tab}-${link.sub}`}
+                      type="button"
+                      onClick={() => {
+                        onNavigate?.(link.tab, link.sub);
+                        setShowAppMatrix(false);
+                      }}
+                      className="px-2 py-1 rounded border border-[#d9e2ec] bg-[#f7f9fb] hover:bg-[#e5f3fa] hover:border-[#007cc0] hover:text-[#007cc0] text-[10px] font-semibold text-[#333333] transition-colors cursor-pointer"
+                    >
+                      {link.label}
+                    </button>
+                  ))}
+                </div>
               </div>
             </div>
           )}

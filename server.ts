@@ -3,6 +3,7 @@ import 'dotenv/config';
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
+import zlib from 'zlib';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
 import { apiRouter, loadInventoryAppState, persistInventoryAppState, reconcileAllPartReferencesFromCatalog } from './src/server/apiRouter';
@@ -44,6 +45,32 @@ async function startServer() {
   // Cloud Run / Kubernetes Health Check Endpoint
   app.get('/healthz', (_req, res) => {
     res.status(200).send('OK');
+  });
+
+  // Lightweight gzip compression for large JSON API responses (e.g. /api/inventory/stock-inquiry)
+  app.use('/api', (req, res, next) => {
+    const acceptEncoding = String(req.headers['accept-encoding'] || '');
+    if (!acceptEncoding.includes('gzip')) {
+      return next();
+    }
+    const origJson = res.json.bind(res);
+    res.json = ((body: any) => {
+      try {
+        const jsonText = JSON.stringify(body);
+        if (jsonText.length > 2048) {
+          const compressed = zlib.gzipSync(Buffer.from(jsonText, 'utf8'));
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.setHeader('Content-Encoding', 'gzip');
+          res.setHeader('Vary', 'Accept-Encoding');
+          res.setHeader('Content-Length', String(compressed.length));
+          return res.send(compressed);
+        }
+      } catch {
+        // fallback cleanly to standard res.json
+      }
+      return origJson(body);
+    }) as any;
+    return next();
   });
 
   // Mount backend API router

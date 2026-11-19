@@ -392,6 +392,10 @@ function serializeRouteToHash(state: RouteState): string {
     params.set('doc', state.docQuery);
   }
 
+  if (state.tab === 'machines' && state.machineSubTab && state.machineSubTab !== 'machines') {
+    params.set('mchTab', state.machineSubTab);
+  }
+
   if (state.tab === 'wip' && state.wipSubTab && state.wipSubTab !== 'UNIFIED_DIRECTORY') {
     params.set('wipTab', state.wipSubTab);
   }
@@ -491,6 +495,24 @@ const PLAN_SUB_LABELS: Record<string, string> = {
   workflow_doc: 'مستندات فرآیند برنامه‌ریزی',
 };
 
+const MACHINE_SUB_LABELS: Record<string, string> = {
+  machines: 'فهرست ماشین‌آلات و پرس‌ها',
+  maintenance: 'نگهداری و تعمیرات (PM/CM)',
+  oee: 'بهره‌وری تجهیزات (OEE)',
+  utilization: 'تحلیل بار و ظرفیت ماشین‌ها',
+  dies: 'قالب‌ها، سنبه و ماتریس‌ها',
+  halls: 'سالن‌ها و خطوط تولید',
+  operators: 'اپراتورها و مهارت‌ها',
+};
+
+const REPORT_SUB_LABELS: Record<string, string> = {
+  plan_vs_actual: 'مقایسه برنامه و عملکرد تولید',
+  inventory_turnover: 'گردش موجودی و انبار',
+  scrap_analysis: 'تحلیل ضایعات و علل کیفی',
+  oee_dashboard: 'داشبورد شاخص OEE',
+  costing: 'بهای تمام‌شده و انحرافات',
+};
+
 export function formatRouteLabel(state: RouteState): string {
   const tabLabel = TAB_LABELS[state.tab] || 'صفحه فعلی';
   if (state.moId) return `${tabLabel} ← پرونده دستور ${state.moId}`;
@@ -510,6 +532,12 @@ export function formatRouteLabel(state: RouteState): string {
   }
   if (state.tab === 'planning') {
     return `${PLAN_SUB_LABELS[state.planningSubTab] || tabLabel}`;
+  }
+  if (state.tab === 'machines') {
+    return `${MACHINE_SUB_LABELS[state.machineSubTab] || tabLabel}`;
+  }
+  if (state.tab === 'reports' && state.reportSubTab) {
+    return `${REPORT_SUB_LABELS[state.reportSubTab] || tabLabel}`;
   }
   if (state.tab === 'contracts' && state.contractsSubTab === 'CUSTOMER_ORDERS') {
     return 'سفارشات تحویل به مشتری';

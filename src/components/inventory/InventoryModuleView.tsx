@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   Boxes,
   Search,
@@ -186,20 +186,83 @@ export const InventoryModuleView: React.FC<InventoryModuleViewProps> = ({
     }
   }, [notification]);
 
-  // Load Inventory Data (supports silent background sync for Optimistic Updates)
+  const activeFetchControllerRef = useRef<AbortController | null>(null);
+  const isMountedRef = useRef(true);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      activeFetchControllerRef.current?.abort();
+    };
+  }, []);
+
+  // Load Inventory Data (resilient against transient disconnects, retries automatically, isolates per-endpoint errors)
   const loadInventoryData = useCallback(async (silent = false) => {
-    if (!silent) setLoading(true);
+    activeFetchControllerRef.current?.abort();
+    const controller = new AbortController();
+    activeFetchControllerRef.current = controller;
+
+    const fetchJsonWithRetry = async (url: string, retries = 2): Promise<any> => {
+      let lastError: unknown;
+      for (let attempt = 0; attempt <= retries; attempt++) {
+        if (controller.signal.aborted) {
+          throw new DOMException('Aborted', 'AbortError');
+        }
+        try {
+          const response = await fetch(url, {
+            signal: controller.signal,
+            headers: { Accept: 'application/json' },
+          });
+          if (!response.ok) {
+            if (response.status >= 500 && attempt < retries) {
+              await new Promise(resolve => setTimeout(resolve, 350 * (attempt + 1)));
+              continue;
+            }
+            throw new Error(`HTTP ${response.status} for ${url}`);
+          }
+          const contentType = response.headers.get('content-type') || '';
+          if (!contentType.includes('application/json')) {
+            if (attempt < retries) {
+              await new Promise(resolve => setTimeout(resolve, 350 * (attempt + 1)));
+              continue;
+            }
+            throw new Error(`Unexpected non-JSON response for ${url}`);
+          }
+          return await response.json();
+        } catch (err: any) {
+          if (err?.name === 'AbortError' || controller.signal.aborted) {
+            throw err;
+          }
+          lastError = err;
+          if (attempt < retries) {
+            await new Promise(resolve => setTimeout(resolve, 350 * (attempt + 1)));
+          }
+        }
+      }
+      throw lastError;
+    };
+
+    if (!silent && isMountedRef.current) setLoading(true);
     try {
-      const [metricsRes, whRes, inquiryRes, docsRes, sapcoRes, coilsRes, contractsRes, custRes] = await Promise.all([
-        fetch('/api/inventory/dashboard-metrics').then(r => r.json()),
-        fetch('/api/inventory/warehouses').then(r => r.json()),
-        fetch('/api/inventory/stock-inquiry').then(r => r.json()),
-        fetch('/api/inventory/documents').then(r => r.json()),
-        fetch('/api/inventory/sapco-account').then(r => r.json()),
-        fetch('/api/inventory/coils').then(r => r.json()),
-        fetch('/api/inventory/contracts').then(r => r.json()),
-        fetch('/api/customers').then(r => r.json()),
+      const results = await Promise.allSettled([
+        fetchJsonWithRetry('/api/inventory/dashboard-metrics'),
+        fetchJsonWithRetry('/api/inventory/warehouses'),
+        fetchJsonWithRetry('/api/inventory/stock-inquiry'),
+        fetchJsonWithRetry('/api/inventory/documents'),
+        fetchJsonWithRetry('/api/inventory/sapco-account'),
+        fetchJsonWithRetry('/api/inventory/coils'),
+        fetchJsonWithRetry('/api/inventory/contracts'),
+        fetchJsonWithRetry('/api/customers'),
       ]);
+
+      if (controller.signal.aborted || !isMountedRef.current) return;
+
+      const unwrap = (r: PromiseSettledResult<any>) => (r.status === 'fulfilled' ? r.value : null);
+      const [metricsRes, whRes, inquiryRes, docsRes, sapcoRes, coilsRes, contractsRes, custRes] =
+        results.map(unwrap);
+
+      const fulfilledCount = results.filter(r => r.status === 'fulfilled').length;
 
       if (metricsRes?.success && metricsRes.data) setMetrics(metricsRes.data);
       if (whRes?.success && Array.isArray(whRes.data) && whRes.data.length > 0) setWarehouses(whRes.data);
@@ -219,13 +282,24 @@ export const InventoryModuleView: React.FC<InventoryModuleViewProps> = ({
         const ledgerList = sapcoRes.data?.ledger || sapcoRes.ledger || [];
         setSapcoLedger(ledgerList);
       }
-    } catch (err) {
-      console.error('Error fetching inventory module data:', err);
+
+      if (fulfilledCount === 0 && !silent) {
+        setNotification({
+          type: 'error',
+          message: 'ارتباط با سرور انبارداری موقتاً برقرار نشد؛ لطفاً دکمه به‌روزرسانی را بزنید.',
+        });
+      }
+    } catch (err: any) {
+      if (err?.name === 'AbortError' || controller.signal.aborted || !isMountedRef.current) {
+        return;
+      }
       if (!silent) {
         setNotification({ type: 'error', message: 'خطا در بارگذاری اطلاعات انبارداری' });
       }
     } finally {
-      if (!silent) setLoading(false);
+      if (!silent && isMountedRef.current && activeFetchControllerRef.current === controller) {
+        setLoading(false);
+      }
     }
   }, []);
 

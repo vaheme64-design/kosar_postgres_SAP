@@ -40,6 +40,7 @@ interface ManufacturingOrdersViewProps {
   onOpenTransfer: (mo: ManufacturingOrder, operation: ManufacturingOperation) => void;
   onOpenReconciliation: (moId: string) => void;
   onRequestDeleteRollback?: (mo: ManufacturingOrder) => void;
+  embeddedInParent?: boolean;
 }
 
 export const ManufacturingOrdersView: React.FC<ManufacturingOrdersViewProps> = ({
@@ -52,6 +53,7 @@ export const ManufacturingOrdersView: React.FC<ManufacturingOrdersViewProps> = (
   onOpenTransfer,
   onOpenReconciliation,
   onRequestDeleteRollback,
+  embeddedInParent = false,
 }) => {
   const { traceDocument } = useErpRouter();
   const [searchTerm, setSearchTerm] = useState('');
@@ -86,61 +88,64 @@ export const ManufacturingOrdersView: React.FC<ManufacturingOrdersViewProps> = (
   };
 
   return (
-    <div className="space-y-4">
-      {/* Header and Controls */}
-      <div className="sap-card p-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-3">
-        <div>
-          <h2 className="text-base font-bold text-[#333333] flex items-center gap-2">
-            <Layers className="w-5 h-5 text-[#007cc0]" />
-            دستورهای کار تولید و فرآیندهای ساخت (Manufacturing Orders)
-          </h2>
-          <p className="text-xs text-[#666666] mt-0.5">
-            پیگیری چندمرحله‌ای عملیات، ثبت ورودی/خروجی هر ایستگاه، پایش ضایعات و صدور حواله انتقال بین‌مراحل
-          </p>
-        </div>
+    <div className="space-y-3">
+      {/* Header and Controls (hidden when parent WIP toolbar already renders them) */}
+      {!embeddedInParent && (
+        <>
+          <div className="sap-card p-3.5 flex flex-col md:flex-row items-start md:items-center justify-between gap-3">
+            <div>
+              <h2 className="text-sm font-bold text-[#333333] flex items-center gap-2">
+                <Layers className="w-4 h-4 text-[#007cc0]" />
+                دستورهای کار تولید و فرآیندهای ساخت (Manufacturing Orders)
+              </h2>
+              <p className="text-xs text-[#666666] mt-0.5">
+                پیگیری چندمرحله‌ای عملیات، ثبت ورودی/خروجی هر ایستگاه، پایش ضایعات و صدور حواله انتقال بین‌مراحل
+              </p>
+            </div>
 
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={onOpenCreateMo}
-            className="sap-btn-emphasized flex items-center gap-1.5 px-3.5 py-1.5 text-xs"
-          >
-            <Plus className="w-3.5 h-3.5" />
-            <span>صدور دستور کار جدید (MO)</span>
-          </button>
-        </div>
-      </div>
-
-      {/* Filter Bar */}
-      <div className="sap-card p-3 flex flex-wrap items-center justify-between gap-3">
-        <div className="flex flex-wrap items-center gap-2.5 flex-1">
-          <div className="relative min-w-[240px] flex-1">
-            <Search className="w-3.5 h-3.5 text-[#666666] absolute right-2.5 top-2" />
-            <input
-              type="text"
-              value={searchTerm}
-              onChange={e => setSearchTerm(e.target.value)}
-              placeholder="جستجوی شماره دستور (MO)، کد یا عنوان قطعه..."
-              className="w-full bg-[#ffffff] border border-[#bfbfbf] rounded-sm pr-8 pl-3 py-1.5 text-xs text-[#333333] focus:outline-none focus:border-[#007cc0]"
-            />
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={onOpenCreateMo}
+                className="sap-btn-emphasized flex items-center gap-1.5 px-3.5 py-1.5 text-xs"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>صدور دستور کار جدید (MO)</span>
+              </button>
+            </div>
           </div>
 
-          <select
-            value={statusFilter}
-            onChange={e => setStatusFilter(e.target.value)}
-            className="bg-[#ffffff] border border-[#bfbfbf] rounded-sm px-3 py-1.5 text-xs text-[#333333] focus:outline-none focus:border-[#007cc0]"
-          >
-            <option value="ALL">همه وضعیت‌ها</option>
-            <option value="IN_PROGRESS">در جریان ساخت (In-Progress)</option>
-            <option value="RELEASED">صادرشده (Released)</option>
-            <option value="COMPLETED">تکمیل‌شده (Completed)</option>
-          </select>
-        </div>
+          <div className="sap-card p-2.5 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-2.5 flex-1">
+              <div className="relative min-w-[240px] flex-1">
+                <Search className="w-3.5 h-3.5 text-[#666666] absolute right-2.5 top-2" />
+                <input
+                  type="text"
+                  value={searchTerm}
+                  onChange={e => setSearchTerm(e.target.value)}
+                  placeholder="جستجوی شماره دستور (MO)، کد یا عنوان قطعه..."
+                  className="w-full bg-[#ffffff] border border-[#bfbfbf] rounded-sm pr-8 pl-3 py-1.5 text-xs text-[#333333] focus:outline-none focus:border-[#007cc0]"
+                />
+              </div>
 
-        <div className="text-xs text-[#666666]">
-          تعداد دستورها: <strong className="text-[#333333] font-mono">{toPersianDigits(filteredOrders.length)}</strong>
-        </div>
-      </div>
+              <select
+                value={statusFilter}
+                onChange={e => setStatusFilter(e.target.value)}
+                className="bg-[#ffffff] border border-[#bfbfbf] rounded-sm px-3 py-1.5 text-xs text-[#333333] focus:outline-none focus:border-[#007cc0]"
+              >
+                <option value="ALL">همه وضعیت‌ها</option>
+                <option value="IN_PROGRESS">در جریان ساخت (In-Progress)</option>
+                <option value="RELEASED">صادرشده (Released)</option>
+                <option value="COMPLETED">تکمیل‌شده (Completed)</option>
+              </select>
+            </div>
+
+            <div className="text-xs text-[#666666]">
+              تعداد دستورها: <strong className="text-[#333333] font-mono">{toPersianDigits(filteredOrders.length)}</strong>
+            </div>
+          </div>
+        </>
+      )}
 
       {/* Orders List & Interactive Operations */}
       <div className="space-y-3">
@@ -154,6 +159,26 @@ export const ManufacturingOrdersView: React.FC<ManufacturingOrdersViewProps> = (
             const completedOpsCount = mo.operations.filter(o => o.status === 'COMPLETED').length;
             const statusInfo = statusBadges[mo.status] || { label: mo.status, color: 'bg-[#f5f5f5] text-[#333333] border-[#d9d9d9]' };
 
+            const finalPct =
+              mo.targetQuantity > 0
+                ? Math.min(100, Math.round(((mo.completedQuantity || 0) / mo.targetQuantity) * 100))
+                : 0;
+            const opPct =
+              mo.operations.length > 0 && mo.targetQuantity > 0
+                ? Math.min(
+                    100,
+                    Math.round(
+                      (mo.operations.reduce(
+                        (s, o) => s + Math.min(1, (o.goodOutputQty || 0) / mo.targetQuantity),
+                        0
+                      ) /
+                        mo.operations.length) *
+                        100
+                    )
+                  )
+                : finalPct;
+            const progressPct = Math.max(finalPct, opPct);
+
             return (
               <div
                 key={mo.id}
@@ -162,12 +187,12 @@ export const ManufacturingOrdersView: React.FC<ManufacturingOrdersViewProps> = (
                 }`}
               >
                 {/* Header Row */}
-                <div className="p-3.5 flex flex-col md:flex-row items-start md:items-center justify-between gap-3">
-                  <div className="flex items-center gap-3">
-                    <div className="p-2 bg-[#e5f3fa] text-[#007cc0] border border-[#b3ddf2] rounded-sm">
+                <div className="p-3 flex flex-col lg:flex-row items-start lg:items-center justify-between gap-3">
+                  <div className="flex items-center gap-3 min-w-0 flex-1">
+                    <div className="p-2 bg-[#e5f3fa] text-[#007cc0] border border-[#b3ddf2] rounded-sm shrink-0">
                       <Layers className="w-4 h-4" />
                     </div>
-                    <div>
+                    <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2 flex-wrap">
                         <button
                           type="button"
@@ -185,7 +210,7 @@ export const ManufacturingOrdersView: React.FC<ManufacturingOrdersViewProps> = (
                         </span>
                         <span className="text-xs font-bold text-[#333333] mr-1">{mo.partName}</span>
                       </div>
-                      <div className="text-xs text-[#666666] mt-1 flex items-center gap-4 flex-wrap">
+                      <div className="text-xs text-[#666666] mt-1 flex items-center gap-3 flex-wrap tabular-nums">
                         <span>
                           کد قطعه:{' '}
                           <button
@@ -196,10 +221,21 @@ export const ManufacturingOrdersView: React.FC<ManufacturingOrdersViewProps> = (
                             {mo.partCode}
                           </button>
                         </span>
-                        <span>هدف ساخت: <strong className="font-mono text-[#107e3e]">{formatNumber(mo.targetQuantity)} PCS</strong></span>
-                        <span>ورودی شیت: <strong className="font-mono text-[#007cc0]">{formatNumber(mo.initialInputQuantity)} PCS</strong></span>
-                        <span>تکمیل نهایی: <strong className="font-mono text-[#333333]">{formatNumber(mo.completedQuantity)} PCS</strong></span>
-                        <span>کل ضایعات: <strong className="font-mono text-[#bb0000]">{formatNumber(mo.totalScrapQuantity)} PCS</strong></span>
+                        <span>هدف: <strong className="font-mono text-[#107e3e]">{formatNumber(mo.targetQuantity)}</strong></span>
+                        <span>ورودی: <strong className="font-mono text-[#007cc0]">{formatNumber(mo.initialInputQuantity)}</strong></span>
+                        <span>تکمیل: <strong className="font-mono text-[#333333]">{formatNumber(mo.completedQuantity)}</strong></span>
+                        <span>ضایعات: <strong className="font-mono text-[#bb0000]">{formatNumber(mo.totalScrapQuantity)}</strong></span>
+                        <span className="inline-flex items-center gap-1.5 min-w-[140px]">
+                          <span className="w-20 h-1.5 bg-[#e5e9ee] rounded-full overflow-hidden inline-block">
+                            <span
+                              className={`block h-full ${progressPct >= 100 ? 'bg-[#107e3e]' : 'bg-[#007cc0]'}`}
+                              style={{ width: `${progressPct}%` }}
+                            />
+                          </span>
+                          <strong className="font-mono text-[11px] text-[#007cc0]">
+                            {toPersianDigits(progressPct)}٪
+                          </strong>
+                        </span>
                       </div>
                     </div>
                   </div>

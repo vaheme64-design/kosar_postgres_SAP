@@ -19,7 +19,6 @@ import { AiAssistantModal } from './components/AiAssistantModal';
 import { SystemHelpWalkthroughModal, HelpWizardLaunchParams } from './components/common/SystemHelpWalkthroughModal';
 import { AdvancedIndustrialScenarioWizardModal } from './components/common/AdvancedIndustrialScenarioWizardModal';
 import { ContextualActionMenu } from './components/common/ContextualActionMenu';
-import { PageGuideBar } from './components/common/PageGuideSystem';
 import { WorkspaceNavigationBar } from './components/common/WorkspaceNavigationBar';
 import { OfflineIndicator } from './components/pwa/PWAInstallButton';
 import { AiActionPayload } from './types/ai';
@@ -748,6 +747,8 @@ function AppContent() {
     setInitialPartId(partId);
     setInitialStageId(stageId);
     setActiveTab('production');
+    setProductionViewMode('VOUCHERS');
+    router.navigate({ tab: 'production', productionViewMode: 'VOUCHERS', moId: null });
   };
 
   const handleDeepNavigate = (
@@ -931,56 +932,33 @@ function AppContent() {
     setPendingInventoryModal(null);
 
     if (action.actionType === 'OPEN_RECEIPT') {
-      setActiveTab('inventory');
-      setActiveInventorySubTab('DASHBOARD');
       if (action.prefillReceipt) {
         setAiReceiptDraft(action.prefillReceipt);
       }
-      setPendingInventoryModal('RECEIPT');
+      handleDeepNavigate('inventory', 'DASHBOARD', 'RECEIPT');
     } else if (action.actionType === 'OPEN_ISSUE') {
-      setActiveTab('inventory');
-      setActiveInventorySubTab('DASHBOARD');
       if (action.prefillIssue) {
         setAiIssueDraft(action.prefillIssue);
       }
-      setPendingInventoryModal('ISSUE');
+      handleDeepNavigate('inventory', 'DASHBOARD', 'ISSUE');
     } else if (action.actionType === 'OPEN_CREATE_MO') {
-      setActiveTab('production');
-      setProductionViewMode('ERP_WORKBENCH');
-      setActiveProductionModuleTab('MULTI_PART_SCHEDULER');
+      handleDeepNavigate('production', 'MANUFACTURING_ORDERS_LIST');
       setTimeout(() => {
         window.dispatchEvent(new CustomEvent('kpims:contextual-action', { detail: { actionType: 'OPEN_CREATE_MO' } }));
       }, 120);
     } else if (action.actionType === 'OPEN_TRACK_ORDER') {
-      setActiveTab('production');
-      setProductionViewMode('ERP_WORKBENCH');
-      setActiveProductionModuleTab('MULTI_PART_SCHEDULER');
+      handleDeepNavigate('production', 'MANUFACTURING_ORDERS_LIST');
       setTimeout(() => {
         window.dispatchEvent(new CustomEvent('kpims:contextual-action', { detail: { actionType: 'OPEN_TRACK_FIRST_ORDER' } }));
       }, 120);
     } else if (action.actionType === 'OPEN_HEAT_TRACEABILITY') {
-      setActiveTab('sapco');
+      handleDeepNavigate('sapco');
     } else if (action.actionType === 'CHECK_REORDER') {
-      setActiveTab('inventory');
-      setActiveInventorySubTab('ALERTS');
+      handleDeepNavigate('inventory', 'ALERTS');
     } else if (action.actionType === 'NAVIGATE' && action.targetTab) {
-      const target = action.targetTab as TabKey;
-      setActiveTab(target);
-      if (target === 'inventory' && action.targetSubTab) {
-        setActiveInventorySubTab(action.targetSubTab as InventorySubTab);
-      } else if (target === 'machines' && action.targetSubTab) {
-        setActiveMachineSubTab(action.targetSubTab as any);
-      } else if (target === 'production') {
-        setProductionViewMode('ERP_WORKBENCH');
-        if (action.targetSubTab) {
-          setActiveProductionModuleTab(action.targetSubTab as any);
-        }
-      } else if (target === 'planning' && action.targetSubTab) {
-        setActivePlanningSubTab(action.targetSubTab as any);
-      }
+      handleDeepNavigate(action.targetTab as TabKey, action.targetSubTab);
     } else if (action.actionType === 'QUERY_STOCK') {
-      setActiveTab('inventory');
-      setActiveInventorySubTab('INQUIRY');
+      handleDeepNavigate('inventory', 'INQUIRY');
     }
   };
 
@@ -1047,7 +1025,7 @@ function AppContent() {
     dismissedRemoteHash !== remoteAlertKey;
 
   const mainContentElement = (
-    <main className="flex-1 px-4 py-4 md:px-6 md:py-5 overflow-y-auto max-w-[1440px] mx-auto w-full space-y-4">
+    <main className="flex-1 px-4 py-3 md:px-5 md:py-3.5 overflow-y-auto max-w-[1440px] mx-auto w-full space-y-2.5">
       {/* Git-Style Online Database Update Alert Bar */}
       {showCloudUpdateBanner && cloudSyncCheck && (
         <div
@@ -1162,12 +1140,9 @@ function AppContent() {
         </div>
       )}
 
-      {/* Universal In-App Back Button, Breadcrumbs & Production Lifecycle Ribbon */}
-      <WorkspaceNavigationBar />
-
-      {/* Zero-Lag Contextual Page & Button Training Bar (All Site Views) */}
-      <PageGuideBar
-        context={{
+      {/* Unified SAP Fiori Context Bar: Back, Breadcrumbs, Copy Direct Page Link, Lifecycle Map & Contextual Guide */}
+      <WorkspaceNavigationBar
+        guideContext={{
           tab: activeTab,
           masterSubSection: activeMasterSubSection,
           inventorySubTab: activeInventorySubTab,
@@ -1242,11 +1217,8 @@ function AppContent() {
             handleOpenVoucherWithType('PRODUCTION_OUTPUT', partId);
           }}
           onRefresh={loadAllData}
-          onNavigateToInventoryCoils={() => {
-            setActiveTab('inventory');
-            setActiveInventorySubTab('COILS');
-          }}
-          onNavigateToPlanning={() => setActiveTab('planning')}
+          onNavigateToInventoryCoils={() => handleDeepNavigate('inventory', 'COILS')}
+          onNavigateToPlanning={() => handleDeepNavigate('planning', 'mrp')}
         />
       )}
 
@@ -1285,7 +1257,7 @@ function AppContent() {
             setAiIssueDraft(null);
           }}
           onGlobalRefresh={loadAllData}
-          onNavigateToPlanning={() => setActiveTab('planning')}
+          onNavigateToPlanning={() => handleDeepNavigate('planning', 'mrp')}
           onSubTabChange={subTab => {
             setActiveInventorySubTab(subTab);
             router.navigate({ inventorySubTab: subTab, docQuery: null });
@@ -1480,7 +1452,7 @@ function AppContent() {
         activeColor={colorTheme}
         onSelectTemplate={handleSelectTemplate}
         onSelectColor={handleSelectColor}
-        onPreviewMasterData={() => setActiveTab('master_data')}
+        onPreviewMasterData={() => handleDeepNavigate('master_data', 'PARTS')}
       />
 
       {/* ERP Sync Modal */}

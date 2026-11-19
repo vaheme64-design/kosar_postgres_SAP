@@ -21,6 +21,7 @@ import {
   ExternalLink,
   Trash2,
   ShieldAlert,
+  BookOpen,
 } from 'lucide-react';
 import {
   Part,
@@ -51,8 +52,7 @@ import { WipModuleSkeleton, Skeleton } from '../ui/Skeleton';
 import { TraceabilityInquiryView } from './TraceabilityInquiryView';
 import { useErpRouter } from '../../context/RouterContext';
 import { useEnterpriseUx } from '../../context/EnterpriseUxContext';
-import { InlinePageGuideButton } from '../common/PageGuideSystem';
-import { MoLifecycleGuideStrip } from '../common/WorkspaceNavigationBar';
+import { MoRelationalGuideModal } from '../production/MoRelationalGuideModal';
 
 export type WipViewMode =
   | 'UNIFIED_DIRECTORY'
@@ -210,6 +210,7 @@ export const ProductionWipModuleView: React.FC<ProductionWipModuleViewProps> = (
   const [rollbackSubmitting, setRollbackSubmitting] = useState(false);
   const [rollbackReason, setRollbackReason] = useState('');
   const [rollbackError, setRollbackError] = useState<string | null>(null);
+  const [isMoGuideOpen, setIsMoGuideOpen] = useState(false);
 
   useEffect(() => {
     if (notification) {
@@ -789,17 +790,17 @@ export const ProductionWipModuleView: React.FC<ProductionWipModuleViewProps> = (
   };
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-2.5">
       {/* SAP HANA Fiori Header + Unified Filter Bar */}
-      <div className="bg-white border border-[#d9d9d9] rounded-md p-4 shadow-2xs space-y-3">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="flex items-start sm:items-center gap-3">
-            <div className="w-9 h-9 rounded-md bg-[#e5f3fa] border border-[#b3ddf2] text-[#007cc0] flex items-center justify-center shrink-0">
-              <GitBranch className="w-4.5 h-4.5" />
+      <div className="bg-white border border-[#d9d9d9] rounded-md p-3 shadow-2xs space-y-2.5">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+          <div className="flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded-md bg-[#e5f3fa] border border-[#b3ddf2] text-[#007cc0] flex items-center justify-center shrink-0">
+              <GitBranch className="w-4 h-4" />
             </div>
             <div>
               <div className="flex items-center gap-2 flex-wrap">
-                <h1 className="text-base font-bold text-[#333333] tracking-tight">
+                <h1 className="text-sm font-bold text-[#333333] tracking-tight">
                   قطعات در جریان ساخت و ایستگاه‌ها (WIP)
                 </h1>
                 {metrics?.overallConservationIntegrity && (
@@ -809,17 +810,22 @@ export const ProductionWipModuleView: React.FC<ProductionWipModuleViewProps> = (
                   </span>
                 )}
               </div>
-              <p className="text-xs text-[#666666] mt-0.5">
+              <p className="text-[11px] text-[#666666]">
                 مدیریت یکپارچه دستورهای کار ساخت (MO)، صف ایستگاه‌های پرس و جوش، و حواله‌های انتقال بین مراحل
               </p>
             </div>
           </div>
 
-          <div className="flex items-center gap-2 flex-wrap self-end sm:self-auto">
-            <InlinePageGuideButton
-              routeContext={{ tab: 'wip', wipSubTab: activeView }}
-              label="آموزش این صفحه و دکمه‌ها"
-            />
+          <div className="flex items-center gap-1.5 flex-wrap self-end sm:self-auto">
+            <button
+              type="button"
+              onClick={() => setIsMoGuideOpen(true)}
+              className="px-2.5 py-1.5 rounded border border-[#b3ddf2] bg-[#e5f3fa] hover:bg-[#d2eaf7] text-[#0057b8] text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+              title="راهنمای تصویری ثبت MO، صدور سرکلاف و رفع خطای OP10"
+            >
+              <BookOpen className="w-3.5 h-3.5" />
+              <span>راهنمای تصویری MO / OP10</span>
+            </button>
             <button
               type="button"
               onClick={loadWipData}
@@ -841,7 +847,7 @@ export const ProductionWipModuleView: React.FC<ProductionWipModuleViewProps> = (
         </div>
 
         {/* Unified SAP Fiori Filter Bar */}
-        <div className="space-y-2 pt-2.5 border-t border-[#e5e5e5]">
+        <div className="space-y-2 pt-2 border-t border-[#e5e5e5]">
           <div className="relative">
             <Search className="w-4 h-4 text-[#666666] absolute right-3 top-2 pointer-events-none" />
             <input
@@ -941,9 +947,6 @@ export const ProductionWipModuleView: React.FC<ProductionWipModuleViewProps> = (
         </div>
       </div>
 
-      {/* Interactive MO Lifecycle Guide Strip */}
-      <MoLifecycleGuideStrip compact />
-
       {/* Toast Notification */}
       {notification && (
         <div
@@ -988,63 +991,63 @@ export const ProductionWipModuleView: React.FC<ProductionWipModuleViewProps> = (
           ))}
         </div>
       ) : (
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5">
-          <div className="bg-white p-3 rounded-md border border-[#d9d9d9] shadow-2xs">
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
+          <div className="bg-white px-3 py-2 rounded-md border border-[#d9d9d9]">
             <div className="flex items-center justify-between text-[#666666] text-[11px]">
               <span>صف ورودی ایستگاه</span>
               <Clock className="w-3.5 h-3.5 text-[#007cc0]" />
             </div>
-            <div className="text-base font-bold text-[#333333] font-mono tabular-nums mt-1">
+            <div className="text-sm font-bold text-[#333333] font-mono tabular-nums mt-0.5">
               {formatNumber(metrics?.totalWaitingQty || 0)}
             </div>
           </div>
 
-          <div className="bg-white p-3 rounded-md border border-[#d9d9d9] shadow-2xs">
+          <div className="bg-white px-3 py-2 rounded-md border border-[#d9d9d9]">
             <div className="flex items-center justify-between text-[#666666] text-[11px]">
               <span>در حال ساخت پای دستگاه</span>
               <Play className="w-3.5 h-3.5 text-[#007cc0]" />
             </div>
-            <div className="text-base font-bold text-[#007cc0] font-mono tabular-nums mt-1">
+            <div className="text-sm font-bold text-[#007cc0] font-mono tabular-nums mt-0.5">
               {formatNumber(metrics?.totalInProgressQty || 0)}
             </div>
           </div>
 
-          <div className="bg-white p-3 rounded-md border border-[#d9d9d9] shadow-2xs">
+          <div className="bg-white px-3 py-2 rounded-md border border-[#d9d9d9]">
             <div className="flex items-center justify-between text-[#666666] text-[11px]">
               <span>آماده انتقال به مرحله بعد</span>
               <CheckCircle2 className="w-3.5 h-3.5 text-[#107e3e]" />
             </div>
-            <div className="text-base font-bold text-[#107e3e] font-mono tabular-nums mt-1">
+            <div className="text-sm font-bold text-[#107e3e] font-mono tabular-nums mt-0.5">
               {formatNumber(metrics?.totalReadyForTransferQty || 0)}
             </div>
           </div>
 
-          <div className="bg-white p-3 rounded-md border border-[#d9d9d9] shadow-2xs">
+          <div className="bg-white px-3 py-2 rounded-md border border-[#d9d9d9]">
             <div className="flex items-center justify-between text-[#666666] text-[11px]">
               <span>در حال انتقال (حواله باز)</span>
               <ArrowRightLeft className="w-3.5 h-3.5 text-[#e9730c]" />
             </div>
-            <div className="text-base font-bold text-[#b85a00] font-mono tabular-nums mt-1">
+            <div className="text-sm font-bold text-[#b85a00] font-mono tabular-nums mt-0.5">
               {formatNumber(metrics?.totalInTransitQty || 0)}
             </div>
           </div>
 
-          <div className="bg-white p-3 rounded-md border border-[#d9d9d9] shadow-2xs">
+          <div className="bg-white px-3 py-2 rounded-md border border-[#d9d9d9]">
             <div className="flex items-center justify-between text-[#666666] text-[11px]">
               <span>محصول تکمیل‌شده</span>
               <Layers className="w-3.5 h-3.5 text-[#007cc0]" />
             </div>
-            <div className="text-base font-bold text-[#333333] font-mono tabular-nums mt-1">
+            <div className="text-sm font-bold text-[#333333] font-mono tabular-nums mt-0.5">
               {formatNumber(metrics?.totalCompletedQty || 0)}
             </div>
           </div>
 
-          <div className="bg-white p-3 rounded-md border border-[#d9d9d9] shadow-2xs">
+          <div className="bg-white px-3 py-2 rounded-md border border-[#d9d9d9]">
             <div className="flex items-center justify-between text-[#666666] text-[11px]">
               <span>ضایعات و دوباره‌کاری</span>
               <AlertCircle className="w-3.5 h-3.5 text-[#bb0000]" />
             </div>
-            <div className="text-base font-bold text-[#bb0000] font-mono tabular-nums mt-1">
+            <div className="text-sm font-bold text-[#bb0000] font-mono tabular-nums mt-0.5">
               {formatNumber(
                 (metrics?.totalScrapQty || 0) + (metrics?.totalReworkQty || 0)
               )}
@@ -1737,6 +1740,7 @@ export const ProductionWipModuleView: React.FC<ProductionWipModuleViewProps> = (
         <ManufacturingOrdersView
           orders={filteredOrders}
           loading={loading}
+          embeddedInParent
           onRefresh={loadWipData}
           onOpenCreateMo={() => setIsCreateMoOpen(true)}
           onOpenInput={op => setInputModalOp(op)}
@@ -1805,6 +1809,12 @@ export const ProductionWipModuleView: React.FC<ProductionWipModuleViewProps> = (
         isOpen={!!reconciliationMoId}
         onClose={() => setReconciliationMoId(null)}
         moId={reconciliationMoId}
+      />
+
+      <MoRelationalGuideModal
+        isOpen={isMoGuideOpen}
+        onClose={() => setIsMoGuideOpen(false)}
+        onOpenCreateMo={() => setIsCreateMoOpen(true)}
       />
 
       {loadMatModalMo && (

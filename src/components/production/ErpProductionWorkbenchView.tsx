@@ -38,6 +38,7 @@ import {
   Pause,
   FastForward,
   Info,
+  BookOpen,
 } from 'lucide-react';
 import { Part, Routing, DetailedStockBalance, Machine, OperationDefinition } from '../../types/inventory';
 import { AdvancedBomDefinition } from '../../types/bomAndParallelFlow';
@@ -59,8 +60,9 @@ import { useAuditAction } from '../../hooks/useAuditAction';
 import { DynamicSelect } from '../common/DynamicSelect';
 import { D3MaterialFlowDiagram } from './D3MaterialFlowDiagram';
 import { MachineOverlapAlertWidget } from '../planning/MachineOverlapAlertWidget';
-import { InlinePageGuideButton } from '../common/PageGuideSystem';
 import { ManufacturingOrdersManagementView } from './ManufacturingOrdersManagementView';
+import { MoQuickTrackerWidget } from './MoQuickTrackerWidget';
+import { MoRelationalGuideModal } from './MoRelationalGuideModal';
 
 export interface ScheduledOpStep {
   opId: string;
@@ -334,6 +336,7 @@ export const ErpProductionWorkbenchView: React.FC<ErpProductionWorkbenchViewProp
       enabled: boolean;
     }>
   >([]);
+  const [isVisualMoGuideOpen, setIsVisualMoGuideOpen] = useState(false);
 
   useEffect(() => {
     const loadDynamicConfigs = async () => {
@@ -1989,15 +1992,16 @@ export const ErpProductionWorkbenchView: React.FC<ErpProductionWorkbenchViewProp
             })}
           </div>
 
-          <div className="flex items-center gap-2 shrink-0 py-2 lg:py-0 flex-wrap">
-            <InlinePageGuideButton
-              routeContext={{
-                tab: 'production',
-                productionViewMode: 'ERP_WORKBENCH',
-                productionModuleTab: activeModuleTab,
-              }}
-              label="آموزش این تب و سناریوها"
-            />
+          <div className="flex items-center gap-1.5 shrink-0 py-2 lg:py-0 flex-wrap">
+            <button
+              type="button"
+              onClick={() => setIsVisualMoGuideOpen(true)}
+              className="px-2.5 py-1.5 rounded border border-[#b3ddf2] bg-[#e5f3fa] hover:bg-[#d2eaf7] text-[#0057b8] text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+              title="راهنمای تصویری گام‌به‌گام ثبت دستور ساخت (MO) و رفع خطای متناظر پیدا نشد"
+            >
+              <BookOpen className="w-3.5 h-3.5" />
+              <span>راهنمای تصویری MO / OP10</span>
+            </button>
             <button
               type="button"
               onClick={() => {
@@ -2148,6 +2152,13 @@ export const ErpProductionWorkbenchView: React.FC<ErpProductionWorkbenchViewProp
       {/* ==================================================================== */}
       {activeModuleTab === 'MULTI_PART_SCHEDULER' && (
         <div className="space-y-3">
+          <MoQuickTrackerWidget
+            parts={parts}
+            routings={routings}
+            onRefreshData={onRefreshData}
+            onOpenFullMoList={() => handleSelectModuleTab('MANUFACTURING_ORDERS_LIST')}
+          />
+
           <MachineOverlapAlertWidget compact />
 
           {paginatedParts.length === 0 ? (
@@ -2813,7 +2824,13 @@ export const ErpProductionWorkbenchView: React.FC<ErpProductionWorkbenchViewProp
       {/* TAB 3: LIVE WIP PER OP TRACKER & AUTO WAREHOUSE RECEIPT              */}
       {/* ==================================================================== */}
       {activeModuleTab === 'LIVE_WIP_OP_TRACKER' && (
-        <div className="space-y-3.5">
+        <div className="space-y-3">
+          <MoQuickTrackerWidget
+            parts={parts}
+            routings={routings}
+            onRefreshData={onRefreshData}
+            onOpenFullMoList={() => handleSelectModuleTab('MANUFACTURING_ORDERS_LIST')}
+          />
           <D3MaterialFlowDiagram />
           <div className="sap-card p-4 space-y-3.5">
             <div className="border-b border-[#e8e8e8] pb-2.5 flex flex-wrap items-center justify-between gap-3">
@@ -5055,6 +5072,13 @@ export const ErpProductionWorkbenchView: React.FC<ErpProductionWorkbenchViewProp
 
       {/* Enterprise Audit Confirmation Modal (Mandatory reason >= 10 chars) */}
       <AuditConfirmationModal {...auditAction.modalProps} />
+
+      {/* Interactive Visual Step-by-Step Guide Modal for MO Registration & OP10 Fix */}
+      <MoRelationalGuideModal
+        isOpen={isVisualMoGuideOpen}
+        onClose={() => setIsVisualMoGuideOpen(false)}
+        onOpenCreateMo={() => router.openCreateMoModal()}
+      />
     </div>
   );
 };

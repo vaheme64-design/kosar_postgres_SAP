@@ -28,6 +28,7 @@ import { formatNumber, toPersianDigits } from '../../utils/formatters';
 import { useErpRouter } from '../../context/RouterContext';
 import { CreateMoModal } from '../wip/CreateMoModal';
 import { OperationProductionModal } from '../wip/OperationProductionModal';
+import { MoRelationalGuideModal } from './MoRelationalGuideModal';
 
 interface ManufacturingOrdersManagementViewProps {
   parts: Part[];
@@ -72,7 +73,8 @@ export const ManufacturingOrdersManagementView: React.FC<ManufacturingOrdersMana
   const [loading, setLoading] = useState(false);
   const [statusFilter, setStatusFilter] = useState<'ALL' | ManufacturingOrderStatus>('ALL');
   const [searchQuery, setSearchQuery] = useState('');
-  const [showGuide, setShowGuide] = useState(true);
+  const [showGuide, setShowGuide] = useState(false);
+  const [isVisualGuideOpen, setIsVisualGuideOpen] = useState(false);
   const [notice, setNotice] = useState<{ type: 'success' | 'warning' | 'error'; title: string; detail: string } | null>(null);
 
   // Modals state
@@ -329,35 +331,36 @@ export const ManufacturingOrdersManagementView: React.FC<ManufacturingOrdersMana
       {/* ==================================================================== */}
       {/* STEP-BY-STEP INTERACTIVE USER GUIDE FOR COIL ISSUE, MO & OP10 FIX    */}
       {/* ==================================================================== */}
-      <div className="sap-card border-2 border-[#007cc0]/30 bg-gradient-to-l from-[#f0f8ff] via-[#ffffff] to-[#f7fbff] overflow-hidden">
-        <div
-          onClick={() => setShowGuide(prev => !prev)}
-          className="px-4 py-3 bg-[#e5f3fa] border-b border-[#b3ddf2] flex items-center justify-between cursor-pointer"
-        >
-          <div className="flex items-center gap-2.5">
-            <div className="p-1.5 bg-[#007cc0] text-white rounded">
-              <BookOpen className="w-4 h-4" />
-            </div>
-            <div>
-              <h3 className="text-xs sm:text-sm font-bold text-[#004e7a]">
-                راهنمای گام‌به‌گام عملیاتی: صدور سرکلاف تولید، تعریف دستور ساخت (MO)، رفع خطای ثبت خروجی (OP10) و حذف دستورهای غیرضروری
-              </h3>
-              <p className="text-[11px] text-[#333333] mt-0.5">
-                پاسخ دقیق به ۳ پرسش کلیدی: سرکلاف از کجا صادر می‌شود؟ چگونه دستور ساخت معتبر بسازیم تا OP10 بدون خطا ثبت شود؟ و کجا دستورات ساخت را رهگیری یا حذف کنیم؟
-              </p>
-            </div>
+      <div className="sap-card border border-[#b3ddf2] bg-white overflow-hidden">
+        <div className="px-3.5 py-2 bg-[#f4f9fd] border-b border-[#d9e9f5] flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0">
+            <BookOpen className="w-4 h-4 text-[#007cc0] shrink-0" />
+            <span className="text-xs font-bold text-[#004e7a] truncate">
+              راهنمای گام‌به‌گام صدور سرکلاف، تعریف دستور ساخت (MO) معتبر و رفع خطای OP10
+            </span>
           </div>
-          <button
-            type="button"
-            className="text-xs font-semibold text-[#007cc0] flex items-center gap-1 bg-white px-2.5 py-1 rounded border border-[#b3ddf2] cursor-pointer"
-          >
-            <span>{showGuide ? 'بستن راهنما' : 'نمایش راهنمای گام‌به‌گام'}</span>
-            {showGuide ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
-          </button>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              type="button"
+              onClick={() => setIsVisualGuideOpen(true)}
+              className="px-2.5 py-1 rounded text-[11px] font-bold bg-[#007cc0] hover:bg-[#0066a1] text-white inline-flex items-center gap-1 cursor-pointer"
+            >
+              <BookOpen className="w-3.5 h-3.5" />
+              <span>راهنمای تصویری گام‌به‌گام</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowGuide(prev => !prev)}
+              className="text-[11px] font-semibold text-[#007cc0] flex items-center gap-1 bg-white px-2.5 py-1 rounded border border-[#b3ddf2] hover:bg-[#e5f3fa] cursor-pointer"
+            >
+              <span>{showGuide ? 'بستن خلاصه متنی' : 'خلاصه ۴ گام'}</span>
+              {showGuide ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+            </button>
+          </div>
         </div>
 
         {showGuide && (
-          <div className="p-4 space-y-3 text-xs">
+          <div className="p-3.5 space-y-3 text-xs">
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
               {/* STEP 1: WHERE COIL HEAD IS ISSUED FROM */}
               <div className="p-3 bg-white border border-[#d9d9d9] rounded space-y-2 flex flex-col justify-between">
@@ -370,7 +373,7 @@ export const ManufacturingOrdersManagementView: React.FC<ManufacturingOrdersMana
                   </div>
                   <h4 className="font-bold text-[#333333]">سر کلاف تولید از کجا صادر می‌شود؟</h4>
                   <p className="text-[11px] text-[#555555] leading-5">
-                    ۱. ابتدا رول ورق با شماره ذوب (Heat Number) در <strong>«انبار و رول ورق ← رول‌های ورق و کویل‌پک»</strong> ثبت و از قرنطینه آزاد می‌شود.
+                    ۱. از <strong>«کاتالوگ ماژول‌های SAP HANA ← انبار و کیفیت (MM/QM) ← رول‌های ورق و کویل‌پک»</strong>، رول ورق با شماره ذوب (Heat Number) ثبت و آزاد می‌شود.
                     <br />
                     ۲. برای ارسال سرکلاف پای دستگاه برش (<code>OP10_SLIT</code>)، در جدول رول‌ها دکمه <strong>«ثبت مصرف/برش کلاف (حواله به تولید)»</strong> را بزنید <strong>یا</strong> در همین صفحه روی کارت دستور ساخت، دکمه <strong>«بارگذاری سرکلاف / مواد به OP10»</strong> را کلیک کنید.
                     <br />
@@ -1132,6 +1135,13 @@ export const ManufacturingOrdersManagementView: React.FC<ManufacturingOrdersMana
           </div>
         </div>
       )}
+
+      {/* Interactive Visual Step-by-Step Guide Modal */}
+      <MoRelationalGuideModal
+        isOpen={isVisualGuideOpen}
+        onClose={() => setIsVisualGuideOpen(false)}
+        onOpenCreateMo={() => setIsCreateMoOpen(true)}
+      />
     </div>
   );
 };
