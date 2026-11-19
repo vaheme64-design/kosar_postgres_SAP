@@ -24,6 +24,7 @@ import { loadVipPartsMap, saveVipPartsMap, isPartVip } from '../utils/qcHoldStor
 import { useEnterpriseUx } from '../context/EnterpriseUxContext';
 import { useErpRouter } from '../context/RouterContext';
 import { DataImportExportView } from './inventory/DataImportExportView';
+import { loadMaterialGrades, MaterialGradeItem } from '../utils/materialGradesStorage';
 
 interface PartsViewProps {
   parts: Part[];
@@ -41,6 +42,15 @@ export const PartsView: React.FC<PartsViewProps> = ({ parts, onSavePart, onRefre
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isExcelImportOpen, setIsExcelImportOpen] = useState(false);
   const [editingPart, setEditingPart] = useState<Partial<Part> | null>(null);
+  const [materialGradesList, setMaterialGradesList] = useState<MaterialGradeItem[]>(() =>
+    loadMaterialGrades()
+  );
+
+  useEffect(() => {
+    const syncGrades = () => setMaterialGradesList(loadMaterialGrades());
+    window.addEventListener('kpims-material-grades-updated', syncGrades);
+    return () => window.removeEventListener('kpims-material-grades-updated', syncGrades);
+  }, []);
 
   // Form states
   const [formData, setFormData] = useState<Partial<Part>>({
@@ -812,14 +822,22 @@ export const PartsView: React.FC<PartsViewProps> = ({ parts, onSavePart, onRefre
 
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div className="space-y-1">
-                  <label className="text-[#333333] font-medium">گرید فولاد</label>
+                  <label className="text-[#333333] font-medium">گرید و جنس ورق / فولاد</label>
                   <input
                     type="text"
+                    list="kpims-material-grades-datalist"
                     value={formData.materialGrade || ''}
                     onChange={e => setFormData({ ...formData, materialGrade: e.target.value })}
-                    placeholder="ST14, DC04, DX51D"
+                    placeholder="انتخاب از لیست یا تایپ گرید (ST14, DC04...)"
                     className="w-full bg-[#ffffff] border border-[#bfbfbf] rounded-sm px-3 py-1.5 text-[#333333] font-mono focus:outline-none focus:border-[#007cc0]"
                   />
+                  <datalist id="kpims-material-grades-datalist">
+                    {materialGradesList.map(g => (
+                      <option key={g.id} value={g.code}>
+                        {g.name}
+                      </option>
+                    ))}
+                  </datalist>
                 </div>
 
                 <div className="space-y-1">

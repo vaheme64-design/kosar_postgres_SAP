@@ -60,6 +60,15 @@ import { toPersianDigits } from '../utils/formatters';
 import { MasterDataSkeleton } from './ui/Skeleton';
 import { useEnterpriseUx } from '../context/EnterpriseUxContext';
 import { useErpRouter } from '../context/RouterContext';
+import {
+  MaterialGradeCategory,
+  MaterialGradeItem,
+  MATERIAL_GRADE_CATEGORIES,
+  deleteMaterialGrade,
+  loadMaterialGrades,
+  resetMaterialGrades,
+  upsertMaterialGrade,
+} from '../utils/materialGradesStorage';
 
 export type MasterSubSection =
   | 'HUB'
@@ -85,10 +94,19 @@ interface RawSheetSpec {
   code: string;
   name: string;
   grade: string;
+  supplyForm?: 'COIL' | 'SHEET' | 'STRIP' | 'OTHER';
   thicknessMm: number;
+  widthMm?: number;
+  lengthMm?: number;
   dimensionsMm: string;
+  densityGCm3?: number;
   sheetWeightKg: number;
   unit: string;
+  ownership?: 'SAPCO_CONSIGNMENT' | 'LOCAL_PURCHASE' | 'IMPORTED';
+  supplierName?: string;
+  standard?: string;
+  minStock?: number;
+  description?: string;
   contractsCount: number;
   active: boolean;
 }
@@ -306,7 +324,51 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
     setTimeout(() => setMasterBanner(null), 5000);
   };
 
-  const [rawSheets, setRawSheets] = useState<RawSheetSpec[]>(INITIAL_RAW_SHEETS);
+  const [materialGrades, setMaterialGrades] = useState<MaterialGradeItem[]>(() => loadMaterialGrades());
+  const [isGradeManagerOpen, setIsGradeManagerOpen] = useState(false);
+  const [editingGradeId, setEditingGradeId] = useState<string | null>(null);
+  const [gradeFormCode, setGradeFormCode] = useState('');
+  const [gradeFormName, setGradeFormName] = useState('');
+  const [gradeFormCategory, setGradeFormCategory] = useState<MaterialGradeCategory>('COLD_ROLLED');
+  const [gradeFormStandard, setGradeFormStandard] = useState('');
+  const [gradeFormDensity, setGradeFormDensity] = useState('7.85');
+  const [gradeFormNotes, setGradeFormNotes] = useState('');
+
+  // Inline quick-add grade inside Raw Material modal
+  const [showInlineAddGrade, setShowInlineAddGrade] = useState(false);
+  const [inlineGradeCode, setInlineGradeCode] = useState('');
+  const [inlineGradeName, setInlineGradeName] = useState('');
+  const [inlineGradeCategory, setInlineGradeCategory] = useState<MaterialGradeCategory>('COLD_ROLLED');
+  const [inlineGradeDensity, setInlineGradeDensity] = useState('7.85');
+
+  useEffect(() => {
+    const onGradesUpdated = () => setMaterialGrades(loadMaterialGrades());
+    window.addEventListener('kpims-material-grades-updated', onGradesUpdated);
+    return () => window.removeEventListener('kpims-material-grades-updated', onGradesUpdated);
+  }, []);
+
+  const [rawSheets, setRawSheets] = useState<RawSheetSpec[]>(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        const saved = localStorage.getItem('kpims_raw_sheets_v1');
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+        }
+      } catch {
+        // fallback to defaults
+      }
+    }
+    return INITIAL_RAW_SHEETS;
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('kpims_raw_sheets_v1', JSON.stringify(rawSheets));
+    } catch {
+      // ignore storage quota errors
+    }
+  }, [rawSheets]);
 
   useEffect(() => {
     const rawParts = parts.filter(p => p.category === 'RAW_MATERIAL');
@@ -320,10 +382,17 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
           code: p.code,
           name: p.name,
           grade: p.materialGrade || 'DC01A',
+          supplyForm: 'COIL',
           thicknessMm: p.thicknessMm || 2.0,
+          widthMm: 1250,
+          lengthMm: 2500,
           dimensionsMm: 'کويل / شیت استاندارد',
+          densityGCm3: 7.85,
           sheetWeightKg: p.weightPerUnitKg || 1,
           unit: p.unit === 'KG' ? 'کیلوگرم' : 'عدد',
+          ownership: 'SAPCO_CONSIGNMENT',
+          minStock: p.minStock || 0,
+          description: p.description || '',
           contractsCount: 1,
           active: true,
         }));
@@ -338,10 +407,19 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
     code: '',
     name: '',
     grade: 'ST12',
+    supplyForm: 'SHEET',
     thicknessMm: 1.0,
+    widthMm: 1250,
+    lengthMm: 2500,
     dimensionsMm: '۱,۲۵۰ × ۲,۵۰۰',
+    densityGCm3: 7.85,
     sheetWeightKg: 24.5,
     unit: 'کیلوگرم',
+    ownership: 'SAPCO_CONSIGNMENT',
+    supplierName: 'فولاد مبارکه اصفهان',
+    standard: 'DIN 1623 / EN 10130',
+    minStock: 2000,
+    description: '',
     contractsCount: 1,
     active: true,
   });
@@ -1035,15 +1113,110 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
     { id: 'ORDERS', label: 'سفارشات' },
   ];
 
+  const computeTheoreticalSheetWeight = (
+    thicknessMm?: number,
+    widthMm?: number,
+    lengthMm?: number,
+    densityGCm3?: number
+  ) => {
+    const t = Number(thicknessMm) || 0;
+    const w = Number(widthMm) || 0;
+    const l = Number(lengthMm) || 0;
+    const d = Number(densityGCm3) || 7.85;
+    if (t <= 0 || w <= 0 || l <= 0) return 0;
+    // volume in cm^3 = (t/10)*(w/10)*(l/10) = t*w*l / 1000; mass in kg = (vol * d) / 1000
+    return Math.round(((t * w * l * d) / 1_000_000) * 100) / 100;
+  };
+
+  const handleSaveGradeManagerForm = (e: React.FormEvent) => {
+    e.preventDefault();
+    const code = gradeFormCode.trim().toUpperCase();
+    const name = gradeFormName.trim();
+    if (!code || !name) return;
+    const updated = upsertMaterialGrade({
+      id: editingGradeId || undefined,
+      code,
+      name,
+      category: gradeFormCategory,
+      standard: gradeFormStandard.trim(),
+      densityGCm3: parseFloat(gradeFormDensity) || 7.85,
+      notes: gradeFormNotes.trim(),
+    });
+    setMaterialGrades(updated);
+    setEditingGradeId(null);
+    setGradeFormCode('');
+    setGradeFormName('');
+    setGradeFormCategory('COLD_ROLLED');
+    setGradeFormStandard('');
+    setGradeFormDensity('7.85');
+    setGradeFormNotes('');
+    notifyMaster('success', `گرید و جنس ورق «${code} — ${name}» در بانک گریدهای کارخانه ذخیره شد.`);
+  };
+
+  const handleQuickInlineAddGrade = () => {
+    const code = inlineGradeCode.trim().toUpperCase();
+    const name = inlineGradeName.trim() || code;
+    if (!code) return;
+    const density = parseFloat(inlineGradeDensity) || 7.85;
+    const updated = upsertMaterialGrade({
+      code,
+      name,
+      category: inlineGradeCategory,
+      densityGCm3: density,
+    });
+    setMaterialGrades(updated);
+    setSheetForm(prev => ({
+      ...prev,
+      grade: code,
+      densityGCm3: density,
+    }));
+    setInlineGradeCode('');
+    setInlineGradeName('');
+    setShowInlineAddGrade(false);
+    notifyMaster('success', `جنس ورق جدید «${code}» اضافه و برای این ماده انتخاب شد.`);
+  };
+
   const handleSaveSheetSpec = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!sheetForm.code || !sheetForm.name) return;
+
+    const widthNum = Number(sheetForm.widthMm) || 0;
+    const lengthNum = Number(sheetForm.lengthMm) || 0;
+    const computedDim =
+      sheetForm.dimensionsMm?.trim() ||
+      (widthNum > 0 && lengthNum > 0
+        ? `${toPersianDigits(widthNum.toLocaleString('en-US'))} × ${toPersianDigits(lengthNum.toLocaleString('en-US'))}`
+        : sheetForm.supplyForm === 'COIL' && widthNum > 0
+        ? `کلاف عرض ${toPersianDigits(widthNum.toLocaleString('en-US'))} mm`
+        : 'استاندارد');
+
+    const normalizedSpec: Partial<RawSheetSpec> = {
+      ...sheetForm,
+      code: sheetForm.code.trim(),
+      name: sheetForm.name.trim(),
+      grade: sheetForm.grade || materialGrades[0]?.code || 'ST12',
+      supplyForm: sheetForm.supplyForm || 'SHEET',
+      thicknessMm: Number(sheetForm.thicknessMm) || 1.0,
+      widthMm: widthNum || undefined,
+      lengthMm: lengthNum || undefined,
+      dimensionsMm: computedDim,
+      densityGCm3: Number(sheetForm.densityGCm3) || 7.85,
+      sheetWeightKg: Number(sheetForm.sheetWeightKg) || 1,
+      unit: sheetForm.unit || 'کیلوگرم',
+      ownership: sheetForm.ownership || 'SAPCO_CONSIGNMENT',
+      supplierName: sheetForm.supplierName?.trim() || '',
+      standard: sheetForm.standard?.trim() || '',
+      minStock: Number(sheetForm.minStock) || 0,
+      description: sheetForm.description?.trim() || '',
+      contractsCount: Number(sheetForm.contractsCount) || 0,
+      active: sheetForm.active !== false,
+    };
 
     if (editingSheet) {
       setRawSheets(prev =>
         prev.map(item =>
           item.id === editingSheet.id
-            ? ({ ...item, ...sheetForm } as RawSheetSpec)
+            ? ({ ...item, ...normalizedSpec } as RawSheetSpec)
             : item
         )
       );
@@ -1051,35 +1224,63 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
     } else {
       const newSpec: RawSheetSpec = {
         id: `RM-${Date.now()}`,
-        code: sheetForm.code,
-        name: sheetForm.name,
-        grade: sheetForm.grade || 'ST12',
-        thicknessMm: Number(sheetForm.thicknessMm) || 1.0,
-        dimensionsMm: sheetForm.dimensionsMm || '۱,۲۵۰ × ۲,۵۰۰',
-        sheetWeightKg: Number(sheetForm.sheetWeightKg) || 24.5,
-        unit: sheetForm.unit || 'کیلوگرم',
-        contractsCount: Number(sheetForm.contractsCount) || 0,
-        active: sheetForm.active !== false,
+        code: normalizedSpec.code!,
+        name: normalizedSpec.name!,
+        grade: normalizedSpec.grade!,
+        supplyForm: normalizedSpec.supplyForm,
+        thicknessMm: normalizedSpec.thicknessMm!,
+        widthMm: normalizedSpec.widthMm,
+        lengthMm: normalizedSpec.lengthMm,
+        dimensionsMm: normalizedSpec.dimensionsMm!,
+        densityGCm3: normalizedSpec.densityGCm3,
+        sheetWeightKg: normalizedSpec.sheetWeightKg!,
+        unit: normalizedSpec.unit!,
+        ownership: normalizedSpec.ownership,
+        supplierName: normalizedSpec.supplierName,
+        standard: normalizedSpec.standard,
+        minStock: normalizedSpec.minStock,
+        description: normalizedSpec.description,
+        contractsCount: normalizedSpec.contractsCount!,
+        active: normalizedSpec.active !== false,
       };
       setRawSheets(prev => [newSpec, ...prev]);
     }
 
     // Automatically sync with global parts catalog as RAW_MATERIAL
+    const resolvedUnit = normalizedSpec.unit === 'عدد' || normalizedSpec.unit === 'برگ' ? 'PCS' : 'KG';
     try {
       await onSavePart({
-        code: sheetForm.code,
-        name: sheetForm.name,
+        code: normalizedSpec.code,
+        name: normalizedSpec.name,
         category: 'RAW_MATERIAL',
-        unit: 'KG',
-        materialGrade: sheetForm.grade || 'ST12',
-        thicknessMm: Number(sheetForm.thicknessMm) || 1.0,
-        weightPerUnitKg: Number(sheetForm.sheetWeightKg) || 24.5,
+        unit: resolvedUnit,
+        materialGrade: normalizedSpec.grade,
+        thicknessMm: normalizedSpec.thicknessMm,
+        weightPerUnitKg: normalizedSpec.sheetWeightKg,
+        minStock: normalizedSpec.minStock,
+        description: [
+          normalizedSpec.supplyForm === 'COIL'
+            ? 'شکل عرضه: رول/کلاف'
+            : normalizedSpec.supplyForm === 'STRIP'
+            ? 'شکل عرضه: نوار برش‌خورده'
+            : normalizedSpec.supplyForm === 'SHEET'
+            ? 'شکل عرضه: شیت ورق'
+            : '',
+          normalizedSpec.dimensionsMm ? `ابعاد: ${normalizedSpec.dimensionsMm}` : '',
+          normalizedSpec.supplierName ? `تأمین‌کننده: ${normalizedSpec.supplierName}` : '',
+          normalizedSpec.standard ? `استاندارد: ${normalizedSpec.standard}` : '',
+          normalizedSpec.description || '',
+        ]
+          .filter(Boolean)
+          .join(' | '),
       });
+      notifyMaster('success', `ماده اولیه «${normalizedSpec.code}» ذخیره و با کاتالوگ انبار قطعات همگام‌سازی شد.`);
     } catch (err) {
       console.warn('Could not auto-sync sheet with parts catalog:', err);
     }
 
     setIsNewSheetModalOpen(false);
+    setShowInlineAddGrade(false);
   };
 
   const filteredRawSheets = rawSheets.filter(
@@ -1087,7 +1288,8 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
       !sheetSearch.trim() ||
       s.code.toLowerCase().includes(sheetSearch.toLowerCase()) ||
       s.name.toLowerCase().includes(sheetSearch.toLowerCase()) ||
-      s.grade.toLowerCase().includes(sheetSearch.toLowerCase())
+      s.grade.toLowerCase().includes(sheetSearch.toLowerCase()) ||
+      (s.supplierName || '').toLowerCase().includes(sheetSearch.toLowerCase())
   );
 
   if (parts.length === 0 && machines.length === 0) {
@@ -1302,42 +1504,73 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
 
           {/* Action Row above table */}
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex items-center gap-2.5">
+            <div className="flex items-center gap-2 flex-wrap">
               <button
                 type="button"
                 onClick={() => {
+                  const defaultGrade = materialGrades[0] || { code: 'ST12', densityGCm3: 7.85, standard: 'DIN 1623' };
                   setEditingSheet(null);
+                  setShowInlineAddGrade(false);
                   setSheetForm({
-                    code: `SHT-ST12-${(rawSheets.length + 1) * 0.2}`,
+                    code: `SHT-${defaultGrade.code}-${((rawSheets.length + 1) * 0.2).toFixed(1)}`,
                     name: '',
-                    grade: 'ST12',
+                    grade: defaultGrade.code,
+                    supplyForm: 'SHEET',
                     thicknessMm: 1.0,
+                    widthMm: 1250,
+                    lengthMm: 2500,
                     dimensionsMm: '۱,۲۵۰ × ۲,۵۰۰',
-                    sheetWeightKg: 24.5,
+                    densityGCm3: defaultGrade.densityGCm3 || 7.85,
+                    sheetWeightKg: computeTheoreticalSheetWeight(1.0, 1250, 2500, defaultGrade.densityGCm3 || 7.85),
                     unit: 'کیلوگرم',
+                    ownership: 'SAPCO_CONSIGNMENT',
+                    supplierName: 'فولاد مبارکه اصفهان',
+                    standard: defaultGrade.standard || 'DIN 1623 / EN 10130',
+                    minStock: 2000,
+                    description: '',
                     contractsCount: 1,
                     active: true,
                   });
                   setIsNewSheetModalOpen(true);
                 }}
-                className="sap-btn-emphasized inline-flex items-center gap-1.5 px-4 py-2 text-xs"
+                className="sap-btn-emphasized inline-flex items-center gap-1.5 px-3.5 py-2 text-xs cursor-pointer"
               >
                 <Plus className="w-4 h-4" />
                 <span>ماده اولیه جدید</span>
               </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setEditingGradeId(null);
+                  setGradeFormCode('');
+                  setGradeFormName('');
+                  setGradeFormCategory('COLD_ROLLED');
+                  setGradeFormStandard('');
+                  setGradeFormDensity('7.85');
+                  setGradeFormNotes('');
+                  setIsGradeManagerOpen(true);
+                }}
+                className="sap-btn-standard inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-[#007cc0] cursor-pointer"
+                title="مشاهده، افزودن، ویرایش و حذف فهرست گریدها و جنس ورق‌های مجاز در سامانه"
+              >
+                <Settings2 className="w-3.5 h-3.5" />
+                <span>مدیریت گریدها و جنس ورق ({toPersianDigits(materialGrades.length)} جنس)</span>
+              </button>
+
               <span className="text-xs font-medium text-[#556B82]">
                 {toPersianDigits(filteredRawSheets.length)} ماده
               </span>
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <div className="relative">
                 <Search className="w-3.5 h-3.5 text-[#556B82] absolute right-3 top-2.5 pointer-events-none" />
                 <input
                   type="text"
                   value={sheetSearch}
                   onChange={e => setSheetSearch(e.target.value)}
-                  placeholder="جستجوی کد ورق، گرید (ST12/ST13) یا ضخامت..."
+                  placeholder="جستجوی کد ورق، گرید (ST12/DC04) یا تأمین‌کننده..."
                   className="bg-white border border-[#BCC6D0] rounded-md pr-8 pl-3 py-1.5 text-xs text-[#1D2D3E] focus:outline-none focus:border-[#0070F2] w-64"
                 />
               </div>
@@ -1345,7 +1578,7 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
                 <button
                   type="button"
                   onClick={onNavigateToInventoryCoils}
-                  className="sap-btn-standard px-3 py-1.5 text-xs"
+                  className="sap-btn-standard px-3 py-1.5 text-xs cursor-pointer"
                 >
                   رهگیری کویل‌پک‌ها در انبار ({toPersianDigits(coils.length)} رول) ←
                 </button>
@@ -1360,75 +1593,136 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
                 <thead className="bg-[#ffffff] border-b border-[#d9d9d9] text-[#333333] font-semibold">
                   <tr>
                     <th>کد ماده</th>
-                    <th>نام</th>
-                    <th>گرید</th>
+                    <th>نام ماده اولیه</th>
+                    <th>گرید / جنس</th>
+                    <th>شکل عرضه</th>
                     <th>ضخامت (mm)</th>
-                    <th>ابعاد ورق (mm)</th>
-                    <th>وزن ورق (kg)</th>
-                    <th>واحد</th>
-                    <th>قراردادها</th>
+                    <th>ابعاد (mm)</th>
+                    <th>وزن واحد (kg)</th>
+                    <th>مالکیت / تأمین‌کننده</th>
+                    <th>نقطه سفارش</th>
                     <th>وضعیت</th>
                     <th className="text-center">عملیات</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#e8e8e8] text-[#333333]">
-                  {filteredRawSheets.map(sheet => (
-                    <tr
-                      key={sheet.id}
-                      className="hover:bg-[#e5f3fa]/55 transition-colors"
-                    >
-                      <td className="font-mono font-semibold tabular-nums">
-                        <button
-                          type="button"
-                          onClick={() => traceDocument(sheet.code, 'INVENTORY_LEDGER')}
-                          className="sap-doc-link"
-                          title="رهگیری موجودی و کاردکس این ورق در انبار"
-                        >
-                          {sheet.code}
-                        </button>
-                      </td>
-                      <td className="font-medium text-[#333333]">
-                        {sheet.name}
-                      </td>
-                      <td className="font-semibold text-[#333333]">
-                        {sheet.grade}
-                      </td>
-                      <td className="tabular-nums font-medium">
-                        {toPersianDigits(sheet.thicknessMm.toString().replace('.', '/'))}
-                      </td>
-                      <td className="tabular-nums text-[#666666]">
-                        {sheet.dimensionsMm}
-                      </td>
-                      <td className="tabular-nums font-semibold text-[#333333]">
-                        {toPersianDigits(sheet.sheetWeightKg.toFixed(1).replace('.', '/'))}
-                      </td>
-                      <td className="text-[#666666]">{sheet.unit}</td>
-                      <td className="tabular-nums font-semibold text-[#333333]">
-                        {toPersianDigits(sheet.contractsCount)}
-                      </td>
-                      <td>
-                        <span className={`inline-flex items-center px-2 py-0.5 rounded-sm text-[11px] font-semibold ${
-                          sheet.active ? 'bg-[#eefaf2] text-[#107e3e] border border-[#b6e4c8]' : 'bg-[#f0f0f0] text-[#666666] border border-[#d9d9d9]'
-                        }`}>
-                          {sheet.active ? 'فعال' : 'غیرفعال'}
-                        </span>
-                      </td>
-                      <td className="text-center">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setEditingSheet(sheet);
-                            setSheetForm(sheet);
-                            setIsNewSheetModalOpen(true);
-                          }}
-                          className="inline-flex items-center gap-1 text-[#007cc0] hover:text-[#006299] font-semibold cursor-pointer"
-                        >
-                          <Edit3 className="w-3.5 h-3.5" />
-                          <span>ویرایش</span>
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
+                  {filteredRawSheets.map(sheet => {
+                    const gradeMeta = materialGrades.find(
+                      g => g.code.toUpperCase() === (sheet.grade || '').toUpperCase()
+                    );
+                    const formLabel =
+                      sheet.supplyForm === 'COIL'
+                        ? 'رول / کلاف'
+                        : sheet.supplyForm === 'STRIP'
+                        ? 'نوار برش‌خورده'
+                        : sheet.supplyForm === 'OTHER'
+                        ? 'سایر مواد'
+                        : 'شیت ورق';
+                    const ownershipLabel =
+                      sheet.ownership === 'LOCAL_PURCHASE'
+                        ? 'خرید بازار'
+                        : sheet.ownership === 'IMPORTED'
+                        ? 'وارداتی'
+                        : 'امانی ساپکو';
+                    return (
+                      <tr
+                        key={sheet.id}
+                        className="hover:bg-[#e5f3fa]/55 transition-colors"
+                      >
+                        <td className="font-mono font-semibold tabular-nums whitespace-nowrap">
+                          <button
+                            type="button"
+                            onClick={() => traceDocument(sheet.code, 'INVENTORY_LEDGER')}
+                            className="sap-doc-link"
+                            title="رهگیری موجودی و کاردکس این ورق در انبار"
+                          >
+                            {sheet.code}
+                          </button>
+                        </td>
+                        <td className="font-medium text-[#333333]">
+                          <div>{sheet.name}</div>
+                          {sheet.standard && (
+                            <div className="text-[10px] text-[#666666] font-mono">{sheet.standard}</div>
+                          )}
+                        </td>
+                        <td className="whitespace-nowrap">
+                          <div className="font-mono font-bold text-[#007cc0]">{sheet.grade}</div>
+                          {gradeMeta && (
+                            <div className="text-[10px] text-[#666666] truncate max-w-[130px]">{gradeMeta.name}</div>
+                          )}
+                        </td>
+                        <td className="text-[#555555] whitespace-nowrap">{formLabel}</td>
+                        <td className="tabular-nums font-medium">
+                          {toPersianDigits(sheet.thicknessMm.toString().replace('.', '/'))}
+                        </td>
+                        <td className="tabular-nums text-[#666666] whitespace-nowrap">
+                          {sheet.dimensionsMm}
+                        </td>
+                        <td className="tabular-nums font-semibold text-[#333333] whitespace-nowrap">
+                          {toPersianDigits(sheet.sheetWeightKg.toFixed(1).replace('.', '/'))}{' '}
+                          <span className="text-[10px] font-normal text-[#666666]">{sheet.unit}</span>
+                        </td>
+                        <td className="text-[11px] text-[#555555]">
+                          <div className="font-medium text-[#333333]">{ownershipLabel}</div>
+                          {sheet.supplierName && (
+                            <div className="text-[10px] text-[#666666] truncate max-w-[120px]">{sheet.supplierName}</div>
+                          )}
+                        </td>
+                        <td className="tabular-nums font-mono text-[#555555]">
+                          {sheet.minStock ? toPersianDigits(sheet.minStock.toLocaleString('en-US')) : '—'}
+                        </td>
+                        <td>
+                          <span className={`inline-flex items-center px-2 py-0.5 rounded-sm text-[11px] font-semibold ${
+                            sheet.active ? 'bg-[#eefaf2] text-[#107e3e] border border-[#b6e4c8]' : 'bg-[#f0f0f0] text-[#666666] border border-[#d9d9d9]'
+                          }`}>
+                            {sheet.active ? 'فعال' : 'غیرفعال'}
+                          </span>
+                        </td>
+                        <td className="text-center whitespace-nowrap">
+                          <div className="inline-flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEditingSheet(sheet);
+                                setShowInlineAddGrade(false);
+                                setSheetForm({
+                                  ...sheet,
+                                  supplyForm: sheet.supplyForm || 'SHEET',
+                                  densityGCm3: sheet.densityGCm3 || gradeMeta?.densityGCm3 || 7.85,
+                                  ownership: sheet.ownership || 'SAPCO_CONSIGNMENT',
+                                });
+                                setIsNewSheetModalOpen(true);
+                              }}
+                              className="inline-flex items-center gap-1 text-[#007cc0] hover:text-[#006299] font-semibold cursor-pointer"
+                            >
+                              <Edit3 className="w-3.5 h-3.5" />
+                              <span>ویرایش</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                requestConfirm({
+                                  title: `حذف ماده اولیه «${sheet.code}»`,
+                                  message: `آیا از حذف مشخصات مهندسی «${sheet.name}» از جدول مواد اولیه مطمئن هستید؟`,
+                                  confirmLabel: 'بله، حذف شود',
+                                  cancelLabel: 'انصراف',
+                                  variant: 'danger',
+                                  onConfirm: () => {
+                                    setRawSheets(prev => prev.filter(r => r.id !== sheet.id));
+                                    notifyMaster('success', `ردیف ماده اولیه «${sheet.code}» حذف شد.`);
+                                  },
+                                });
+                              }}
+                              className="text-[#bb0000] hover:text-[#8b0000] cursor-pointer"
+                              title="حذف ردیف"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -2339,116 +2633,636 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
         </div>
       )}
 
-      {/* Modal for Adding / Editing Raw Sheet Spec */}
+      {/* Modal for Adding / Editing Complete Raw Material & Sheet Spec */}
       {isNewSheetModalOpen && (
-        <div className="fixed inset-0 z-50 bg-[#333333]/40 backdrop-blur-[1px] flex items-center justify-center p-4">
-          <div className="bg-white border border-[#d9d9d9] rounded-md max-w-md w-full p-5 space-y-4 shadow-xl">
-            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-              <h3 className="text-sm font-bold text-slate-900">
-                {editingSheet ? 'ویرایش مشخصات ورق / ماده اولیه' : 'تعریف ماده اولیه و ورق جدید'}
-              </h3>
+        <div className="fixed inset-0 z-50 bg-[#333333]/45 backdrop-blur-[1px] flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white border border-[#d9d9d9] rounded-md max-w-2xl w-full p-5 space-y-4 shadow-xl my-auto">
+            <div className="flex items-center justify-between border-b border-[#e5e8ec] pb-3">
+              <div>
+                <h3 className="text-sm font-bold text-[#1d2d3e]">
+                  {editingSheet ? 'ویرایش کامل مشخصات ماده اولیه و ورق' : 'تعریف کامل ماده اولیه و ورق جدید (Master Item Catalog)'}
+                </h3>
+                <p className="text-[11px] text-[#556b82] mt-0.5">
+                  اطلاعات این فرم همزمان در جدول مواد اولیه و کاتالوگ کل انبار قطعات ثبت می‌شود.
+                </p>
+              </div>
               <button
                 type="button"
-                onClick={() => setIsNewSheetModalOpen(false)}
-                className="text-slate-400 hover:text-slate-700 cursor-pointer"
+                onClick={() => {
+                  setIsNewSheetModalOpen(false);
+                  setShowInlineAddGrade(false);
+                }}
+                className="text-[#666666] hover:text-[#1d2d3e] cursor-pointer"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
-            <form onSubmit={handleSaveSheetSpec} className="space-y-3 text-xs">
-              <div className="grid grid-cols-2 gap-3">
+            <form onSubmit={handleSaveSheetSpec} className="space-y-3.5 text-xs">
+              {/* Row 1: Code, Material Grade (Editable & Manageable), Supply Form */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
-                  <label className="block font-bold text-slate-700 mb-1">کد ماده (انگلیسی)</label>
+                  <label className="block font-bold text-[#333333] mb-1">کد ماده اولیه (انگلیسی) *</label>
                   <input
                     type="text"
                     required
+                    dir="ltr"
                     value={sheetForm.code || ''}
                     onChange={e => setSheetForm({ ...sheetForm, code: e.target.value })}
-                    placeholder="مثلا SHT-ST12-1.5"
-                    className="w-full border border-slate-200 rounded-xl px-3 py-2 focus:outline-none focus:border-emerald-600"
+                    placeholder="مثلاً SHT-DC04-1.2"
+                    className="w-full border border-[#bfbfbf] rounded-sm px-2.5 py-1.5 font-mono focus:outline-none focus:border-[#007cc0]"
                   />
                 </div>
+
                 <div>
-                  <label className="block font-bold text-slate-700 mb-1">گرید / جنس ورق</label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="font-bold text-[#333333]">گرید و جنس ورق *</label>
+                    <button
+                      type="button"
+                      onClick={() => setShowInlineAddGrade(prev => !prev)}
+                      className="text-[10px] font-bold text-[#007cc0] hover:underline cursor-pointer"
+                    >
+                      {showInlineAddGrade ? 'بستن افزودن سریع' : '+ افزودن جنس جدید'}
+                    </button>
+                  </div>
                   <select
-                    value={sheetForm.grade || 'ST12'}
-                    onChange={e => setSheetForm({ ...sheetForm, grade: e.target.value })}
-                    className="w-full border border-slate-200 rounded-xl px-3 py-2 focus:outline-none focus:border-emerald-600 bg-white"
+                    value={sheetForm.grade || materialGrades[0]?.code || 'ST12'}
+                    onChange={e => {
+                      const nextCode = e.target.value;
+                      const found = materialGrades.find(g => g.code === nextCode);
+                      const nextDensity = found?.densityGCm3 || sheetForm.densityGCm3 || 7.85;
+                      const autoWeight = computeTheoreticalSheetWeight(
+                        sheetForm.thicknessMm,
+                        sheetForm.widthMm,
+                        sheetForm.lengthMm,
+                        nextDensity
+                      );
+                      setSheetForm({
+                        ...sheetForm,
+                        grade: nextCode,
+                        densityGCm3: nextDensity,
+                        standard: found?.standard || sheetForm.standard,
+                        ...(autoWeight > 0 ? { sheetWeightKg: autoWeight } : {}),
+                      });
+                    }}
+                    className="w-full border border-[#bfbfbf] rounded-sm px-2.5 py-1.5 focus:outline-none focus:border-[#007cc0] bg-white font-semibold cursor-pointer"
                   >
-                    <option value="ST12">ST12 (ورق سرد معمولی)</option>
-                    <option value="ST13">ST13 (ورق سرد کششی)</option>
-                    <option value="ST14">ST14 (ورق فوق کشش)</option>
-                    <option value="ST37">ST37 (ورق گرم ساختمانی)</option>
-                    <option value="GALV">گالوانیزه</option>
+                    {materialGrades.map(g => (
+                      <option key={g.id} value={g.code}>
+                        {g.code} — {g.name}
+                      </option>
+                    ))}
+                    {sheetForm.grade &&
+                      !materialGrades.some(g => g.code.toUpperCase() === sheetForm.grade!.toUpperCase()) && (
+                        <option value={sheetForm.grade}>{sheetForm.grade} (سفارشی)</option>
+                      )}
+                  </select>
+                  <div className="mt-0.5 flex items-center justify-between text-[10px] text-[#556b82]">
+                    <span>منبع: بانک گریدهای کارخانه</span>
+                    <button
+                      type="button"
+                      onClick={() => setIsGradeManagerOpen(true)}
+                      className="text-[#007cc0] hover:underline cursor-pointer"
+                    >
+                      ویرایش کل لیست ↗
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block font-bold text-[#333333] mb-1">شکل عرضه / نوع ماده</label>
+                  <select
+                    value={sheetForm.supplyForm || 'SHEET'}
+                    onChange={e =>
+                      setSheetForm({
+                        ...sheetForm,
+                        supplyForm: e.target.value as RawSheetSpec['supplyForm'],
+                      })
+                    }
+                    className="w-full border border-[#bfbfbf] rounded-sm px-2.5 py-1.5 focus:outline-none focus:border-[#007cc0] bg-white cursor-pointer"
+                  >
+                    <option value="COIL">رول / کلاف ورق (Coil)</option>
+                    <option value="SHEET">شیت ورق برش‌خورده (Sheet)</option>
+                    <option value="STRIP">نوار رول‌بری شده (Strip)</option>
+                    <option value="OTHER">لوله / پروفیل / سایر مواد اولیه</option>
                   </select>
                 </div>
               </div>
 
+              {/* Inline Quick Add New Material Grade Box */}
+              {showInlineAddGrade && (
+                <div className="p-3 bg-[#f4f9fd] border border-[#b3ddf2] rounded-sm space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold text-[#004e7a]">
+                      افزودن سریع گرید / جنس ورق جدید به فهرست دائمی سامانه
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setShowInlineAddGrade(false)}
+                      className="text-[#556b82] hover:text-[#1d2d3e] cursor-pointer"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
+                    <input
+                      type="text"
+                      dir="ltr"
+                      value={inlineGradeCode}
+                      onChange={e => setInlineGradeCode(e.target.value)}
+                      placeholder="کد گرید (مثلاً ST52)"
+                      className="border border-[#bfbfbf] bg-white rounded-sm px-2 py-1 font-mono text-xs focus:outline-none focus:border-[#007cc0]"
+                    />
+                    <input
+                      type="text"
+                      value={inlineGradeName}
+                      onChange={e => setInlineGradeName(e.target.value)}
+                      placeholder="شرح جنس (مثلاً ورق سیاه ST52)"
+                      className="border border-[#bfbfbf] bg-white rounded-sm px-2 py-1 text-xs focus:outline-none focus:border-[#007cc0]"
+                    />
+                    <select
+                      value={inlineGradeCategory}
+                      onChange={e => setInlineGradeCategory(e.target.value as MaterialGradeCategory)}
+                      className="border border-[#bfbfbf] bg-white rounded-sm px-2 py-1 text-xs focus:outline-none focus:border-[#007cc0]"
+                    >
+                      {Object.entries(MATERIAL_GRADE_CATEGORIES).map(([k, label]) => (
+                        <option key={k} value={k}>
+                          {label}
+                        </option>
+                      ))}
+                    </select>
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={inlineGradeDensity}
+                        onChange={e => setInlineGradeDensity(e.target.value)}
+                        placeholder="چگالی 7.85"
+                        title="چگالی بر حسب گرم بر سانتی‌متر مکعب"
+                        className="w-20 border border-[#bfbfbf] bg-white rounded-sm px-2 py-1 font-mono text-xs focus:outline-none focus:border-[#007cc0]"
+                      />
+                      <button
+                        type="button"
+                        onClick={handleQuickInlineAddGrade}
+                        className="flex-1 sap-btn-emphasized px-2.5 py-1 text-[11px] font-bold cursor-pointer whitespace-nowrap"
+                      >
+                        ثبت و انتخاب
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Row 2: Full Name */}
               <div>
-                <label className="block font-bold text-slate-700 mb-1">نام کامل ماده اولیه</label>
+                <label className="block font-bold text-[#333333] mb-1">نام کامل ماده اولیه *</label>
                 <input
                   type="text"
                   required
                   value={sheetForm.name || ''}
                   onChange={e => setSheetForm({ ...sheetForm, name: e.target.value })}
-                  placeholder="مثلا ورق سرد ST12 ضخامت ۱/۵"
-                  className="w-full border border-slate-200 rounded-xl px-3 py-2 focus:outline-none focus:border-emerald-600"
+                  placeholder="مثلاً: ورق روغنی فوق‌کشش DC04 ضخامت ۱/۲ میلی‌متر عرض ۱۲۵۰"
+                  className="w-full border border-[#bfbfbf] rounded-sm px-2.5 py-1.5 focus:outline-none focus:border-[#007cc0]"
                 />
               </div>
 
-              <div className="grid grid-cols-3 gap-3">
+              {/* Row 3: Dimensions & Auto Weight Calculator */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 <div>
-                  <label className="block font-bold text-slate-700 mb-1">ضخامت (mm)</label>
+                  <label className="block font-bold text-[#333333] mb-1">ضخامت (mm)</label>
                   <input
                     type="number"
-                    step="0.1"
+                    step="0.05"
                     value={sheetForm.thicknessMm ?? 1.0}
-                    onChange={e =>
-                      setSheetForm({ ...sheetForm, thicknessMm: parseFloat(e.target.value) || 0 })
-                    }
-                    className="w-full border border-slate-200 rounded-xl px-3 py-2 focus:outline-none focus:border-emerald-600"
+                    onChange={e => {
+                      const t = parseFloat(e.target.value) || 0;
+                      const autoW = computeTheoreticalSheetWeight(t, sheetForm.widthMm, sheetForm.lengthMm, sheetForm.densityGCm3);
+                      setSheetForm({
+                        ...sheetForm,
+                        thicknessMm: t,
+                        ...(autoW > 0 ? { sheetWeightKg: autoW } : {}),
+                      });
+                    }}
+                    className="w-full border border-[#bfbfbf] rounded-sm px-2.5 py-1.5 font-mono focus:outline-none focus:border-[#007cc0]"
                   />
                 </div>
                 <div>
-                  <label className="block font-bold text-slate-700 mb-1">ابعاد ورق (mm)</label>
-                  <input
-                    type="text"
-                    value={sheetForm.dimensionsMm || ''}
-                    onChange={e => setSheetForm({ ...sheetForm, dimensionsMm: e.target.value })}
-                    className="w-full border border-slate-200 rounded-xl px-3 py-2 focus:outline-none focus:border-emerald-600"
-                  />
-                </div>
-                <div>
-                  <label className="block font-bold text-slate-700 mb-1">وزن هر برگ (kg)</label>
+                  <label className="block font-bold text-[#333333] mb-1">عرض ورق/رول (mm)</label>
                   <input
                     type="number"
-                    step="0.1"
+                    step="1"
+                    value={sheetForm.widthMm ?? ''}
+                    onChange={e => {
+                      const w = parseFloat(e.target.value) || 0;
+                      const l = Number(sheetForm.lengthMm) || 0;
+                      const autoWeight = computeTheoreticalSheetWeight(sheetForm.thicknessMm, w, l, sheetForm.densityGCm3);
+                      setSheetForm({
+                        ...sheetForm,
+                        widthMm: w || undefined,
+                        dimensionsMm:
+                          w > 0 && l > 0
+                            ? `${toPersianDigits(w.toLocaleString('en-US'))} × ${toPersianDigits(l.toLocaleString('en-US'))}`
+                            : sheetForm.dimensionsMm,
+                        ...(autoWeight > 0 ? { sheetWeightKg: autoWeight } : {}),
+                      });
+                    }}
+                    placeholder="مثلاً 1250"
+                    className="w-full border border-[#bfbfbf] rounded-sm px-2.5 py-1.5 font-mono focus:outline-none focus:border-[#007cc0]"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-[#333333] mb-1">طول شیت (mm)</label>
+                  <input
+                    type="number"
+                    step="1"
+                    value={sheetForm.lengthMm ?? ''}
+                    onChange={e => {
+                      const l = parseFloat(e.target.value) || 0;
+                      const w = Number(sheetForm.widthMm) || 0;
+                      const autoWeight = computeTheoreticalSheetWeight(sheetForm.thicknessMm, w, l, sheetForm.densityGCm3);
+                      setSheetForm({
+                        ...sheetForm,
+                        lengthMm: l || undefined,
+                        dimensionsMm:
+                          w > 0 && l > 0
+                            ? `${toPersianDigits(w.toLocaleString('en-US'))} × ${toPersianDigits(l.toLocaleString('en-US'))}`
+                            : sheetForm.dimensionsMm,
+                        ...(autoWeight > 0 ? { sheetWeightKg: autoWeight } : {}),
+                      });
+                    }}
+                    placeholder="مثلاً 2500"
+                    className="w-full border border-[#bfbfbf] rounded-sm px-2.5 py-1.5 font-mono focus:outline-none focus:border-[#007cc0]"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-[#333333] mb-1">چگالی (g/cm³)</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={sheetForm.densityGCm3 ?? 7.85}
+                    onChange={e => {
+                      const d = parseFloat(e.target.value) || 7.85;
+                      const autoWeight = computeTheoreticalSheetWeight(sheetForm.thicknessMm, sheetForm.widthMm, sheetForm.lengthMm, d);
+                      setSheetForm({
+                        ...sheetForm,
+                        densityGCm3: d,
+                        ...(autoWeight > 0 ? { sheetWeightKg: autoWeight } : {}),
+                      });
+                    }}
+                    className="w-full border border-[#bfbfbf] rounded-sm px-2.5 py-1.5 font-mono focus:outline-none focus:border-[#007cc0]"
+                  />
+                </div>
+              </div>
+
+              {/* Row 4: Unit Weight, Dimensions text, Unit of Measure, Reorder Point */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div>
+                  <label className="block font-bold text-[#333333] mb-1">وزن هر برگ / واحد (kg)</label>
+                  <input
+                    type="number"
+                    step="0.01"
                     value={sheetForm.sheetWeightKg ?? 24.5}
                     onChange={e =>
                       setSheetForm({ ...sheetForm, sheetWeightKg: parseFloat(e.target.value) || 0 })
                     }
-                    className="w-full border border-slate-200 rounded-xl px-3 py-2 focus:outline-none focus:border-emerald-600"
+                    className="w-full border border-[#bfbfbf] rounded-sm px-2.5 py-1.5 font-mono focus:outline-none focus:border-[#007cc0]"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-[#333333] mb-1">متن ابعاد نمایشی</label>
+                  <input
+                    type="text"
+                    value={sheetForm.dimensionsMm || ''}
+                    onChange={e => setSheetForm({ ...sheetForm, dimensionsMm: e.target.value })}
+                    placeholder="۱,۲۵۰ × ۲,۵۰۰"
+                    className="w-full border border-[#bfbfbf] rounded-sm px-2.5 py-1.5 focus:outline-none focus:border-[#007cc0]"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-[#333333] mb-1">واحد سنجش انبار</label>
+                  <select
+                    value={sheetForm.unit || 'کیلوگرم'}
+                    onChange={e => setSheetForm({ ...sheetForm, unit: e.target.value })}
+                    className="w-full border border-[#bfbfbf] rounded-sm px-2.5 py-1.5 bg-white focus:outline-none focus:border-[#007cc0] cursor-pointer"
+                  >
+                    <option value="کیلوگرم">کیلوگرم (KG)</option>
+                    <option value="برگ">برگ / شیت (PCS)</option>
+                    <option value="عدد">عدد (PCS)</option>
+                    <option value="متر">متر (M)</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-bold text-[#333333] mb-1">حداقل موجودی (نقطه سفارش)</label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={sheetForm.minStock ?? 0}
+                    onChange={e => setSheetForm({ ...sheetForm, minStock: parseFloat(e.target.value) || 0 })}
+                    placeholder="مثلاً 2000"
+                    className="w-full border border-[#bfbfbf] rounded-sm px-2.5 py-1.5 font-mono focus:outline-none focus:border-[#007cc0]"
                   />
                 </div>
               </div>
 
-              <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
+              {/* Row 5: Ownership, Supplier, Standard, Status */}
+              <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+                <div>
+                  <label className="block font-bold text-[#333333] mb-1">مالکیت / نوع تأمین</label>
+                  <select
+                    value={sheetForm.ownership || 'SAPCO_CONSIGNMENT'}
+                    onChange={e =>
+                      setSheetForm({
+                        ...sheetForm,
+                        ownership: e.target.value as RawSheetSpec['ownership'],
+                      })
+                    }
+                    className="w-full border border-[#bfbfbf] rounded-sm px-2.5 py-1.5 bg-white focus:outline-none focus:border-[#007cc0] cursor-pointer"
+                  >
+                    <option value="SAPCO_CONSIGNMENT">امانی ساپکو / مشتری</option>
+                    <option value="LOCAL_PURCHASE">خرید بازار داخلی</option>
+                    <option value="IMPORTED">وارداتی / اختصاصی</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-bold text-[#333333] mb-1">تأمین‌کننده / کارخانه سازنده</label>
+                  <input
+                    type="text"
+                    value={sheetForm.supplierName || ''}
+                    onChange={e => setSheetForm({ ...sheetForm, supplierName: e.target.value })}
+                    placeholder="مثلاً فولاد مبارکه"
+                    className="w-full border border-[#bfbfbf] rounded-sm px-2.5 py-1.5 focus:outline-none focus:border-[#007cc0]"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-[#333333] mb-1">استاندارد فنی</label>
+                  <input
+                    type="text"
+                    dir="ltr"
+                    value={sheetForm.standard || ''}
+                    onChange={e => setSheetForm({ ...sheetForm, standard: e.target.value })}
+                    placeholder="EN 10130 / DIN 1623"
+                    className="w-full border border-[#bfbfbf] rounded-sm px-2.5 py-1.5 font-mono focus:outline-none focus:border-[#007cc0]"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-[#333333] mb-1">وضعیت در کاتالوگ</label>
+                  <select
+                    value={sheetForm.active !== false ? 'ACTIVE' : 'INACTIVE'}
+                    onChange={e => setSheetForm({ ...sheetForm, active: e.target.value === 'ACTIVE' })}
+                    className="w-full border border-[#bfbfbf] rounded-sm px-2.5 py-1.5 bg-white focus:outline-none focus:border-[#007cc0] cursor-pointer"
+                  >
+                    <option value="ACTIVE">فعال</option>
+                    <option value="INACTIVE">غیرفعال</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Row 6: Technical Notes */}
+              <div>
+                <label className="block font-bold text-[#333333] mb-1">توضیحات فنی و کاربرد در خطوط تولید</label>
+                <input
+                  type="text"
+                  value={sheetForm.description || ''}
+                  onChange={e => setSheetForm({ ...sheetForm, description: e.target.value })}
+                  placeholder="مثلاً: مخصوص پرس ۸۰۰ تن، کشش عمیق بدون نیاز به روغن‌کاری مجدد..."
+                  className="w-full border border-[#bfbfbf] rounded-sm px-2.5 py-1.5 focus:outline-none focus:border-[#007cc0]"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-3 border-t border-[#e5e8ec]">
                 <button
                   type="button"
-                  onClick={() => setIsNewSheetModalOpen(false)}
-                  className="px-4 py-2 rounded-xl border border-slate-200 text-slate-600 hover:bg-slate-50 cursor-pointer"
+                  onClick={() => {
+                    setIsNewSheetModalOpen(false);
+                    setShowInlineAddGrade(false);
+                  }}
+                  className="sap-btn-standard px-4 py-1.5 text-xs cursor-pointer"
                 >
                   انصراف
                 </button>
                 <button
                   type="submit"
-                  className={`px-5 py-2 rounded-xl font-bold cursor-pointer ${themeMeta.buttonPrimaryClass}`}
+                  className="sap-btn-emphasized px-5 py-1.5 text-xs font-bold cursor-pointer"
                 >
-                  ذخیره مشخصات ورق
+                  ذخیره مشخصات و همگام‌سازی با انبار قطعات
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Material Grades & Sheet Types Master Manager Modal */}
+      {isGradeManagerOpen && (
+        <div className="fixed inset-0 z-[60] bg-[#333333]/50 backdrop-blur-[1px] flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white border border-[#d9d9d9] rounded-md max-w-3xl w-full p-5 space-y-4 shadow-xl my-auto">
+            <div className="flex items-center justify-between border-b border-[#e5e8ec] pb-3">
+              <div>
+                <h3 className="text-sm font-bold text-[#1d2d3e]">
+                  بانک جامع گریدها و جنس ورق‌های کارخانه (Material Grades Master)
+                </h3>
+                <p className="text-[11px] text-[#556b82] mt-0.5">
+                  منبع اصلی لیست کشویی «گرید و جنس ورق» در فرم تعریف ماده اولیه و انبار قطعات — هر جنس جدیدی که اینجا اضافه یا ویرایش کنید بلافاصله در کل سامانه در دسترس است.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsGradeManagerOpen(false)}
+                className="text-[#666666] hover:text-[#1d2d3e] cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Add / Edit Grade Form */}
+            <form
+              onSubmit={handleSaveGradeManagerForm}
+              className="p-3.5 bg-[#f7fbff] border border-[#c5e0f7] rounded-sm space-y-3 text-xs"
+            >
+              <div className="font-bold text-[#004e7a] text-[11px]">
+                {editingGradeId ? 'ویرایش گرید انتخاب‌شده' : 'افزودن گرید / جنس ورق جدید'}
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                <div>
+                  <label className="block text-[11px] font-semibold text-[#333333] mb-1">کد گرید (انگلیسی) *</label>
+                  <input
+                    type="text"
+                    required
+                    dir="ltr"
+                    value={gradeFormCode}
+                    onChange={e => setGradeFormCode(e.target.value)}
+                    placeholder="مثلاً: ST52, DC06, SS316"
+                    className="w-full bg-white border border-[#bfbfbf] rounded-sm px-2.5 py-1.5 font-mono focus:outline-none focus:border-[#007cc0]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-[#333333] mb-1">نام و شرح فارسی جنس ورق *</label>
+                  <input
+                    type="text"
+                    required
+                    value={gradeFormName}
+                    onChange={e => setGradeFormName(e.target.value)}
+                    placeholder="مثلاً: ورق فولادی استحکام بالا ST52"
+                    className="w-full bg-white border border-[#bfbfbf] rounded-sm px-2.5 py-1.5 focus:outline-none focus:border-[#007cc0]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-[#333333] mb-1">گروه جنس</label>
+                  <select
+                    value={gradeFormCategory}
+                    onChange={e => setGradeFormCategory(e.target.value as MaterialGradeCategory)}
+                    className="w-full bg-white border border-[#bfbfbf] rounded-sm px-2.5 py-1.5 focus:outline-none focus:border-[#007cc0]"
+                  >
+                    {Object.entries(MATERIAL_GRADE_CATEGORIES).map(([k, label]) => (
+                      <option key={k} value={k}>
+                        {label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-[#333333] mb-1">استاندارد مرجع</label>
+                  <input
+                    type="text"
+                    dir="ltr"
+                    value={gradeFormStandard}
+                    onChange={e => setGradeFormStandard(e.target.value)}
+                    placeholder="EN 10130 / JIS / ASTM"
+                    className="w-full bg-white border border-[#bfbfbf] rounded-sm px-2.5 py-1.5 font-mono focus:outline-none focus:border-[#007cc0]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-[#333333] mb-1">چگالی (g/cm³)</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={gradeFormDensity}
+                    onChange={e => setGradeFormDensity(e.target.value)}
+                    className="w-full bg-white border border-[#bfbfbf] rounded-sm px-2.5 py-1.5 font-mono focus:outline-none focus:border-[#007cc0]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-[#333333] mb-1">توضیح کاربرد</label>
+                  <input
+                    type="text"
+                    value={gradeFormNotes}
+                    onChange={e => setGradeFormNotes(e.target.value)}
+                    placeholder="کاربرد در کشش، شاسی و..."
+                    className="w-full bg-white border border-[#bfbfbf] rounded-sm px-2.5 py-1.5 focus:outline-none focus:border-[#007cc0]"
+                  />
+                </div>
+              </div>
+              <div className="flex items-center justify-end gap-2">
+                {editingGradeId && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditingGradeId(null);
+                      setGradeFormCode('');
+                      setGradeFormName('');
+                      setGradeFormStandard('');
+                      setGradeFormDensity('7.85');
+                      setGradeFormNotes('');
+                    }}
+                    className="sap-btn-standard px-3 py-1 text-xs cursor-pointer"
+                  >
+                    انصراف از ویرایش
+                  </button>
+                )}
+                <button
+                  type="submit"
+                  className="sap-btn-emphasized px-4 py-1 text-xs font-bold cursor-pointer"
+                >
+                  {editingGradeId ? 'ذخیره تغییرات گرید' : '+ افزودن به بانک گریدها'}
+                </button>
+              </div>
+            </form>
+
+            {/* Grades List Table */}
+            <div className="max-h-72 overflow-y-auto border border-[#d9d9d9] rounded-sm">
+              <table className="sap-table-compact w-full text-right text-xs">
+                <thead className="bg-[#fafbfc] border-b border-[#d9d9d9] text-[#333333] sticky top-0">
+                  <tr>
+                    <th className="py-2 px-2.5">کد گرید</th>
+                    <th className="py-2 px-2.5">شرح جنس ورق</th>
+                    <th className="py-2 px-2.5">گروه</th>
+                    <th className="py-2 px-2.5">استاندارد</th>
+                    <th className="py-2 px-2.5">چگالی</th>
+                    <th className="py-2 px-2.5 text-left">عملیات</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#eeeeee]">
+                  {materialGrades.map(g => (
+                    <tr key={g.id} className="hover:bg-[#f4f8fc]">
+                      <td className="py-1.5 px-2.5 font-mono font-bold text-[#007cc0]">{g.code}</td>
+                      <td className="py-1.5 px-2.5 font-medium text-[#1d2d3e]">
+                        <div>{g.name}</div>
+                        {g.notes && <div className="text-[10px] text-[#666666]">{g.notes}</div>}
+                      </td>
+                      <td className="py-1.5 px-2.5 text-[11px] text-[#555555]">
+                        {MATERIAL_GRADE_CATEGORIES[g.category] || g.category}
+                      </td>
+                      <td className="py-1.5 px-2.5 font-mono text-[11px] text-[#666666]">
+                        {g.standard || '—'}
+                      </td>
+                      <td className="py-1.5 px-2.5 font-mono tabular-nums">{g.densityGCm3}</td>
+                      <td className="py-1.5 px-2.5 text-left whitespace-nowrap">
+                        <div className="inline-flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEditingGradeId(g.id);
+                              setGradeFormCode(g.code);
+                              setGradeFormName(g.name);
+                              setGradeFormCategory(g.category);
+                              setGradeFormStandard(g.standard || '');
+                              setGradeFormDensity(String(g.densityGCm3 || 7.85));
+                              setGradeFormNotes(g.notes || '');
+                            }}
+                            className="text-[#007cc0] hover:underline font-semibold cursor-pointer"
+                          >
+                            ویرایش
+                          </button>
+                          {materialGrades.length > 1 && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const updated = deleteMaterialGrade(g.id);
+                                setMaterialGrades(updated);
+                              }}
+                              className="text-[#bb0000] hover:underline cursor-pointer"
+                            >
+                              حذف
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="flex items-center justify-between pt-2 border-t border-[#e5e8ec] text-xs">
+              <button
+                type="button"
+                onClick={() => {
+                  const reset = resetMaterialGrades();
+                  setMaterialGrades(reset);
+                  notifyMaster('success', 'فهرست گریدها به حالت استاندارد اولیه بازنشانی شد.');
+                }}
+                className="text-[11px] text-[#556b82] hover:text-[#1d2d3e] hover:underline cursor-pointer"
+              >
+                بازنشانی به لیست پیش‌فرض استاندارد
+              </button>
+              <button
+                type="button"
+                onClick={() => setIsGradeManagerOpen(false)}
+                className="sap-btn-standard px-4 py-1.5 text-xs font-semibold cursor-pointer"
+              >
+                بستن
+              </button>
+            </div>
           </div>
         </div>
       )}

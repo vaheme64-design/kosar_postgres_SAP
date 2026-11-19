@@ -139,6 +139,7 @@ export interface Part {
   carModel?: string;          // پژو ۲۰۶، تارا، دنا پلاس، شاهین، کوییک
   thicknessMm?: number;       // ضخامت ورق به میلیمتر
   materialGrade?: string;     // گرید فولاد: ST12, ST14, DX51D, ST37
+  description?: string;       // توضیحات فنی، ابعاد، استاندارد و شکل عرضه
   minStock?: number;          // حداقل موجودی اطمینان
   maxStock?: number;          // حداکثر ظرفیت انبار
   leadTimeDays?: number;      // زمان انتظار تدارک یا ساخت (روز)

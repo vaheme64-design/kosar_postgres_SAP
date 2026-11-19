@@ -1329,6 +1329,7 @@ function AppContent() {
               parts={parts}
               machines={machines}
               operators={operators}
+              halls={halls}
               stageBalances={summary?.stageBalances || []}
               initialView={router.route.wipSubTab}
               initialTraceQuery={router.route.docQuery || undefined}

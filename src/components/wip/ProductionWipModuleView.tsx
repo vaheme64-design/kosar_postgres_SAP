@@ -28,6 +28,7 @@ import {
   Machine,
   Operator,
   Routing,
+  FactoryHall,
   StageInventorySummary,
   ProcessType,
   FACTORY_STAGES,
@@ -53,6 +54,7 @@ import { TraceabilityInquiryView } from './TraceabilityInquiryView';
 import { useErpRouter } from '../../context/RouterContext';
 import { useEnterpriseUx } from '../../context/EnterpriseUxContext';
 import { MoRelationalGuideModal } from '../production/MoRelationalGuideModal';
+import { WipHallMoDistributionChart } from './WipHallMoDistributionChart';
 
 export type WipViewMode =
   | 'UNIFIED_DIRECTORY'
@@ -120,6 +122,7 @@ interface ProductionWipModuleViewProps {
   parts: Part[];
   machines: Machine[];
   operators: Operator[];
+  halls?: FactoryHall[];
   stageBalances: StageInventorySummary[];
   initialView?: WipViewMode;
   initialTraceQuery?: string;
@@ -131,6 +134,7 @@ export const ProductionWipModuleView: React.FC<ProductionWipModuleViewProps> = (
   parts,
   machines,
   operators,
+  halls = [],
   stageBalances,
   initialView,
   initialTraceQuery,
@@ -899,6 +903,7 @@ export const ProductionWipModuleView: React.FC<ProductionWipModuleViewProps> = (
                   <option value="ALL">وضعیت MO: همه</option>
                   <option value="IN_PROGRESS">در جریان ساخت</option>
                   <option value="RELEASED">صادرشده به سالن</option>
+                  <option value="PLANNED">متوقف / منتظر شروع</option>
                   <option value="COMPLETED">تکمیل‌شده</option>
                 </select>
               </div>
@@ -1055,6 +1060,21 @@ export const ProductionWipModuleView: React.FC<ProductionWipModuleViewProps> = (
           </div>
         </div>
       )}
+
+      {/* Visual MO Status Distribution Chart across Production Halls */}
+      {!loading &&
+        (activeView === 'UNIFIED_DIRECTORY' ||
+          activeView === 'ORDERS' ||
+          activeView === 'DASHBOARD' ||
+          activeView === 'BOTTLENECK') && (
+          <WipHallMoDistributionChart
+            orders={orders}
+            machines={machines}
+            halls={halls}
+            activeStatusFilter={statusFilter}
+            onSelectStatusFilter={setStatusFilter}
+          />
+        )}
 
       {/* Real-Time Stage Bottleneck Visualizer (Embedded strip in Unified/Dashboard OR Full Panel in BOTTLENECK mode) */}
       {(activeView === 'BOTTLENECK' || activeView === 'UNIFIED_DIRECTORY' || activeView === 'DASHBOARD') && (
