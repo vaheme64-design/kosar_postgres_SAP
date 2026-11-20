@@ -11,6 +11,7 @@ import {
 import { FactoryHall, Machine } from '../../types/inventory';
 import { ManufacturingOrder } from '../../types/productionWip';
 import { formatNumber, toPersianDigits } from '../../utils/formatters';
+import { usePersistedOpen } from '../../hooks/usePersistedCollapse';
 
 interface WipHallMoDistributionChartProps {
   orders: ManufacturingOrder[];
@@ -81,7 +82,7 @@ export const WipHallMoDistributionChart: React.FC<WipHallMoDistributionChartProp
   activeStatusFilter = 'ALL',
   onSelectStatusFilter,
 }) => {
-  const [collapsed, setCollapsed] = useState(false);
+  const [isOpen, , toggleOpen] = usePersistedOpen('wip_hall_distribution_open', false);
   const [hoveredSegment, setHoveredSegment] = useState<'IN_PROGRESS' | 'STOPPED' | 'COMPLETED' | null>(null);
 
   const { totals, hallRows } = useMemo(() => {
@@ -271,8 +272,8 @@ export const WipHallMoDistributionChart: React.FC<WipHallMoDistributionChartProp
           </div>
         </div>
 
-        <div className="flex items-center gap-3 text-[11px] shrink-0 tabular-nums">
-          <div className="hidden md:flex items-center gap-2.5 text-[#556b82]">
+        <div className="flex items-center gap-3 text-[11px] shrink-0 tabular-nums flex-wrap">
+          <div className="flex items-center gap-2.5 text-[#556b82]">
             <span className="inline-flex items-center gap-1">
               <span className="w-2.5 h-2.5 rounded-xs bg-[#007cc0] inline-block" />
               در حال انجام: <strong className="font-mono text-[#007cc0]">{toPersianDigits(totals.inProgress)}</strong>
@@ -289,16 +290,57 @@ export const WipHallMoDistributionChart: React.FC<WipHallMoDistributionChartProp
 
           <button
             type="button"
-            onClick={() => setCollapsed(prev => !prev)}
+            onClick={toggleOpen}
             className="sap-btn-standard px-2 py-0.5 text-[11px] inline-flex items-center gap-1 cursor-pointer whitespace-nowrap"
           >
-            <span>{collapsed ? 'نمایش نمودار' : 'جمع‌کردن'}</span>
-            {collapsed ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronUp className="w-3.5 h-3.5" />}
+            <span>{isOpen ? 'بستن نمودار' : 'باز کردن نمودار'}</span>
+            {isOpen ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
           </button>
         </div>
       </div>
 
-      {!collapsed && (
+      {/* At-a-Glance Inline Proportional Bar when collapsed */}
+      {!isOpen && (
+        <div className="px-4 py-2 bg-[#fcfcfd] flex flex-wrap items-center justify-between gap-3 text-[11px] tabular-nums">
+          <div className="flex items-center gap-2 flex-1 min-w-[200px]">
+            <span className="text-[#556b82] whitespace-nowrap">
+              نمای کلی ({toPersianDigits(totals.all)} MO در {toPersianDigits(hallRows.length)} سالن):
+            </span>
+            <div className="flex-1 h-2 bg-[#eef1f4] rounded-full overflow-hidden flex">
+              {totals.inProgress > 0 && (
+                <div
+                  className="h-full bg-[#007cc0]"
+                  style={{ width: `${inProgressPct}%` }}
+                  title={`در حال انجام: ${totals.inProgress}`}
+                />
+              )}
+              {totals.stopped > 0 && (
+                <div
+                  className="h-full bg-[#e9730c]"
+                  style={{ width: `${stoppedPct}%` }}
+                  title={`متوقف/منتظر: ${totals.stopped}`}
+                />
+              )}
+              {totals.completed > 0 && (
+                <div
+                  className="h-full bg-[#107e3e]"
+                  style={{ width: `${completedPct}%` }}
+                  title={`تکمیل‌شده: ${totals.completed}`}
+                />
+              )}
+            </div>
+          </div>
+          <div className="flex items-center gap-2.5 text-[#556b82] font-mono">
+            {hallRows.slice(0, 3).map(h => (
+              <span key={h.hallKey} className="font-sans whitespace-nowrap">
+                {h.hallName}: <strong className="font-mono text-[#1d2d3e]">{toPersianDigits(h.total)}</strong>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {isOpen && (
         <div className="p-4 grid grid-cols-1 lg:grid-cols-12 gap-5 items-center">
           {/* Right: Overall Status Distribution Donut Chart + Interactive Legend */}
           <div className="lg:col-span-4 flex flex-col sm:flex-row lg:flex-row items-center gap-4 lg:border-l lg:border-[#eaeef2] lg:pl-4">

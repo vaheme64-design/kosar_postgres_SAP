@@ -22,6 +22,7 @@ import { useErpRouter } from '../../context/RouterContext';
 import { CreateMoModal } from '../wip/CreateMoModal';
 import { OperationProductionModal } from '../wip/OperationProductionModal';
 import { MoRelationalGuideModal } from './MoRelationalGuideModal';
+import { usePersistedOpen } from '../../hooks/usePersistedCollapse';
 
 interface MoQuickTrackerWidgetProps {
   parts: Part[];
@@ -44,13 +45,13 @@ export const MoQuickTrackerWidget: React.FC<MoQuickTrackerWidgetProps> = ({
   parts,
   routings,
   onRefreshData,
-  defaultCollapsed = false,
+  defaultCollapsed = true,
   onOpenFullMoList,
 }) => {
   const router = useErpRouter();
   const [orders, setOrders] = useState<ManufacturingOrder[]>([]);
   const [loading, setLoading] = useState(false);
-  const [collapsed, setCollapsed] = useState(defaultCollapsed);
+  const [collapsed, , toggleCollapsed] = usePersistedOpen('mo_quick_tracker_collapsed', defaultCollapsed);
   const [statusFilter, setStatusFilter] = useState<string>('ALL');
   const [searchQuery, setSearchQuery] = useState('');
   const [feedback, setFeedback] = useState<{ ok: boolean; text: string } | null>(null);
@@ -207,7 +208,7 @@ export const MoQuickTrackerWidget: React.FC<MoQuickTrackerWidgetProps> = ({
         <div className="flex items-center gap-2 min-w-0">
           <button
             type="button"
-            onClick={() => setCollapsed(prev => !prev)}
+            onClick={toggleCollapsed}
             className="p-1 rounded hover:bg-[#e8edf2] text-[#333333] cursor-pointer"
             title={collapsed ? 'باز کردن پایش سریع MO' : 'جمع کردن ویجت'}
           >
@@ -215,12 +216,17 @@ export const MoQuickTrackerWidget: React.FC<MoQuickTrackerWidgetProps> = ({
           </button>
           <Layers className="w-4 h-4 text-[#007cc0] shrink-0" />
           <div className="min-w-0">
-            <div className="flex items-center gap-2 flex-wrap">
+            <div className="flex items-center gap-2 flex-wrap tabular-nums">
               <span className="text-xs font-bold text-[#1d2d3e]">
                 پایش سریع دستورات ساخت (MO) و کار در جریان (WIP)
               </span>
-              <span className="px-1.5 py-0.5 rounded bg-white border border-[#d9d9d9] text-[10px] font-mono font-bold text-[#007cc0] tabular-nums">
+              <span className="px-1.5 py-0.5 rounded bg-white border border-[#d9d9d9] text-[10px] font-mono font-bold text-[#007cc0]">
                 {toPersianDigits(orders.length)} دستور
+              </span>
+              <span className="text-[11px] text-[#556b82] hidden sm:inline">
+                در جریان: <strong className="text-[#b45309] font-mono">{toPersianDigits(orders.filter(o => o.status === 'IN_PROGRESS').length)}</strong>
+                {' · '}آماده: <strong className="text-[#007cc0] font-mono">{toPersianDigits(orders.filter(o => o.status === 'RELEASED').length)}</strong>
+                {' · '}تکمیل: <strong className="text-[#107e3e] font-mono">{toPersianDigits(orders.filter(o => o.status === 'COMPLETED').length)}</strong>
               </span>
             </div>
           </div>

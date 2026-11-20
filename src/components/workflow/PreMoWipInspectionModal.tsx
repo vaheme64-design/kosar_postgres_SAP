@@ -23,6 +23,7 @@ import { HighwayPartScenario } from './FactoryHighwayWorkbench';
 import { formatNumber, toPersianDigits } from '../../utils/formatters';
 import { INITIAL_ADVANCED_BOMS, getAllBoms } from '../../server/bomAndParallelEngine';
 import { useErpRouter } from '../../context/RouterContext';
+import { usePersistedExpandMap } from '../../hooks/usePersistedCollapse';
 
 export interface PreMoWipInspectionModalProps {
   isOpen: boolean;
@@ -91,10 +92,12 @@ export const PreMoWipInspectionModal: React.FC<PreMoWipInspectionModalProps> = (
 }) => {
   const { traceDocument } = useErpRouter();
   const [issuedSubMos, setIssuedSubMos] = useState<Record<string, { code: string; qty: number }>>({});
-  const [expandedStages, setExpandedStages] = useState<Record<string, boolean>>({
-    'CMP-ECU-MAIN': true,
-    'CMP-ECU-COMP': true,
-  });
+  const {
+    toggle: toggleExpand,
+    isExpanded: isStageExpanded,
+    expandAll: expandAllStages,
+    collapseAll: collapseAllStages,
+  } = usePersistedExpandMap('pre_mo_wip_stages', {});
   const [viewMode, setViewMode] = useState<'TREE_VIEW' | 'STATIONS_DETAIL'>('TREE_VIEW');
 
   // Match BOM for current part
@@ -482,13 +485,6 @@ export const PreMoWipInspectionModal: React.FC<PreMoWipInspectionModalProps> = (
     });
   };
 
-  const toggleExpand = (rowId: string) => {
-    setExpandedStages(prev => ({
-      ...prev,
-      [rowId]: !prev[rowId],
-    }));
-  };
-
   if (!isOpen) return null;
 
   return (
@@ -687,15 +683,33 @@ export const PreMoWipInspectionModal: React.FC<PreMoWipInspectionModalProps> = (
 
             {/* 2. TREE BRANCHES (CHILDREN NODES) */}
             <div className="mr-3 sm:mr-5 pr-3 sm:pr-5 border-r-2 border-[#007cc0]/40 space-y-3">
-              <div className="text-xs font-semibold text-[#666666] flex items-center gap-1.5">
-                <GitBranch className="w-4 h-4 text-[#007cc0]" />
-                <span>اجزای متشکله پیش‌ساخته، قطعات نیمه‌ساخته و اتصالات درختی (Child Components):</span>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="text-xs font-semibold text-[#666666] flex items-center gap-1.5">
+                  <GitBranch className="w-4 h-4 text-[#007cc0]" />
+                  <span>اجزای متشکله پیش‌ساخته، قطعات نیمه‌ساخته و اتصالات درختی (Child Components):</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => expandAllStages(subComponents.filter(c => c.stages && c.stages.length > 0).map(c => c.id))}
+                    className="sap-btn-standard px-2 py-0.5 text-[10px] cursor-pointer"
+                  >
+                    باز کردن همه ایستگاه‌ها
+                  </button>
+                  <button
+                    type="button"
+                    onClick={collapseAllStages}
+                    className="sap-btn-standard px-2 py-0.5 text-[10px] cursor-pointer"
+                  >
+                    بستن همه
+                  </button>
+                </div>
               </div>
 
               {subComponents.map((component) => {
                 const isSubMoIssued = component.subMoIssued || Boolean(issuedSubMos[component.id]);
                 const currentSubMoCode = component.issuedSubMoCode || issuedSubMos[component.id]?.code;
-                const isExpanded = Boolean(expandedStages[component.id]);
+                const isExpanded = isStageExpanded(component.id);
 
                 return (
                   <div

@@ -17,6 +17,7 @@ import { Machine } from '../../types/inventory';
 import { ManufacturingOrder } from '../../types/productionWip';
 import { formatNumber, toPersianDigits } from '../../utils/formatters';
 import { useErpRouter } from '../../context/RouterContext';
+import { usePersistedOpen } from '../../hooks/usePersistedCollapse';
 
 interface DashboardMoWipWidgetProps {
   machines: Machine[];
@@ -69,7 +70,7 @@ export const DashboardMoWipWidget: React.FC<DashboardMoWipWidgetProps> = ({
   const [orders, setOrders] = useState<ManufacturingOrder[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
-  const [expandedDetails, setExpandedDetails] = useState<boolean>(false);
+  const [expandedDetails, setExpandedDetails] = usePersistedOpen('dashboard_mo_wip_details', false);
   const [statusFilter, setStatusFilter] = useState<WidgetStatusFilter>('ALL');
 
   const fetchOrders = useCallback(async () => {

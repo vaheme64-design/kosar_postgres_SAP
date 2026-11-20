@@ -25,12 +25,15 @@ import {
   Trash2,
   Save,
   X,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 import { UserRoleProfile } from '../types/inventory';
 import { CloudSyncCheckResult } from '../types/dbSync';
 import { toPersianDigits } from '../utils/formatters';
 import { KpiCardsSkeleton } from './ui/Skeleton';
 import { useEnterpriseUx } from '../context/EnterpriseUxContext';
+import { usePersistedOpen } from '../hooks/usePersistedCollapse';
 import {
   clearSavedDbConnectionUrl,
   isMaskedDbUrl,
@@ -91,6 +94,9 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
   const [dbStatus, setDbStatus] = useState<any>(null);
   const [loadingDb, setLoadingDb] = useState<boolean>(true);
   const [copiedCmd, setCopiedCmd] = useState<string | null>(null);
+  const [showSchemaTables, , toggleSchemaTables] = usePersistedOpen('db_arch_schema_tables_open', false);
+  const [showPrismaCli, , togglePrismaCli] = usePersistedOpen('db_arch_prisma_cli_open', false);
+  const [showEnvDocs, , toggleEnvDocs] = usePersistedOpen('db_arch_env_docs_open', false);
 
   // Customizable Real Factory Users & Access Level Titles
   const [customUsers, setCustomUsers] = useState<CustomFactoryUser[]>(() => loadCustomUsers());
@@ -1550,6 +1556,12 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
                   <span>{activeGitBusy === 'PULL' ? 'در حال به‌روزرسانی سیستم...' : '۳. دریافت از آنلاین به محلی (Pull ↓)'}</span>
                 </button>
               </div>
+
+              <div className="bg-white border border-[#d9e2ec] rounded-sm px-3 py-2 text-[11px] text-[#445566] leading-relaxed">
+                <strong className="text-[#1d2d3e]">نکته اتصال دیتابیس آنلاین جدید:</strong> هنگام زدن{' '}
+                <span className="font-semibold text-[#007cc0]">«آپلود از این سیستم به آنلاین (Push ↑)»</span>، سامانه به‌طور خودکار ساختار جداول را روی دیتابیس خام می‌سازد و نیازی به اجرای دستور دستی نیست؛ فقط در Supabase حتماً لینک{' '}
+                <strong className="font-mono text-[#107e3e]">Session Pooler (پورت ۵۴۳۲)</strong> را وارد کنید تا ساخت خودکار جداول رابطه‌ای بدون محدودیت انجام شود.
+              </div>
             </div>
 
             {dbFeedback && (
@@ -1594,122 +1606,176 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
             </div>
           </div>
 
-          {/* Database Tables Defined */}
-          <div className="sap-card p-4">
-            <h3 className="text-sm font-bold text-[#333333] flex items-center gap-2 mb-3">
-              <Layers className="w-4 h-4 text-[#007cc0]" />
-              جداول تعریف‌شده در Prisma Schema (۱۱ جدول تخصصی کارخانه)
-            </h3>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5 text-xs">
-              {[
-                { name: 'users', desc: 'کاربران و ماتریس دسترسی RBAC' },
-                { name: 'parts', desc: 'کاتالوگ ۵۲ قطعه، گرید، ضخامت و اوزان' },
-                { name: 'factory_halls', desc: 'سالن‌های پرس، جوش، رنگ و مونتاژ' },
-                { name: 'machines', desc: 'پرس‌های هیدرولیک و ضربه‌ای چندمنظوره' },
-                { name: 'dies_molds', desc: 'قالب‌های سنبه‌ماتریس و عمر ضرب' },
-                { name: 'production_routes', desc: 'مسیرهای تولید و ساخت مهندسی' },
-                { name: 'route_operations', desc: 'مراحل OP10..OP80 و زمان سیکل' },
-                { name: 'inventory_transactions', desc: 'اسناد کاردکس و گردش انبار' },
-                { name: 'production_plans', desc: 'برنامه‌های هفتگی و تیراژ مصوب' },
-                { name: 'sapco_coils', desc: 'کلاف‌ها، رول‌ها و سهمیه وزنی ساپکو' },
-                { name: 'system_audit_logs', desc: 'ثبت وقایع و امنیت سیستم' },
-              ].map(tbl => (
-                <div key={tbl.name} className="p-2.5 bg-[#f7f7f7] rounded-sm border border-[#d9d9d9]">
-                  <span className="font-mono text-[#007cc0] font-bold">{tbl.name}</span>
-                  <p className="text-[11px] text-[#666666] mt-0.5">{tbl.desc}</p>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Migration Commands */}
-          <div className="sap-card p-4">
-            <h3 className="text-sm font-bold text-[#333333] flex items-center gap-2 mb-3">
-              <Terminal className="w-4 h-4 text-[#107e3e]" />
-              دستورات اجرای مایگریشن و مدیریت پایگاه داده (Prisma CLI)
-            </h3>
-            <p className="text-xs text-[#666666] mb-3">
-              پس از مقداردهی متغیر محیطی <code className="text-[#007cc0] font-mono font-bold">DATABASE_URL</code>، می‌توانید از طریق دستورات زیر جداول را در PostgreSQL ایجاد کنید:
-            </p>
-
-            <div className="space-y-2 text-xs font-mono">
-              {[
-                {
-                  cmd: 'npx prisma migrate dev --name init',
-                  desc: 'ایجاد فایل مایگریشن اولیه و اعمال آن روی PostgreSQL',
-                },
-                {
-                  cmd: 'npx prisma db push',
-                  desc: 'همگام‌سازی فوری شمای پریسما با پایگاه داده بدون تولید فایل مایگریشن',
-                },
-                {
-                  cmd: 'npx prisma generate',
-                  desc: 'تولید کلاینت تایپ‌اسکریپت پریسما برای مدل‌های جدید',
-                },
-                {
-                  cmd: 'npx prisma studio',
-                  desc: 'راه‌اندازی محیط گرافیکی وب برای مشاهده و مدیریت مستقیم جداول',
-                },
-              ].map(item => (
-                <div
-                  key={item.cmd}
-                  className="flex items-center justify-between p-2.5 bg-[#f7f7f7] rounded-sm border border-[#d9d9d9]"
-                >
-                  <div>
-                    <div className="text-[#107e3e] font-bold">$ {item.cmd}</div>
-                    <div className="text-[11px] text-[#666666] font-sans mt-0.5">{item.desc}</div>
+          {/* Database Tables Defined (Collapsible, Default Collapsed) */}
+          <div className="sap-card overflow-hidden">
+            <button
+              type="button"
+              onClick={toggleSchemaTables}
+              className="w-full px-4 py-3 flex items-center justify-between gap-2 text-right hover:bg-[#f7f9fb] transition-colors cursor-pointer"
+            >
+              <div className="flex items-center gap-2 flex-wrap">
+                <Layers className="w-4 h-4 text-[#007cc0] shrink-0" />
+                <span className="text-sm font-bold text-[#333333]">
+                  جداول تعریف‌شده در Prisma Schema
+                </span>
+                <span className="text-[11px] text-[#666666] tabular-nums">
+                  · {toPersianDigits(11)} جدول تخصصی کارخانه (قطعات، سالن‌ها، پرس‌ها، انبار و لاگ‌ها)
+                </span>
+              </div>
+              <span className="text-[#666666] inline-flex items-center gap-1 text-xs shrink-0">
+                <span>{showSchemaTables ? 'بستن' : 'مشاهده جداول'}</span>
+                {showSchemaTables ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+              </span>
+            </button>
+            {showSchemaTables && (
+              <div className="p-4 pt-2 border-t border-[#e8e8e8] grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5 text-xs">
+                {[
+                  { name: 'users', desc: 'کاربران و ماتریس دسترسی RBAC' },
+                  { name: 'parts', desc: 'کاتالوگ ۵۲ قطعه، گرید، ضخامت و اوزان' },
+                  { name: 'factory_halls', desc: 'سالن‌های پرس، جوش، رنگ و مونتاژ' },
+                  { name: 'machines', desc: 'پرس‌های هیدرولیک و ضربه‌ای چندمنظوره' },
+                  { name: 'dies_molds', desc: 'قالب‌های سنبه‌ماتریس و عمر ضرب' },
+                  { name: 'production_routes', desc: 'مسیرهای تولید و ساخت مهندسی' },
+                  { name: 'route_operations', desc: 'مراحل OP10..OP80 و زمان سیکل' },
+                  { name: 'inventory_transactions', desc: 'اسناد کاردکس و گردش انبار' },
+                  { name: 'production_plans', desc: 'برنامه‌های هفتگی و تیراژ مصوب' },
+                  { name: 'sapco_coils', desc: 'کلاف‌ها، رول‌ها و سهمیه وزنی ساپکو' },
+                  { name: 'system_audit_logs', desc: 'ثبت وقایع و امنیت سیستم' },
+                ].map(tbl => (
+                  <div key={tbl.name} className="p-2.5 bg-[#f7f7f7] rounded-sm border border-[#d9d9d9]">
+                    <span className="font-mono text-[#007cc0] font-bold">{tbl.name}</span>
+                    <p className="text-[11px] text-[#666666] mt-0.5">{tbl.desc}</p>
                   </div>
-                  <button
-                    onClick={() => copyToClipboard(item.cmd)}
-                    className="sap-btn-standard p-1.5"
-                    title="کپی دستور"
-                  >
-                    {copiedCmd === item.cmd ? <Check className="w-3.5 h-3.5 text-[#107e3e]" /> : <Copy className="w-3.5 h-3.5" />}
-                  </button>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
           </div>
 
-          {/* Environment Variables Documentation */}
-          <div className="sap-card p-4">
-            <h3 className="text-sm font-bold text-[#333333] flex items-center gap-2 mb-3">
-              <Code className="w-4 h-4 text-[#007cc0]" />
-              متغیرهای محیطی مورد نیاز سامانه (.env)
-            </h3>
-            <div className="overflow-x-auto">
-              <table className="w-full text-right text-xs sap-table-compact">
-                <thead className="bg-[#ffffff] text-[#333333] border-b border-[#d9d9d9]">
-                  <tr>
-                    <th>نام متغیر</th>
-                    <th>الزامی/اختیاری</th>
-                    <th>توضیح و نمونه مقدار</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-[#e8e8e8] text-[#333333]">
-                  <tr>
-                    <td className="font-mono text-[#007cc0] font-bold">DATABASE_URL</td>
-                    <td className="text-[#bb0000] font-semibold">الزامی برای PostgreSQL</td>
-                    <td className="font-mono text-[11px]">postgresql://user:pass@localhost:5432/kpims_db?schema=public</td>
-                  </tr>
-                  <tr>
-                    <td className="font-mono text-[#007cc0] font-bold">PORT</td>
-                    <td className="text-[#666666]">پیش‌فرض ۳۰۰۰</td>
-                    <td className="text-[11px]">پورت اجرای وب‌سرور Express Node.js</td>
-                  </tr>
-                  <tr>
-                    <td className="font-mono text-[#007cc0] font-bold">NODE_ENV</td>
-                    <td className="text-[#666666]">اختیاری</td>
-                    <td className="text-[11px]">development یا production</td>
-                  </tr>
-                  <tr>
-                    <td className="font-mono text-[#007cc0] font-bold">APP_URL</td>
-                    <td className="text-[#666666]">خودکار در پلتفرم</td>
-                    <td className="text-[11px]">آدرس اصلی هاست برنامه</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
+          {/* Migration Commands (Collapsible, Default Collapsed) */}
+          <div className="sap-card overflow-hidden">
+            <button
+              type="button"
+              onClick={togglePrismaCli}
+              className="w-full px-4 py-3 flex items-center justify-between gap-2 text-right hover:bg-[#f7f9fb] transition-colors cursor-pointer"
+            >
+              <div className="flex items-center gap-2 flex-wrap">
+                <Terminal className="w-4 h-4 text-[#107e3e] shrink-0" />
+                <span className="text-sm font-bold text-[#333333]">
+                  دستورات اجرای مایگریشن و مدیریت پایگاه داده (Prisma CLI)
+                </span>
+                <span className="text-[11px] text-[#666666] tabular-nums">
+                  · {toPersianDigits(4)} دستور خط فرمان (migrate / db push / generate / studio)
+                </span>
+              </div>
+              <span className="text-[#666666] inline-flex items-center gap-1 text-xs shrink-0">
+                <span>{showPrismaCli ? 'بستن' : 'مشاهده دستورات'}</span>
+                {showPrismaCli ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+              </span>
+            </button>
+            {showPrismaCli && (
+              <div className="p-4 pt-2 border-t border-[#e8e8e8]">
+                <p className="text-xs text-[#666666] mb-3">
+                  پس از مقداردهی متغیر محیطی <code className="text-[#007cc0] font-mono font-bold">DATABASE_URL</code>، می‌توانید از طریق دستورات زیر جداول را در PostgreSQL ایجاد کنید:
+                </p>
+
+                <div className="space-y-2 text-xs font-mono">
+                  {[
+                    {
+                      cmd: 'npx prisma migrate dev --name init',
+                      desc: 'ایجاد فایل مایگریشن اولیه و اعمال آن روی PostgreSQL',
+                    },
+                    {
+                      cmd: 'npx prisma db push',
+                      desc: 'همگام‌سازی فوری شمای پریسما با پایگاه داده بدون تولید فایل مایگریشن',
+                    },
+                    {
+                      cmd: 'npx prisma generate',
+                      desc: 'تولید کلاینت تایپ‌اسکریپت پریسما برای مدل‌های جدید',
+                    },
+                    {
+                      cmd: 'npx prisma studio',
+                      desc: 'راه‌اندازی محیط گرافیکی وب برای مشاهده و مدیریت مستقیم جداول',
+                    },
+                  ].map(item => (
+                    <div
+                      key={item.cmd}
+                      className="flex items-center justify-between p-2.5 bg-[#f7f7f7] rounded-sm border border-[#d9d9d9]"
+                    >
+                      <div>
+                        <div className="text-[#107e3e] font-bold">$ {item.cmd}</div>
+                        <div className="text-[11px] text-[#666666] font-sans mt-0.5">{item.desc}</div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => copyToClipboard(item.cmd)}
+                        className="sap-btn-standard p-1.5"
+                        title="کپی دستور"
+                      >
+                        {copiedCmd === item.cmd ? <Check className="w-3.5 h-3.5 text-[#107e3e]" /> : <Copy className="w-3.5 h-3.5" />}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Environment Variables Documentation (Collapsible, Default Collapsed) */}
+          <div className="sap-card overflow-hidden">
+            <button
+              type="button"
+              onClick={toggleEnvDocs}
+              className="w-full px-4 py-3 flex items-center justify-between gap-2 text-right hover:bg-[#f7f9fb] transition-colors cursor-pointer"
+            >
+              <div className="flex items-center gap-2 flex-wrap">
+                <Code className="w-4 h-4 text-[#007cc0] shrink-0" />
+                <span className="text-sm font-bold text-[#333333]">
+                  متغیرهای محیطی مورد نیاز سامانه (.env)
+                </span>
+                <span className="text-[11px] text-[#666666] tabular-nums">
+                  · DATABASE_URL · PORT · NODE_ENV · APP_URL
+                </span>
+              </div>
+              <span className="text-[#666666] inline-flex items-center gap-1 text-xs shrink-0">
+                <span>{showEnvDocs ? 'بستن' : 'مشاهده راهنمای .env'}</span>
+                {showEnvDocs ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+              </span>
+            </button>
+            {showEnvDocs && (
+              <div className="p-4 pt-2 border-t border-[#e8e8e8] overflow-x-auto">
+                <table className="w-full text-right text-xs sap-table-compact">
+                  <thead className="bg-[#ffffff] text-[#333333] border-b border-[#d9d9d9]">
+                    <tr>
+                      <th>نام متغیر</th>
+                      <th>الزامی/اختیاری</th>
+                      <th>توضیح و نمونه مقدار</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#e8e8e8] text-[#333333]">
+                    <tr>
+                      <td className="font-mono text-[#007cc0] font-bold">DATABASE_URL</td>
+                      <td className="text-[#bb0000] font-semibold">الزامی برای PostgreSQL</td>
+                      <td className="font-mono text-[11px]">postgresql://user:pass@localhost:5432/kpims_db?schema=public</td>
+                    </tr>
+                    <tr>
+                      <td className="font-mono text-[#007cc0] font-bold">PORT</td>
+                      <td className="text-[#666666]">پیش‌فرض ۳۰۰۰</td>
+                      <td className="text-[11px]">پورت اجرای وب‌سرور Express Node.js</td>
+                    </tr>
+                    <tr>
+                      <td className="font-mono text-[#007cc0] font-bold">NODE_ENV</td>
+                      <td className="text-[#666666]">اختیاری</td>
+                      <td className="text-[11px]">development یا production</td>
+                    </tr>
+                    <tr>
+                      <td className="font-mono text-[#007cc0] font-bold">APP_URL</td>
+                      <td className="text-[#666666]">خودکار در پلتفرم</td>
+                      <td className="text-[11px]">آدرس اصلی هاست برنامه</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
         </div>
       )}

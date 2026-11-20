@@ -27,6 +27,7 @@ import {
   ArrowRightLeft,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
   GitBranch,
   Edit3,
   Settings,
@@ -63,6 +64,7 @@ import { MachineOverlapAlertWidget } from '../planning/MachineOverlapAlertWidget
 import { ManufacturingOrdersManagementView } from './ManufacturingOrdersManagementView';
 import { MoQuickTrackerWidget } from './MoQuickTrackerWidget';
 import { MoRelationalGuideModal } from './MoRelationalGuideModal';
+import { usePersistedExpandMap } from '../../hooks/usePersistedCollapse';
 
 export interface ScheduledOpStep {
   opId: string;
@@ -337,6 +339,20 @@ export const ErpProductionWorkbenchView: React.FC<ErpProductionWorkbenchViewProp
     }>
   >([]);
   const [isVisualMoGuideOpen, setIsVisualMoGuideOpen] = useState(false);
+  const {
+    isExpanded: isSchedExpanded,
+    toggle: toggleSchedExpanded,
+    expandAll: expandAllSched,
+    collapseAll: collapseAllSched,
+    expandedCount: schedExpandedCount,
+  } = usePersistedExpandMap('erp_workbench_sched_cards', {});
+  const {
+    isExpanded: isWipCardExpanded,
+    toggle: toggleWipCardExpanded,
+    expandAll: expandAllWipCards,
+    collapseAll: collapseAllWipCards,
+    expandedCount: wipExpandedCount,
+  } = usePersistedExpandMap('erp_workbench_wip_cards', {});
 
   useEffect(() => {
     const loadDynamicConfigs = async () => {
@@ -2181,19 +2197,65 @@ export const ErpProductionWorkbenchView: React.FC<ErpProductionWorkbenchViewProp
             </div>
           ) : (
             <div className="space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2 px-3.5 py-2 bg-white border border-[#d9d9d9] rounded text-xs">
+                <span className="text-[#666666] tabular-nums">
+                  برنامه‌های صفحه جاری: <strong className="font-mono text-[#333333]">{toPersianDigits(paginatedParts.length)}</strong> · بازشده:{' '}
+                  <strong className="font-mono text-[#007cc0]">
+                    {toPersianDigits(schedExpandedCount(paginatedParts.map(p => p.id)))}
+                  </strong>
+                </span>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => expandAllSched(paginatedParts.map(p => p.id))}
+                    className="sap-btn-standard px-2.5 py-1 text-[11px] cursor-pointer whitespace-nowrap"
+                  >
+                    باز کردن همه
+                  </button>
+                  <button
+                    type="button"
+                    onClick={collapseAllSched}
+                    className="sap-btn-standard px-2.5 py-1 text-[11px] cursor-pointer whitespace-nowrap"
+                  >
+                    بستن همه
+                  </button>
+                </div>
+              </div>
+
               {paginatedParts.map(item => {
                 const finalOpReceiptDoc = item.ops[item.ops.length - 1]?.warehouseReceiptDocNumber;
+                const isCardOpen = isSchedExpanded(item.id);
+                const activeOp =
+                  item.ops.find(o => o.status === 'IN_PROGRESS') ||
+                  item.ops.find(o => o.status === 'ON_HOLD') ||
+                  item.ops.find(o => o.status !== 'COMPLETED');
+                const completedOpsCount = item.ops.filter(o => o.status === 'COMPLETED').length;
+                const progressPct =
+                  item.weeklyTargetQty > 0
+                    ? Math.min(100, Math.round((item.warehouseReceivedQty / item.weeklyTargetQty) * 100))
+                    : 0;
                 return (
                   <div
                     key={item.id}
                     className="sap-card overflow-hidden"
                   >
                     {/* SAP Object Header Bar */}
-                    <div className="px-3.5 py-2.5 bg-[#f7f7f7] border-b border-[#d9d9d9] flex flex-col lg:flex-row lg:items-center justify-between gap-2.5 text-xs">
+                    <div
+                      onClick={() => toggleSchedExpanded(item.id)}
+                      className={`px-3.5 py-2.5 bg-[#f7f7f7] flex flex-col lg:flex-row lg:items-center justify-between gap-2.5 text-xs cursor-pointer hover:bg-[#eff6fc] transition-colors ${
+                        isCardOpen ? 'border-b border-[#d9d9d9]' : ''
+                      }`}
+                    >
                       <div className="flex items-center gap-2 flex-wrap">
+                        {isCardOpen ? (
+                          <ChevronDown className="w-4 h-4 text-[#007cc0] shrink-0" />
+                        ) : (
+                          <ChevronLeft className="w-4 h-4 text-[#666666] shrink-0" />
+                        )}
                         <button
                           type="button"
-                          onClick={() => {
+                          onClick={e => {
+                            e.stopPropagation();
                             setActiveTimelineOrder(item);
                             setIsTimelineModalOpen(true);
                           }}
@@ -2206,19 +2268,33 @@ export const ErpProductionWorkbenchView: React.FC<ErpProductionWorkbenchViewProp
                         <span className="font-semibold text-[#333333] text-sm">{item.partName}</span>
                         <button
                           type="button"
-                          onClick={() => router.traceDocument(item.partCode, 'INVENTORY_LEDGER')}
+                          onClick={e => {
+                            e.stopPropagation();
+                            router.traceDocument(item.partCode, 'INVENTORY_LEDGER');
+                          }}
                           className="sap-doc-link font-mono cursor-pointer"
                         >
                           {item.partCode}
                         </button>
                         <span className="text-[#d9d9d9]">·</span>
                         <span className="text-[#666666]">{item.carModel}</span>
+                        {activeOp && (
+                          <>
+                            <span className="text-[#d9d9d9]">·</span>
+                            <span className="text-[#007cc0] font-medium">
+                              مرحله جاری: <strong className="font-mono">{activeOp.opCode}</strong> ({toPersianDigits(completedOpsCount)}/{toPersianDigits(item.ops.length)})
+                            </span>
+                          </>
+                        )}
                         {item.parentProductCode && (
                           <>
                             <span className="text-[#d9d9d9]">·</span>
                             <button
                               type="button"
-                              onClick={() => router.traceDocument(item.parentProductCode!, 'INVENTORY_LEDGER')}
+                              onClick={e => {
+                                e.stopPropagation();
+                                router.traceDocument(item.parentProductCode!, 'INVENTORY_LEDGER');
+                              }}
                               className="sap-doc-link font-mono text-[11px] cursor-pointer"
                             >
                               زیرمجموعه: {item.parentProductCode}
@@ -2227,19 +2303,22 @@ export const ErpProductionWorkbenchView: React.FC<ErpProductionWorkbenchViewProp
                         )}
                       </div>
 
-                      <div className="flex items-center justify-between lg:justify-end gap-3 flex-wrap">
+                      <div
+                        className="flex items-center justify-between lg:justify-end gap-3 flex-wrap"
+                        onClick={e => e.stopPropagation()}
+                      >
                         {/* Key Metrics Inline */}
                         <div className="flex items-center gap-2.5 font-mono tabular-nums text-xs">
                           <span className="text-[#666666]">
-                            هدف: <strong className="text-[#333333]">{formatNumber(item.weeklyTargetQty)}</strong> عدد
+                            هدف: <strong className="text-[#333333]">{formatNumber(item.weeklyTargetQty)}</strong>
                           </span>
                           <span className="text-[#d9d9d9]">·</span>
                           <span className="text-[#666666]">
-                            نیاز ورق: <strong className="text-[#333333]">{formatNumber(item.rawMaterialIssuedKg)}</strong> kg
+                            ورق: <strong className="text-[#333333]">{formatNumber(item.rawMaterialIssuedKg)}</strong> kg
                           </span>
                           <span className="text-[#d9d9d9]">·</span>
                           <span className="text-[#107e3e] flex items-center gap-1">
-                            <span>رسید انبار: <strong>{formatNumber(item.warehouseReceivedQty)}</strong> عدد</span>
+                            <span>رسید: <strong>{formatNumber(item.warehouseReceivedQty)}</strong> ({toPersianDigits(progressPct)}٪)</span>
                             {finalOpReceiptDoc && (
                               <button
                                 type="button"
@@ -2254,6 +2333,13 @@ export const ErpProductionWorkbenchView: React.FC<ErpProductionWorkbenchViewProp
 
                         {/* Compact SAP Action Controls */}
                         <div className="flex items-center gap-1 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => toggleSchedExpanded(item.id)}
+                            className="sap-btn-standard px-2.5 py-1 text-[11px] cursor-pointer whitespace-nowrap"
+                          >
+                            {isCardOpen ? 'بستن مراحل' : 'مشاهده مراحل'}
+                          </button>
                           <button
                             type="button"
                             onClick={() => handleIssueRawMaterialToLine(item)}
@@ -2298,6 +2384,7 @@ export const ErpProductionWorkbenchView: React.FC<ErpProductionWorkbenchViewProp
                     </div>
 
                     {/* Full-Width SAP ALV Operations Table */}
+                    {isCardOpen && (
                     <div className="overflow-x-auto">
                       <table className="sap-table-compact w-full text-right text-xs">
                         <thead className="bg-[#ffffff] border-b border-[#d9d9d9] text-[#333333] font-semibold">
@@ -2464,6 +2551,7 @@ export const ErpProductionWorkbenchView: React.FC<ErpProductionWorkbenchViewProp
                         </tbody>
                       </table>
                     </div>
+                    )}
                   </div>
                 );
               })}
@@ -2841,23 +2929,57 @@ export const ErpProductionWorkbenchView: React.FC<ErpProductionWorkbenchViewProp
                     رهگیر لحظه‌ای موجودی بین‌مرحله‌ای قطعات در خط (WIP per OP) و رسید خودکار انبار در مرحله آخر
                   </span>
                 </h3>
-              <p className="text-xs text-[#666666] mt-0.5">
-                مشاهده دقیق اینکه از هر قطعه در کدام مرحله (OP10، OP20، OP30...) چند عدد نیمه‌ساخته در خط وجود دارد و چند عدد از مرحله آخر وارد انبار محصول نهایی شده است.
-              </p>
+                <p className="text-xs text-[#666666] mt-0.5">
+                  مشاهده دقیق اینکه از هر قطعه در کدام مرحله (OP10، OP20، OP30...) چند عدد نیمه‌ساخته در خط وجود دارد و چند عدد از مرحله آخر وارد انبار محصول نهایی شده است.
+                </p>
+              </div>
+              <div className="flex items-center gap-1.5 text-xs">
+                <span className="text-[#666666] font-mono tabular-nums ml-1">
+                  ({toPersianDigits(wipExpandedCount(filteredParts.map(p => p.id)))}/{toPersianDigits(filteredParts.length)})
+                </span>
+                <button
+                  type="button"
+                  onClick={() => expandAllWipCards(filteredParts.map(p => p.id))}
+                  className="sap-btn-standard px-2.5 py-1 text-[11px] cursor-pointer whitespace-nowrap"
+                >
+                  باز کردن همه
+                </button>
+                <button
+                  type="button"
+                  onClick={collapseAllWipCards}
+                  className="sap-btn-standard px-2.5 py-1 text-[11px] cursor-pointer whitespace-nowrap"
+                >
+                  بستن همه
+                </button>
+              </div>
             </div>
-          </div>
 
-          <div className="space-y-3.5">
-            {filteredParts.map(item => (
+          <div className="space-y-3">
+            {filteredParts.map(item => {
+              const isWipOpen = isWipCardExpanded(item.id);
+              const totalLineWip = item.ops.reduce((s, o) => s + (o.wipBufferAfterOp || 0), 0);
+              const activeWipOp = item.ops.find(o => o.wipBufferAfterOp > 0) || item.ops.find(o => o.status !== 'COMPLETED');
+              return (
               <div
                 key={item.id}
                 className="p-3.5 rounded border border-[#d9d9d9] bg-[#f7f7f7] space-y-2.5"
               >
-                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#e8e8e8] pb-2 text-xs">
+                <div
+                  onClick={() => toggleWipCardExpanded(item.id)}
+                  className={`flex flex-wrap items-center justify-between gap-2 text-xs cursor-pointer ${
+                    isWipOpen ? 'border-b border-[#e8e8e8] pb-2' : ''
+                  }`}
+                >
                   <div className="flex items-center gap-2 flex-wrap">
+                      {isWipOpen ? (
+                        <ChevronDown className="w-4 h-4 text-[#007cc0] shrink-0" />
+                      ) : (
+                        <ChevronLeft className="w-4 h-4 text-[#666666] shrink-0" />
+                      )}
                       <button
                         type="button"
-                        onClick={() => {
+                        onClick={e => {
+                          e.stopPropagation();
                           setActiveTimelineOrder(item);
                           setIsTimelineModalOpen(true);
                         }}
@@ -2869,25 +2991,37 @@ export const ErpProductionWorkbenchView: React.FC<ErpProductionWorkbenchViewProp
                       </button>
                       <button
                         type="button"
-                        onClick={() => router.traceDocument(item.partCode, 'INVENTORY_LEDGER')}
+                        onClick={e => {
+                          e.stopPropagation();
+                          router.traceDocument(item.partCode, 'INVENTORY_LEDGER');
+                        }}
                         className="sap-doc-link font-mono bg-[#ffffff] border border-[#d9d9d9] px-2 py-0.5 rounded text-[11px] cursor-pointer"
                       >
                         {item.partCode}
                       </button>
                       <strong className="text-[#333333] text-sm">{item.partName}</strong>
                       <span className="text-[#666666]">({item.carModel})</span>
+                      {activeWipOp && (
+                        <span className="text-[11px] text-[#007cc0] font-medium">
+                          · ایستگاه فعال: <strong className="font-mono">{activeWipOp.opCode}</strong>
+                        </span>
+                      )}
                     </div>
-                    <div className="flex items-center gap-4 font-mono tabular-nums">
+                    <div className="flex items-center gap-3 font-mono tabular-nums">
                       <span className="text-[#666666]">
-                        تیراژ هدف: <strong className="text-[#333333]">{formatNumber(item.weeklyTargetQty)} عدد</strong>
+                        هدف: <strong className="text-[#333333]">{formatNumber(item.weeklyTargetQty)}</strong>
+                      </span>
+                      <span className="text-[#007cc0]">
+                        WIP در خط: <strong>{formatNumber(totalLineWip)}</strong>
                       </span>
                       <span className="text-[#107e3e] font-semibold">
-                        رسید شده به انبار محصول: {formatNumber(item.warehouseReceivedQty)} عدد
+                        رسید انبار: {formatNumber(item.warehouseReceivedQty)}
                       </span>
                     </div>
                   </div>
 
                   {/* Chain from Raw Warehouse -> OPs -> Finished Warehouse */}
+                  {isWipOpen && (
                   <div className="grid grid-cols-1 md:grid-cols-6 gap-2 items-stretch text-xs">
                     {item.ops.map(op => (
                       <div
@@ -2971,8 +3105,10 @@ export const ErpProductionWorkbenchView: React.FC<ErpProductionWorkbenchViewProp
                     </div>
                   </div>
                 </div>
+                )}
               </div>
-            ))}
+              );
+            })}
           </div>
           </div>
         </div>

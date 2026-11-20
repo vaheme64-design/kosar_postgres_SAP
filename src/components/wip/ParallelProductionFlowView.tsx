@@ -34,6 +34,7 @@ import { toPersianDigits, formatNumber } from '../../utils/formatters';
 import { MasterDataDifferenceGuideModal } from '../common/MasterDataDifferenceGuideModal';
 import { useErpRouter } from '../../context/RouterContext';
 import { useEnterpriseUx } from '../../context/EnterpriseUxContext';
+import { usePersistedOpen } from '../../hooks/usePersistedCollapse';
 
 interface ParallelProductionFlowViewProps {
   onOpenTraceabilityModal?: (partCode: string) => void;
@@ -50,6 +51,7 @@ export const ParallelProductionFlowView: React.FC<ParallelProductionFlowViewProp
   const [selectedFlowId, setSelectedFlowId] = useState<string>('');
   const [loading, setLoading] = useState(false);
   const [isGuideOpen, setIsGuideOpen] = useState(false);
+  const [showInfoBanner, , toggleInfoBanner] = usePersistedOpen('parallel_flow_info_banner', false);
   const [flowFeedback, setFlowFeedback] = useState<{ type: 'error' | 'success'; text: string } | null>(null);
 
   // New Flow Modal
@@ -239,16 +241,30 @@ export const ParallelProductionFlowView: React.FC<ParallelProductionFlowViewProp
         </div>
       )}
 
-      {/* Educational Banner Explaining Stamping Co-Production */}
-      <div className="bg-[#e5f3fa]/70 border border-[#b3d7ff] rounded-md p-4 text-xs text-[#333333] flex items-start gap-3 leading-relaxed">
-        <Info className="w-5 h-5 text-[#007cc0] shrink-0 mt-0.5" />
-        <div>
-          <strong className="block font-bold text-[#007cc0] text-sm mb-1">
-            کارکرد و منطق مهندسی ماژول قالب‌های مشترک و تولید موازی (Co-Production / LH-RH):
-          </strong>
-          در پرس‌کاری صنعتی قطعات خودرویی، برای صرفه‌جویی در هزینه قالب‌سازی و افزایش راندمان پرس، بسیاری از قطعات قرینه مانند براکت‌های چپ و راست (LH/RH)، لچکی‌های ستون، و زوارها با یک <strong>قالب مشترک ۲ کویته</strong> روی یک پرس بسته می‌شوند.
-          با هر ضربه پرس، <strong>۱ عدد قطعه چپ و ۱ عدد قطعه راست</strong> به طور همزمان از یک ورق تولید می‌شود. این ماژول این همزمانی تولید، بالانس موجودی انبار و مصرف کویل را مدل‌سازی و پایش می‌کند.
-        </div>
+      {/* Educational Banner Explaining Stamping Co-Production (Collapsed by default, persisted) */}
+      <div className="bg-[#e5f3fa]/70 border border-[#b3d7ff] rounded-md overflow-hidden text-xs text-[#333333]">
+        <button
+          type="button"
+          onClick={toggleInfoBanner}
+          className="w-full px-3.5 py-2 flex items-center justify-between gap-2 text-right hover:bg-[#e5f3fa] transition-colors cursor-pointer"
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            <Info className="w-4 h-4 text-[#007cc0] shrink-0" />
+            <span className="font-bold text-[#007cc0] truncate">
+              منطق مهندسی قالب‌های مشترک و تولید موازی (Co-Production / LH-RH: یک ورق → دو قطعه همزمان)
+            </span>
+          </div>
+          <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#007cc0] shrink-0 whitespace-nowrap">
+            <span>{showInfoBanner ? 'بستن توضیحات' : 'مشاهده توضیحات'}</span>
+            {showInfoBanner ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronLeft className="w-3.5 h-3.5" />}
+          </span>
+        </button>
+        {showInfoBanner && (
+          <div className="px-4 pb-3 pt-1 border-t border-[#b3d7ff]/60 leading-relaxed">
+            در پرس‌کاری صنعتی قطعات خودرویی، برای صرفه‌جویی در هزینه قالب‌سازی و افزایش راندمان پرس، بسیاری از قطعات قرینه مانند براکت‌های چپ و راست (LH/RH)، لچکی‌های ستون، و زوارها با یک <strong>قالب مشترک ۲ کویته</strong> روی یک پرس بسته می‌شوند.
+            با هر ضربه پرس، <strong>۱ عدد قطعه چپ و ۱ عدد قطعه راست</strong> به طور همزمان از یک ورق تولید می‌شود. این ماژول این همزمانی تولید، بالانس موجودی انبار و مصرف کویل را مدل‌سازی و پایش می‌کند.
+          </div>
+        )}
       </div>
 
       {/* Header Banner */}

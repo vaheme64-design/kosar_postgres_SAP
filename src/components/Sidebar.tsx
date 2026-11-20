@@ -79,6 +79,7 @@ const DYNAMIC_ICON_MAP: Record<string, React.ComponentType<{ className?: string 
 import { ProductionWorkbenchSubTab } from './production/ErpProductionWorkbenchView';
 import { PlanningSubTabKey } from './planning/ProductionPlanningModuleView';
 import { toPersianDigits } from '../utils/formatters';
+import { usePersistedOpen, usePersistedExpandMap } from '../hooks/usePersistedCollapse';
 
 export type TabKey =
   | 'dashboard'
@@ -185,7 +186,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   coilsCount,
   reorderAlertsCount = 0,
 }) => {
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = usePersistedOpen('sidebar_collapsed', false);
   const [showAllForRole, setShowAllForRole] = useState(false);
   const [moduleSearch, setModuleSearch] = useState('');
   const [dbMenus, setDbMenus] = useState<any[]>([]);
@@ -206,7 +207,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       isMounted = false;
     };
   }, []);
-  const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({
+  const { map: expandedGroups, toggle: toggleGroup } = usePersistedExpandMap('sidebar_nav_groups', {
     daily_ops: true,
   });
 
@@ -734,10 +735,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
   const isRoleFiltered = currentRole !== 'ADMIN' && !showAllForRole;
   const searchNormalized = moduleSearch.trim().toLowerCase();
-
-  const toggleGroup = (groupId: string) => {
-    setExpandedGroups(prev => ({ ...prev, [groupId]: !prev[groupId] }));
-  };
 
   return (
     <aside className={`${

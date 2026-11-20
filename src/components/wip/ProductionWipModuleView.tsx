@@ -55,6 +55,7 @@ import { useErpRouter } from '../../context/RouterContext';
 import { useEnterpriseUx } from '../../context/EnterpriseUxContext';
 import { MoRelationalGuideModal } from '../production/MoRelationalGuideModal';
 import { WipHallMoDistributionChart } from './WipHallMoDistributionChart';
+import { usePersistedOpen, usePersistedExpandMap } from '../../hooks/usePersistedCollapse';
 
 export type WipViewMode =
   | 'UNIFIED_DIRECTORY'
@@ -160,13 +161,21 @@ export const ProductionWipModuleView: React.FC<ProductionWipModuleViewProps> = (
   const [searchQuery, setSearchQuery] = useState(initialTraceQuery || '');
   const [statusFilter, setStatusFilter] = useState<string>('ALL');
   const [onlyActiveQueue, setOnlyActiveQueue] = useState(false);
-  const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({
-    orders_group: true,
-    transfers_group: true,
-  });
-  const [expandedMoIds, setExpandedMoIds] = useState<Record<string, boolean>>({});
+  const {
+    map: expandedGroups,
+    toggle: toggleGroup,
+    expandAll: expandAllGroups,
+    collapseAll: collapseAllGroups,
+  } = usePersistedExpandMap('wip_unified_groups', {});
+  const {
+    map: expandedMoIds,
+    setExpanded: setMoExpanded,
+    toggle: toggleMoExpand,
+    expandAll: expandAllMos,
+    collapseAll: collapseAllMos,
+  } = usePersistedExpandMap('wip_unified_mos', {});
   const [selectedBottleneckStageId, setSelectedBottleneckStageId] = useState<string | null>(null);
-  const [showBottleneckPanel, setShowBottleneckPanel] = useState<boolean>(true);
+  const [showBottleneckPanel, setShowBottleneckPanel] = usePersistedOpen('wip_bottleneck_panel', false);
 
   useEffect(() => {
     if (initialView) {
@@ -236,11 +245,6 @@ export const ProductionWipModuleView: React.FC<ProductionWipModuleViewProps> = (
       if (metricsRes.success) setMetrics(metricsRes.data);
       if (mosRes.success && Array.isArray(mosRes.data)) {
         setOrders(mosRes.data);
-        if (mosRes.data.length > 0) {
-          setExpandedMoIds(prev =>
-            Object.keys(prev).length === 0 ? { [mosRes.data[0].id]: true } : prev
-          );
-        }
       }
       if (transfersRes.success && Array.isArray(transfersRes.data)) {
         setTransfers(transfersRes.data);
@@ -693,22 +697,16 @@ export const ProductionWipModuleView: React.FC<ProductionWipModuleViewProps> = (
     return true;
   });
 
-  const toggleGroup = (key: string) => {
-    setExpandedGroups(prev => ({ ...prev, [key]: !prev[key] }));
-  };
-
   const toggleMoRow = (moId: string, moNumber?: string) => {
-    setExpandedMoIds(prev => {
-      const nextOpen = !prev[moId];
-      if (nextOpen && moNumber) {
-        router.pushSelectionStep(
-          `عملیات دستور ${moNumber}`,
-          () => setExpandedMoIds(p => ({ ...p, [moId]: false })),
-          `wip-mo-${moId}`,
-        );
-      }
-      return { ...prev, [moId]: nextOpen };
-    });
+    const nextOpen = !expandedMoIds[moId];
+    toggleMoExpand(moId);
+    if (nextOpen && moNumber) {
+      router.pushSelectionStep(
+        `عملیات دستور ${moNumber}`,
+        () => setMoExpanded(moId, false),
+        `wip-mo-${moId}`,
+      );
+    }
   };
 
   const selectBottleneckStage = (stageId: string | null, stageName?: string) => {
@@ -1114,13 +1112,65 @@ export const ProductionWipModuleView: React.FC<ProductionWipModuleViewProps> = (
                 <button
                   type="button"
                   onClick={() => setShowBottleneckPanel(p => !p)}
-                  className="sap-btn-standard px-2 py-0.5 text-[11px] font-sans cursor-pointer"
+                  className="sap-btn-standard px-2.5 py-1 text-[11px] font-sans inline-flex items-center gap-1 cursor-pointer whitespace-nowrap"
                 >
-                  {showBottleneckPanel ? 'جمع‌کردن نمودار' : 'نمایش نمودار گلوگاه'}
+                  <span>{showBottleneckPanel ? 'بستن جزئیات گلوگاه' : 'باز کردن نمودار گلوگاه'}</span>
+                  <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showBottleneckPanel ? 'rotate-180' : ''}`} />
                 </button>
               )}
             </div>
           </div>
+
+          {/* At-a-Glance Collapsed Bottleneck Strip */}
+          {activeView !== 'BOTTLENECK' && !showBottleneckPanel && (
+            <div className="px-4 py-2 bg-[#fcfcfd] flex flex-wrap items-center justify-between gap-2.5 text-[11px]">
+              <div className="flex items-center gap-2.5 flex-wrap">
+                {bottleneckAnalysis.peakStage && bottleneckAnalysis.peakStage.totalQty > 0 ? (
+                  <span className="inline-flex items-center gap-1.5 text-[#333333]">
+                    <AlertTriangle
+                      className={`w-3.5 h-3.5 shrink-0 ${
+                        bottleneckAnalysis.peakStage.severity === 'CRITICAL'
+                          ? 'text-[#bb0000]'
+                          : bottleneckAnalysis.peakStage.severity === 'WARNING'
+                          ? 'text-[#e9730c]'
+                          : 'text-[#107e3e]'
+                      }`}
+                    />
+                    <span>گلوگاه اصلی:</span>
+                    <strong className="text-[#1d2d3e]">{bottleneckAnalysis.peakStage.stageName}</strong>
+                    <span className="font-mono tabular-nums text-[#556b82]">
+                      ({formatNumber(bottleneckAnalysis.peakStage.totalQty)} عدد ·{' '}
+                      <strong className="text-[#007cc0]">{toPersianDigits(bottleneckAnalysis.peakStage.throughputHours)}h</strong> ·{' '}
+                      {toPersianDigits(bottleneckAnalysis.peakStage.shiftLoad)} شیفت)
+                    </span>
+                  </span>
+                ) : (
+                  <span className="text-[#107e3e] font-medium">صف ایستگاه‌ها متعادل و بدون انباشت بحرانی است</span>
+                )}
+              </div>
+
+              <div className="flex items-center gap-3 flex-wrap font-mono tabular-nums text-[#556b82]">
+                {bottleneckAnalysis.stages
+                  .filter(s => s.totalQty > 0)
+                  .slice(0, 4)
+                  .map(s => (
+                    <span key={s.stageId} className="inline-flex items-center gap-1 font-sans">
+                      <span
+                        className={`w-2 h-2 rounded-full ${
+                          s.severity === 'CRITICAL'
+                            ? 'bg-[#bb0000]'
+                            : s.severity === 'WARNING'
+                            ? 'bg-[#e9730c]'
+                            : 'bg-[#107e3e]'
+                        }`}
+                      />
+                      <span className="text-[#333333]">{s.stageName}:</span>
+                      <strong className="font-mono text-[#1d2d3e]">{toPersianDigits(s.throughputHours)}h</strong>
+                    </span>
+                  ))}
+              </div>
+            </div>
+          )}
 
           {(activeView === 'BOTTLENECK' || showBottleneckPanel) && (
             <div className="p-4 space-y-4">
@@ -1420,9 +1470,30 @@ export const ProductionWipModuleView: React.FC<ProductionWipModuleViewProps> = (
       {/* UNIFIED SAP HANA DIRECTORY VIEW */}
       {activeView === 'UNIFIED_DIRECTORY' && (
         <div className="bg-white border border-[#d9d9d9] rounded-md overflow-hidden shadow-2xs">
-          <div className="px-3.5 py-2 bg-white border-b border-[#d9d9d9] flex items-center justify-between text-xs font-semibold text-[#333333]">
+          <div className="px-3.5 py-2 bg-white border-b border-[#d9d9d9] flex flex-wrap items-center justify-between gap-2 text-xs font-semibold text-[#333333]">
             <span>نام دستور کار (MO) / مرحله عملیات و ایستگاه</span>
-            <span>تگ‌های وضعیت، اسناد مرتبط و عملیات سریع</span>
+            <div className="flex items-center gap-2 flex-wrap">
+              <button
+                type="button"
+                onClick={() => {
+                  expandAllGroups(['orders_group', 'transfers_group']);
+                  expandAllMos(filteredOrders.map(m => m.id));
+                }}
+                className="sap-btn-standard px-2 py-0.5 text-[11px] cursor-pointer whitespace-nowrap"
+              >
+                باز کردن همه
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  collapseAllMos();
+                  collapseAllGroups();
+                }}
+                className="sap-btn-standard px-2 py-0.5 text-[11px] cursor-pointer whitespace-nowrap"
+              >
+                بستن همه
+              </button>
+            </div>
           </div>
 
           <div className="divide-y divide-[#e5e5e5] text-xs">
@@ -1431,7 +1502,7 @@ export const ProductionWipModuleView: React.FC<ProductionWipModuleViewProps> = (
               <button
                 type="button"
                 onClick={() => toggleGroup('orders_group')}
-                className="w-full px-3.5 py-2 flex items-center justify-between hover:bg-[#e5f3fa]/50 transition-colors cursor-pointer text-right"
+                className="w-full px-3.5 py-2 flex flex-wrap items-center justify-between gap-2 hover:bg-[#e5f3fa]/50 transition-colors cursor-pointer text-right"
               >
                 <div className="flex items-center gap-2 font-semibold text-[#333333]">
                   {expandedGroups.orders_group ? (
@@ -1442,9 +1513,19 @@ export const ProductionWipModuleView: React.FC<ProductionWipModuleViewProps> = (
                   <Folder className="w-4 h-4 text-[#007cc0]" />
                   <span>دستورهای کار تولید و مراحل ساخت (Manufacturing Orders)</span>
                 </div>
-                <span className="text-[11px] text-[#666666]">
-                  {toPersianDigits(filteredOrders.length)} دستور کار
-                </span>
+                <div className="flex items-center gap-2.5 text-[11px] text-[#666666] font-mono tabular-nums">
+                  <span className="font-sans">
+                    تعداد: <strong className="font-mono text-[#333333]">{toPersianDigits(filteredOrders.length)}</strong>
+                  </span>
+                  <span className="text-[#d9d9d9]">·</span>
+                  <span className="font-sans text-[#007cc0]">
+                    در جریان: <strong className="font-mono">{toPersianDigits(filteredOrders.filter(o => o.status === 'IN_PROGRESS' || o.status === 'RELEASED').length)}</strong>
+                  </span>
+                  <span className="text-[#d9d9d9]">·</span>
+                  <span className="font-sans text-[#107e3e]">
+                    تکمیل‌شده: <strong className="font-mono">{toPersianDigits(filteredOrders.filter(o => o.status === 'COMPLETED').length)}</strong>
+                  </span>
+                </div>
               </button>
 
               {expandedGroups.orders_group && (
@@ -1454,6 +1535,18 @@ export const ProductionWipModuleView: React.FC<ProductionWipModuleViewProps> = (
                     const completedOps = mo.operations.filter(
                       o => o.status === 'COMPLETED'
                     ).length;
+                    const activeOp =
+                      mo.operations.find(o => o.inProgressQty > 0) ||
+                      mo.operations.find(o => o.waitingInputQty > 0) ||
+                      mo.operations.find(o => o.readyForTransferQty > 0) ||
+                      mo.operations.find(o => o.status !== 'COMPLETED');
+                    const moWaiting = mo.operations.reduce((s, o) => s + (o.waitingInputQty || 0), 0);
+                    const moInProg = mo.operations.reduce((s, o) => s + (o.inProgressQty || 0), 0);
+                    const moReady = mo.operations.reduce((s, o) => s + (o.readyForTransferQty || 0), 0);
+                    const moProgressPct =
+                      mo.targetQuantity > 0
+                        ? Math.min(100, Math.round((mo.completedQuantity / mo.targetQuantity) * 100))
+                        : 0;
                     return (
                       <div key={mo.id} className="bg-white">
                         {/* MO Row */}
@@ -1495,23 +1588,42 @@ export const ProductionWipModuleView: React.FC<ProductionWipModuleViewProps> = (
                                 >
                                   ({mo.partCode})
                                 </button>
+                                {activeOp && (
+                                  <span className="text-[11px] text-[#007cc0] font-medium">
+                                    · ایستگاه فعال: <strong className="font-mono">{activeOp.stepCode}</strong> ({activeOp.stepName})
+                                  </span>
+                                )}
                               </div>
-                              <div className="text-[11px] text-[#666666] mt-0.5 flex items-center gap-3 flex-wrap">
+                              <div className="text-[11px] text-[#666666] mt-0.5 flex items-center gap-2.5 flex-wrap tabular-nums">
                                 <span>
-                                  هدف ساخت:{' '}
-                                  <strong className="font-mono text-[#333333] tabular-nums">
+                                  هدف:{' '}
+                                  <strong className="font-mono text-[#333333]">
                                     {formatNumber(mo.targetQuantity)}
                                   </strong>
                                 </span>
+                                <span>·</span>
                                 <span>
-                                  تکمیل نهایی:{' '}
-                                  <strong className="font-mono text-[#107e3e] tabular-nums">
-                                    {formatNumber(mo.completedQuantity)}
+                                  تکمیل:{' '}
+                                  <strong className="font-mono text-[#107e3e]">
+                                    {formatNumber(mo.completedQuantity)} ({toPersianDigits(moProgressPct)}٪)
                                   </strong>
                                 </span>
+                                <span>·</span>
+                                <span>
+                                  صف: <strong className="font-mono text-[#e9730c]">{formatNumber(moWaiting)}</strong>
+                                </span>
+                                <span>·</span>
+                                <span>
+                                  پای دستگاه: <strong className="font-mono text-[#007cc0]">{formatNumber(moInProg)}</strong>
+                                </span>
+                                <span>·</span>
+                                <span>
+                                  آماده انتقال: <strong className="font-mono text-[#107e3e]">{formatNumber(moReady)}</strong>
+                                </span>
+                                <span>·</span>
                                 <span>
                                   ضایعات:{' '}
-                                  <strong className="font-mono text-[#bb0000] tabular-nums">
+                                  <strong className="font-mono text-[#bb0000]">
                                     {formatNumber(mo.totalScrapQuantity)}
                                   </strong>
                                 </span>
@@ -1650,9 +1762,18 @@ export const ProductionWipModuleView: React.FC<ProductionWipModuleViewProps> = (
                   <Folder className="w-4 h-4 text-[#007cc0]" />
                   <span>حواله‌های انتقال بین مراحل (Inter-Operation Transfers)</span>
                 </div>
-                <span className="text-[11px] text-[#666666]">
-                  {toPersianDigits(transfers.length)} حواله
-                </span>
+                <div className="flex items-center gap-2.5 text-[11px] text-[#666666] font-mono tabular-nums">
+                  <span className="font-sans">
+                    کل: <strong className="font-mono text-[#333333]">{toPersianDigits(transfers.length)}</strong> حواله
+                  </span>
+                  <span className="text-[#d9d9d9]">·</span>
+                  <span className="font-sans text-[#b85a00]">
+                    در انتظار تایید:{' '}
+                    <strong className="font-mono">
+                      {toPersianDigits(transfers.filter(t => t.status === 'PENDING_APPROVAL').length)}
+                    </strong>
+                  </span>
+                </div>
               </button>
 
               {expandedGroups.transfers_group && (

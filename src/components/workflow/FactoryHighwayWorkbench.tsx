@@ -58,6 +58,7 @@ import { EmptyState } from '../common/EmptyState';
 import { MetricTooltip } from '../common/MetricTooltip';
 import { loadVipPartsMap, saveVipPartsMap, isPartVip } from '../../utils/qcHoldStore';
 import { PreMoWipInspectionModal } from './PreMoWipInspectionModal';
+import { usePersistedOpen, usePersistedValue } from '../../hooks/usePersistedCollapse';
 import { SubComponentWipPreflightCard } from './SubComponentWipPreflightCard';
 import { useErpRouter } from '../../context/RouterContext';
 
@@ -314,13 +315,7 @@ export const FactoryHighwayWorkbench: React.FC<FactoryHighwayWorkbenchProps> = (
   const [carFilter, setCarFilter] = useState<string>('ALL');
 
   // Configurable KPI Overview State (Persisted in localStorage)
-  const [showKpiPanel, setShowKpiPanel] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem('kpims_dashboard_kpi_open') === 'true';
-    } catch {
-      return false;
-    }
-  });
+  const [showKpiPanel, , handleToggleKpiPanel] = usePersistedOpen('dashboard_kpi_open', false);
   const [kpiViewMode, setKpiViewMode] = useState<KpiViewMode>(() => {
     try {
       const saved = localStorage.getItem('kpims_dashboard_kpi_mode') as KpiViewMode | null;
@@ -343,16 +338,6 @@ export const FactoryHighwayWorkbench: React.FC<FactoryHighwayWorkbenchProps> = (
     };
   });
 
-  const handleToggleKpiPanel = () => {
-    const next = !showKpiPanel;
-    setShowKpiPanel(next);
-    try {
-      localStorage.setItem('kpims_dashboard_kpi_open', String(next));
-    } catch {
-      // ignore
-    }
-  };
-
   const handleSelectKpiMode = (mode: KpiViewMode) => {
     setKpiViewMode(mode);
     try {
@@ -372,21 +357,21 @@ export const FactoryHighwayWorkbench: React.FC<FactoryHighwayWorkbenchProps> = (
     }
   };
 
-  const [showWarehouseTools, setShowWarehouseTools] = useState(false);
+  const [showWarehouseTools, setShowWarehouseTools] = usePersistedOpen('highway_warehouse_tools_open', false);
 
   // Master-Detail Slide-Over Drawer State (SAP Fiori / Dynamics 365 Style)
-  const [expandedOrderId, setExpandedOrderId] = useState<string | null>(initialOrderId || null);
+  const [expandedOrderId, setExpandedOrderId] = usePersistedValue<string | null>('highway_expanded_order_id', null);
   const [expandedViewMode, setExpandedViewMode] = useState<'OPS' | 'BOM'>('OPS');
   const [drawerTab, setDrawerTab] = useState<DrawerTabKey>(initialDrawerTab || 'TRACEABILITY');
 
   useEffect(() => {
-    if (initialOrderId !== undefined) {
+    if (initialOrderId) {
       setExpandedOrderId(initialOrderId);
     }
     if (initialDrawerTab) {
       setDrawerTab(initialDrawerTab);
     }
-  }, [initialOrderId, initialDrawerTab]);
+  }, [initialOrderId, initialDrawerTab, setExpandedOrderId]);
 
   const handleOpenOrderDrawer = (orderId: string, tab: DrawerTabKey = 'TRACEABILITY') => {
     setExpandedOrderId(orderId);

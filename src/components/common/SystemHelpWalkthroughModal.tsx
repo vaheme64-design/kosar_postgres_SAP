@@ -23,6 +23,7 @@ import {
 import { toPersianDigits } from '../../utils/formatters';
 import { WizardScenarioId } from './AdvancedIndustrialScenarioWizardModal';
 import { PAGE_TRAINING_CATALOG } from '../../data/pageTrainingCatalog';
+import { usePersistedValue } from '../../hooks/usePersistedCollapse';
 
 export interface HelpWizardLaunchParams {
   scenarioId?: WizardScenarioId;
@@ -192,7 +193,7 @@ export const SystemHelpWalkthroughModal: React.FC<SystemHelpWalkthroughModalProp
   const [simQty, setSimQty] = useState(5000);
   const [scenarioCategory, setScenarioCategory] = useState('ALL');
   const [scenarioSearch, setScenarioSearch] = useState('');
-  const [expandedScenarioId, setExpandedScenarioId] = useState<string | null>('PART_LIFECYCLE_PRODUCTION');
+  const [expandedScenarioId, setExpandedScenarioId] = usePersistedValue<string | null>('help_walkthrough_scenario_id', null);
   const [kpiCategoryFilter, setKpiCategoryFilter] = useState<string>('ALL');
 
   // Dual DB state

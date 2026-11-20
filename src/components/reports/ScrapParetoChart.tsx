@@ -8,9 +8,12 @@ import {
   Edit3,
   Trash2,
   Plus,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 import { formatNumber, toPersianDigits } from '../../utils/formatters';
 import { useEnterpriseUx } from '../../context/EnterpriseUxContext';
+import { usePersistedOpen } from '../../hooks/usePersistedCollapse';
 
 export interface ParetoCauseItem {
   id: string;
@@ -122,6 +125,7 @@ const INITIAL_DOWNTIME_CAUSES: ParetoCauseItem[] = [
 export const ScrapParetoChart: React.FC = () => {
   const { openQuickEditDrawer, requestConfirm, showUndoToast, recordAudit } = useEnterpriseUx();
   const [mode, setMode] = useState<'SCRAP' | 'DOWNTIME'>('SCRAP');
+  const [isDetailsExpanded, , toggleDetailsExpanded] = usePersistedOpen('report_scrap_pareto_open', false);
 
   // Dynamic State (Persisted in localStorage, Zero Hardcoded Read-Only Arrays)
   const [scrapCauses, setScrapCauses] = useState<ParetoCauseItem[]>(() => {
@@ -410,11 +414,23 @@ export const ScrapParetoChart: React.FC = () => {
             <Plus className="w-3.5 h-3.5" />
             <span>افزودن علت جدید</span>
           </button>
+
+          <button
+            type="button"
+            onClick={toggleDetailsExpanded}
+            className="sap-btn-standard px-2.5 py-1.5 text-xs flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+          >
+            <span>{isDetailsExpanded ? 'بستن جزئیات پارتو' : `نمایش نمودار (${toPersianDigits(computedRows.length)} علت)`}</span>
+            {isDetailsExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+          </button>
         </div>
       </div>
 
-      {/* 80/20 Insight Banner */}
-      <div className="bg-[#f8f9fa] border border-[#d9d9d9] rounded-sm px-3.5 py-2 flex flex-wrap items-center justify-between gap-2 text-xs">
+      {/* 80/20 Insight Banner (Always visible at a glance) */}
+      <div
+        onClick={toggleDetailsExpanded}
+        className="bg-[#f8f9fa] hover:bg-[#f0f4f8] border border-[#d9d9d9] rounded-sm px-3.5 py-2 flex flex-wrap items-center justify-between gap-2 text-xs cursor-pointer transition-colors"
+      >
         <div className="flex items-center gap-2 text-[#333333]">
           <TrendingDown className="w-4 h-4 text-[#bb0000] shrink-0" />
           <span>
@@ -437,6 +453,7 @@ export const ScrapParetoChart: React.FC = () => {
       </div>
 
       {/* Minimal Descending Bar Chart Rows with Pencil Edit & Soft Delete */}
+      {isDetailsExpanded && (
       <div className="space-y-2.5">
         {computedRows.map(row => (
           <div
@@ -540,6 +557,7 @@ export const ScrapParetoChart: React.FC = () => {
           </div>
         ))}
       </div>
+      )}
     </div>
   );
 };

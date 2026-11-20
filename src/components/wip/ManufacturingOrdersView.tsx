@@ -29,6 +29,7 @@ import {
 } from '../../utils/formatters';
 import { TableSkeleton } from '../ui/Skeleton';
 import { useErpRouter } from '../../context/RouterContext';
+import { usePersistedExpandMap } from '../../hooks/usePersistedCollapse';
 
 interface ManufacturingOrdersViewProps {
   orders: ManufacturingOrder[];
@@ -58,7 +59,13 @@ export const ManufacturingOrdersView: React.FC<ManufacturingOrdersViewProps> = (
   const { traceDocument } = useErpRouter();
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('ALL');
-  const [expandedMoId, setExpandedMoId] = useState<string | null>(orders.length > 0 ? orders[0].id : null);
+  const {
+    isExpanded: isMoExpanded,
+    toggle: toggleMoExpanded,
+    expandAll: expandAllMos,
+    collapseAll: collapseAllMos,
+    expandedCount: expandedMosCount,
+  } = usePersistedExpandMap('wip_orders_expanded', {});
 
   if (loading && orders.length === 0) {
     return <TableSkeleton rows={6} columns={6} theme="light" />;
@@ -149,14 +156,48 @@ export const ManufacturingOrdersView: React.FC<ManufacturingOrdersViewProps> = (
 
       {/* Orders List & Interactive Operations */}
       <div className="space-y-3">
+        {filteredOrders.length > 0 && (
+          <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5 bg-white border border-[#d9d9d9] rounded-md text-xs">
+            <span className="text-[#666666] tabular-nums">
+              دستورات ساخت: <strong className="font-mono text-[#333333]">{toPersianDigits(filteredOrders.length)}</strong> · باز:{' '}
+              <strong className="font-mono text-[#007cc0]">
+                {toPersianDigits(expandedMosCount(filteredOrders.map(o => o.id)))}
+              </strong>
+            </span>
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => expandAllMos(filteredOrders.map(o => o.id))}
+                className="sap-btn-standard px-2.5 py-1 text-[11px] cursor-pointer whitespace-nowrap"
+              >
+                باز کردن همه
+              </button>
+              <button
+                type="button"
+                onClick={collapseAllMos}
+                className="sap-btn-standard px-2.5 py-1 text-[11px] cursor-pointer whitespace-nowrap"
+              >
+                بستن همه
+              </button>
+            </div>
+          </div>
+        )}
+
         {filteredOrders.length === 0 ? (
           <div className="sap-card p-10 text-center text-[#666666] text-xs">
             هیچ دستور کاری با فیلترهای انتخابی یافت نشد.
           </div>
         ) : (
           filteredOrders.map(mo => {
-            const isExpanded = expandedMoId === mo.id;
+            const isExpanded = isMoExpanded(mo.id);
             const completedOpsCount = mo.operations.filter(o => o.status === 'COMPLETED').length;
+            const activeOp =
+              mo.operations.find(o => o.inProgressQty > 0) ||
+              mo.operations.find(o => o.waitingInputQty > 0) ||
+              mo.operations.find(o => o.readyForTransferQty > 0) ||
+              mo.operations.find(o => o.status !== 'COMPLETED');
+            const totalWaiting = mo.operations.reduce((s, o) => s + (o.waitingInputQty || 0), 0);
+            const totalReady = mo.operations.reduce((s, o) => s + (o.readyForTransferQty || 0), 0);
             const statusInfo = statusBadges[mo.status] || { label: mo.status, color: 'bg-[#f5f5f5] text-[#333333] border-[#d9d9d9]' };
 
             const finalPct =
@@ -209,6 +250,11 @@ export const ManufacturingOrdersView: React.FC<ManufacturingOrdersViewProps> = (
                           نسخه مسیر {mo.routingVersion}
                         </span>
                         <span className="text-xs font-bold text-[#333333] mr-1">{mo.partName}</span>
+                        {activeOp && (
+                          <span className="text-[11px] text-[#007cc0] font-medium">
+                            · ایستگاه جاری: <strong className="font-mono">{activeOp.stepCode}</strong> ({activeOp.stepName})
+                          </span>
+                        )}
                       </div>
                       <div className="text-xs text-[#666666] mt-1 flex items-center gap-3 flex-wrap tabular-nums">
                         <span>
@@ -223,6 +269,7 @@ export const ManufacturingOrdersView: React.FC<ManufacturingOrdersViewProps> = (
                         </span>
                         <span>هدف: <strong className="font-mono text-[#107e3e]">{formatNumber(mo.targetQuantity)}</strong></span>
                         <span>ورودی: <strong className="font-mono text-[#007cc0]">{formatNumber(mo.initialInputQuantity)}</strong></span>
+                        <span>صف/آماده: <strong className="font-mono text-[#e9730c]">{formatNumber(totalWaiting)}</strong> / <strong className="font-mono text-[#107e3e]">{formatNumber(totalReady)}</strong></span>
                         <span>تکمیل: <strong className="font-mono text-[#333333]">{formatNumber(mo.completedQuantity)}</strong></span>
                         <span>ضایعات: <strong className="font-mono text-[#bb0000]">{formatNumber(mo.totalScrapQuantity)}</strong></span>
                         <span className="inline-flex items-center gap-1.5 min-w-[140px]">
@@ -266,8 +313,8 @@ export const ManufacturingOrdersView: React.FC<ManufacturingOrdersViewProps> = (
 
                     <button
                       type="button"
-                      onClick={() => setExpandedMoId(isExpanded ? null : mo.id)}
-                      className="sap-btn-standard flex items-center gap-1 px-3 py-1 text-xs whitespace-nowrap shrink-0"
+                      onClick={() => toggleMoExpanded(mo.id)}
+                      className="sap-btn-standard flex items-center gap-1 px-3 py-1 text-xs whitespace-nowrap shrink-0 cursor-pointer"
                     >
                       <span>{isExpanded ? 'بستن مراحل' : 'مشاهده مراحل'}</span>
                       {isExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}

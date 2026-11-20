@@ -13,6 +13,7 @@ import {
   Download,
   Printer,
   ChevronDown,
+  ChevronUp,
   ChevronRight,
   Filter,
   BarChart3,
@@ -31,6 +32,7 @@ import { exportToCsv } from '../../utils/csvExport';
 import { formatNumber, toPersianDigits } from '../../utils/formatters';
 import { ScrapParetoChart } from './ScrapParetoChart';
 import { useErpRouter } from '../../context/RouterContext';
+import { usePersistedExpandMap, usePersistedOpen } from '../../hooks/usePersistedCollapse';
 
 // -------------------------------------------------------------
 // Types & Domain Models
@@ -86,12 +88,14 @@ export const ComprehensiveProductionReportView: React.FC = () => {
   const [selectedHorizon, setSelectedHorizon] = useState<'TODAY' | 'YESTERDAY' | 'WEEKLY' | 'MONTHLY'>('TODAY');
   const [selectedHall, setSelectedHall] = useState<string>('ALL');
   const [searchQuery, setSearchQuery] = useState<string>('');
-  const [expandedOeeNodes, setExpandedOeeNodes] = useState<Record<string, boolean>>({
-    oee_root: true,
-    oee_avail: true,
-    oee_perf: true,
-    oee_qual: true,
-  });
+  const {
+    isExpanded: isOeeNodeExpanded,
+    toggle: toggleNode,
+    expandAll: expandAllOeeNodes,
+    collapseAll: collapseAllOeeNodes,
+  } = usePersistedExpandMap('report_oee_tree_nodes', {});
+  const [isDowntimeSectionOpen, , toggleDowntimeSection] = usePersistedOpen('report_downtime_timeline_open', false);
+  const [isAdherenceSectionOpen, , toggleAdherenceSection] = usePersistedOpen('report_schedule_adherence_open', false);
 
   // Selected Machine for timeline inspection
   const [inspectedMachine, setInspectedMachine] = useState<string | null>(null);
@@ -538,14 +542,6 @@ export const ComprehensiveProductionReportView: React.FC = () => {
     };
   }, [dynamicOeeMetrics, machineDowntimes]);
 
-  // Toggle OEE Node Expansion
-  const toggleNode = (nodeId: string) => {
-    setExpandedOeeNodes(prev => ({
-      ...prev,
-      [nodeId]: !prev[nodeId],
-    }));
-  };
-
   // Filtered Adherence List
   const filteredAdherence = useMemo(() => {
     return adherenceList.filter(item => {
@@ -949,31 +945,17 @@ export const ComprehensiveProductionReportView: React.FC = () => {
             </button>
             <button
               type="button"
-              onClick={() =>
-                setExpandedOeeNodes({
-                  oee_root: true,
-                  oee_avail: true,
-                  oee_perf: true,
-                  oee_qual: true,
-                })
-              }
+              onClick={() => expandAllOeeNodes(['oee_root', 'oee_avail', 'oee_perf', 'oee_qual'])}
               className="sap-btn-standard px-2.5 py-1 cursor-pointer"
             >
               باز کردن همه شاخه‌ها
             </button>
             <button
               type="button"
-              onClick={() =>
-                setExpandedOeeNodes({
-                  oee_root: true,
-                  oee_avail: false,
-                  oee_perf: false,
-                  oee_qual: false,
-                })
-              }
+              onClick={collapseAllOeeNodes}
               className="sap-btn-standard px-2.5 py-1 cursor-pointer"
             >
-              بستن شاخه‌ها
+              بستن همه شاخه‌ها
             </button>
           </div>
         </div>
@@ -988,8 +970,9 @@ export const ComprehensiveProductionReportView: React.FC = () => {
                   type="button"
                   onClick={() => toggleNode(oeeTree.id)}
                   className="w-7 h-7 rounded-lg bg-white border border-amber-300 text-amber-900 flex items-center justify-center cursor-pointer shadow-2xs"
+                  title={isOeeNodeExpanded(oeeTree.id) ? 'بستن شاخه‌های OEE' : 'باز کردن شاخه‌های OEE'}
                 >
-                  {expandedOeeNodes[oeeTree.id] ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+                  {isOeeNodeExpanded(oeeTree.id) ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
                 </button>
                 <div>
                   <span className="font-bold text-sm text-slate-900 block">{oeeTree.title}</span>
@@ -1024,10 +1007,10 @@ export const ComprehensiveProductionReportView: React.FC = () => {
             </div>
 
             {/* Level 1: Three Pillars (Availability, Performance, Quality) */}
-            {expandedOeeNodes[oeeTree.id] && oeeTree.children && (
+            {isOeeNodeExpanded(oeeTree.id) && oeeTree.children && (
               <div className="mt-4 pt-4 border-t border-amber-200/80 grid grid-cols-1 md:grid-cols-3 gap-4">
                 {oeeTree.children.map(pillar => {
-                  const isExpanded = expandedOeeNodes[pillar.id];
+                  const isExpanded = isOeeNodeExpanded(pillar.id);
                   return (
                     <div
                       key={pillar.id}
@@ -1162,41 +1145,63 @@ export const ComprehensiveProductionReportView: React.FC = () => {
       {/* SECTION 2: MACHINE DOWNTIME TIMELINE (نمودار زمانی توقفات ماشین‌آلات) */}
       {/* ==================================================================== */}
       <div className="sap-card p-4 space-y-3.5">
-        <div className="border-b border-[#e8e8e8] pb-3 flex flex-wrap items-center justify-between gap-3">
+        <div
+          onClick={toggleDowntimeSection}
+          className={`flex flex-wrap items-center justify-between gap-3 cursor-pointer ${
+            isDowntimeSectionOpen ? 'border-b border-[#e8e8e8] pb-3' : ''
+          }`}
+        >
           <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-sm bg-[#ffebee] text-[#bb0000] border border-[#bb0000]/25 flex items-center justify-center">
+            <div className="w-8 h-8 rounded-sm bg-[#ffebee] text-[#bb0000] border border-[#bb0000]/25 flex items-center justify-center shrink-0">
               <Clock className="w-4 h-4" />
             </div>
             <div>
               <h3 className="text-sm font-bold text-[#333333]">
                 ۲. نمودار زمانی توقفات ماشین‌آلات و خطوط تولید (Machine Downtime Timeline / Gantt)
               </h3>
-              <p className="text-xs text-[#666666] mt-0.5">
-                نمایش توقفات شیفت بر روی خط زمان ۲۴ ساعته (ساعت ۰۷:۰۰ الی ۱۹:۰۰) به تفکیک خرابی اضطراری، تعویض قالب (SMED) و کمبود متریال
+              <p className="text-xs text-[#666666] mt-0.5 tabular-nums">
+                مجموع توقفات شیفت:{' '}
+                <strong className="font-mono text-[#bb0000]">{toPersianDigits(totalDowntimeMinutes)} دقیقه</strong>{' '}
+                در <strong className="font-mono text-[#333333]">{toPersianDigits(uniqueMachines.length)} دستگاه</strong>{' '}
+                ({toPersianDigits(filteredDowntimes.length)} رویداد ثبت‌شده)
               </p>
             </div>
           </div>
 
-          <div className="flex items-center gap-3 text-xs flex-wrap">
-            <div className="flex items-center gap-1.5">
-              <span className="w-3 h-3 rounded-full bg-[#bb0000] inline-block" />
-              <span className="text-[#666666]">خرابی اضطراری</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="w-3 h-3 rounded-full bg-[#e9730c] inline-block" />
-              <span className="text-[#666666]">تعویض قالب (SMED)</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="w-3 h-3 rounded-full bg-[#d97706] inline-block" />
-              <span className="text-[#666666]">توقف جزئی پران</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="w-3 h-3 rounded-full bg-[#007cc0] inline-block" />
-              <span className="text-[#666666]">کمبود مهره جوش / تغذیه</span>
-            </div>
+          <div className="flex items-center gap-3 text-xs flex-wrap" onClick={e => e.stopPropagation()}>
+            {isDowntimeSectionOpen && (
+              <>
+                <div className="flex items-center gap-1.5">
+                  <span className="w-3 h-3 rounded-full bg-[#bb0000] inline-block" />
+                  <span className="text-[#666666]">خرابی اضطراری</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="w-3 h-3 rounded-full bg-[#e9730c] inline-block" />
+                  <span className="text-[#666666]">تعویض قالب (SMED)</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="w-3 h-3 rounded-full bg-[#d97706] inline-block" />
+                  <span className="text-[#666666]">توقف جزئی پران</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="w-3 h-3 rounded-full bg-[#007cc0] inline-block" />
+                  <span className="text-[#666666]">کمبود مهره جوش / تغذیه</span>
+                </div>
+              </>
+            )}
+            <button
+              type="button"
+              onClick={toggleDowntimeSection}
+              className="sap-btn-standard px-2.5 py-1 text-xs flex items-center gap-1 cursor-pointer whitespace-nowrap"
+            >
+              <span>{isDowntimeSectionOpen ? 'بستن جزئیات' : 'نمایش خط زمان و جدول'}</span>
+              {isDowntimeSectionOpen ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+            </button>
           </div>
         </div>
 
+        {isDowntimeSectionOpen && (
+        <>
         {/* Timeline Axis (Hours 07:00 to 19:00) */}
         <div className="overflow-x-auto border border-[#d9d9d9] rounded-sm p-3.5 bg-[#f8f9fa] space-y-3.5">
           <div className="min-w-[850px] space-y-3">
@@ -1310,38 +1315,66 @@ export const ComprehensiveProductionReportView: React.FC = () => {
             </tbody>
           </table>
         </div>
+        </>
+        )}
       </div>
 
       {/* ==================================================================== */}
       {/* SECTION 3: SCHEDULE ADHERENCE (انحراف از برنامه تولید و زمان‌بندی)    */}
       {/* ==================================================================== */}
       <div className="sap-card p-4 space-y-3.5">
-        <div className="border-b border-[#e8e8e8] pb-3 flex flex-wrap items-center justify-between gap-3">
+        <div
+          onClick={toggleAdherenceSection}
+          className={`flex flex-wrap items-center justify-between gap-3 cursor-pointer ${
+            isAdherenceSectionOpen ? 'border-b border-[#e8e8e8] pb-3' : ''
+          }`}
+        >
           <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-sm bg-[#e5f3fa] text-[#007cc0] border border-[#007cc0]/25 flex items-center justify-center">
+            <div className="w-8 h-8 rounded-sm bg-[#e5f3fa] text-[#007cc0] border border-[#007cc0]/25 flex items-center justify-center shrink-0">
               <BarChart3 className="w-4 h-4" />
             </div>
             <div>
               <h3 className="text-sm font-bold text-[#333333]">
                 ۳. ماتریس انحراف از برنامه تولید و تطابق زمان‌بندی (Schedule Adherence & Variance Analysis)
               </h3>
-              <p className="text-xs text-[#666666] mt-0.5">
-                مقایسه دقیق تیراژ مصوب و تیراژ تولید سالم به همراه افق زمانی برنامه‌ریزی‌شده و ریشه‌یابی تأخیرات
+              <p className="text-xs text-[#666666] mt-0.5 tabular-nums">
+                انطباق کل:{' '}
+                <strong className="font-mono text-[#007cc0]">{toPersianDigits(overallAdherencePercent)}٪</strong> ·{' '}
+                تولید سالم: <strong className="font-mono text-[#107e3e]">{formatNumber(totalActualPcs)}</strong> از{' '}
+                <strong className="font-mono text-[#333333]">{formatNumber(totalPlannedPcs)}</strong> ·{' '}
+                <span className="text-[#bb0000]">
+                  {toPersianDigits(adherenceList.filter(a => a.status === 'DELAYED' || a.status === 'CRITICAL_LAG').length)} دستور با تأخیر
+                </span>
               </p>
             </div>
           </div>
 
-          <div className="relative w-64 text-xs">
-            <Search className="w-3.5 h-3.5 text-[#666666] absolute right-2.5 top-2" />
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={e => setSearchQuery(e.target.value)}
-              placeholder="جستجوی دستور کار یا نام قطعه..."
-              className="w-full bg-[#ffffff] border border-[#bfbfbf] focus:border-[#007cc0] rounded-sm pr-8 pl-2.5 py-1.5 text-[#333333] focus:outline-none"
-            />
+          <div className="flex items-center gap-2" onClick={e => e.stopPropagation()}>
+            {isAdherenceSectionOpen && (
+              <div className="relative w-64 text-xs">
+                <Search className="w-3.5 h-3.5 text-[#666666] absolute right-2.5 top-2" />
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={e => setSearchQuery(e.target.value)}
+                  placeholder="جستجوی دستور کار یا نام قطعه..."
+                  className="w-full bg-[#ffffff] border border-[#bfbfbf] focus:border-[#007cc0] rounded-sm pr-8 pl-2.5 py-1.5 text-[#333333] focus:outline-none"
+                />
+              </div>
+            )}
+            <button
+              type="button"
+              onClick={toggleAdherenceSection}
+              className="sap-btn-standard px-2.5 py-1 text-xs flex items-center gap-1 cursor-pointer whitespace-nowrap"
+            >
+              <span>{isAdherenceSectionOpen ? 'بستن جدول' : `نمایش ماتریس (${toPersianDigits(filteredAdherence.length)} دستور)`}</span>
+              {isAdherenceSectionOpen ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+            </button>
           </div>
         </div>
+
+        {isAdherenceSectionOpen && (
+        <>
 
         {/* Schedule Adherence Table */}
         <div className="overflow-x-auto border border-[#d9d9d9] rounded-sm">
@@ -1448,6 +1481,8 @@ export const ComprehensiveProductionReportView: React.FC = () => {
             </tbody>
           </table>
         </div>
+        </>
+        )}
       </div>
 
       {/* ==================================================================== */}

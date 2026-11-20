@@ -21,6 +21,7 @@ import { SearchableSelect } from '../common/SearchableSelect';
 import { useErpRouter } from '../../context/RouterContext';
 import { useEnterpriseUx } from '../../context/EnterpriseUxContext';
 import { InlinePageGuideButton } from '../common/PageGuideSystem';
+import { usePersistedExpandMap } from '../../hooks/usePersistedCollapse';
 
 export interface SubComponentNode {
   id: string;
@@ -150,12 +151,13 @@ export const ProductStructureView: React.FC<ProductStructureViewProps> = ({ part
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
 
-  const [expandedNodes, setExpandedNodes] = useState<Record<string, boolean>>({
-    'SUB-ECU-01': true,
-    'SUB-ECU-02': true,
-    'SUB-TAR-01': true,
-    'SUB-TAR-02': true,
-  });
+  const {
+    setMap: setExpandedNodes,
+    toggle: toggleExpand,
+    isExpanded: isNodeExpanded,
+    expandAll: expandAllNodes,
+    collapseAll: collapseAllNodes,
+  } = usePersistedExpandMap('bom_product_structure_nodes', {});
 
   const reconcileStructuresWithParts = React.useCallback(
     (list: ProductStructureData[], liveParts: Part[]): { next: ProductStructureData[]; changed: boolean } => {
@@ -328,8 +330,14 @@ export const ProductStructureView: React.FC<ProductStructureViewProps> = ({ part
 
   const activeStructure = structures.find(s => s.id === selectedStructureId) || structures[0];
 
-  const toggleExpand = (nodeId: string) => {
-    setExpandedNodes(prev => ({ ...prev, [nodeId]: !prev[nodeId] }));
+  const collectExpandableIds = (nodes: SubComponentNode[]): string[] => {
+    const ids: string[] = [];
+    for (const n of nodes) {
+      if (n.subComponents && n.subComponents.length > 0) {
+        ids.push(n.id, ...collectExpandableIds(n.subComponents));
+      }
+    }
+    return ids;
   };
 
   const handleOpenAddSubComponent = (parentNodeId: string | null) => {
@@ -496,8 +504,8 @@ export const ProductStructureView: React.FC<ProductStructureViewProps> = ({ part
 
   // Recursive Tree Row Renderer Component (Clean Tabular Hierarchy)
   const renderTreeNode = (node: SubComponentNode, depth: number = 1): React.ReactNode => {
-    const hasChildren = node.subComponents && node.subComponents.length > 0;
-    const isExpanded = expandedNodes[node.id] ?? true;
+    const hasChildren = Boolean(node.subComponents && node.subComponents.length > 0);
+    const isExpanded = isNodeExpanded(node.id);
 
     return (
       <React.Fragment key={node.id}>
@@ -512,6 +520,7 @@ export const ProductStructureView: React.FC<ProductStructureViewProps> = ({ part
                   type="button"
                   onClick={() => toggleExpand(node.id)}
                   className="w-5 h-5 rounded-sm border border-[#d9d9d9] bg-[#ffffff] flex items-center justify-center text-[#666666] hover:text-[#333333] cursor-pointer shrink-0"
+                  title={isExpanded ? 'بستن زیرمجموعه‌ها' : 'باز کردن زیرمجموعه‌ها'}
                 >
                   {isExpanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
                 </button>
@@ -521,6 +530,11 @@ export const ProductStructureView: React.FC<ProductStructureViewProps> = ({ part
                 </span>
               )}
               <span className="font-semibold text-xs text-[#333333]">{node.partName}</span>
+              {hasChildren && !isExpanded && (
+                <span className="text-[10px] text-[#007cc0] bg-[#e5f3fa] border border-[#b3ddf2] px-1.5 py-0.2 rounded-sm tabular-nums">
+                  +{toPersianDigits(node.subComponents!.length)} زیرجزء
+                </span>
+              )}
             </div>
           </td>
           <td className="py-2 px-3 font-mono text-xs whitespace-nowrap">
@@ -703,13 +717,33 @@ export const ProductStructureView: React.FC<ProductStructureViewProps> = ({ part
                 <span className="text-[11px] text-[#666666]">— {activeStructure.notes}</span>
               )}
             </div>
-            <span className="text-[11px] text-[#666666] tabular-nums">
-              زیرمجموعه‌های سطح اول:{' '}
-              <strong className="font-mono text-[#007cc0]">
-                {toPersianDigits(activeStructure.subComponents.length)}
-              </strong>{' '}
-              ردیف
-            </span>
+            <div className="flex items-center gap-2.5 flex-wrap">
+              <span className="text-[11px] text-[#666666] tabular-nums">
+                زیرمجموعه‌های سطح اول:{' '}
+                <strong className="font-mono text-[#007cc0]">
+                  {toPersianDigits(activeStructure.subComponents.length)}
+                </strong>{' '}
+                ردیف
+              </span>
+              {activeStructure.subComponents.some(n => n.subComponents && n.subComponents.length > 0) && (
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => expandAllNodes(collectExpandableIds(activeStructure.subComponents))}
+                    className="sap-btn-standard px-2 py-0.5 text-[11px] cursor-pointer whitespace-nowrap"
+                  >
+                    باز کردن همه
+                  </button>
+                  <button
+                    type="button"
+                    onClick={collapseAllNodes}
+                    className="sap-btn-standard px-2 py-0.5 text-[11px] cursor-pointer whitespace-nowrap"
+                  >
+                    بستن همه
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
 
           {activeStructure.subComponents.length === 0 ? (

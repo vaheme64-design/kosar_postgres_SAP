@@ -54,6 +54,7 @@ import {
   isPartVip,
   QcHoldRecord,
 } from '../../utils/qcHoldStore';
+import { usePersistedExpandMap } from '../../hooks/usePersistedCollapse';
 
 export type StockGroupingKey =
   | 'NONE'
@@ -371,6 +372,12 @@ export const StockInquiryView: React.FC<StockInquiryViewProps> = ({
 
   // Grouping & Expandable Details
   const [groupBy, setGroupBy] = useState<StockGroupingKey>('NONE');
+  const {
+    isExpanded: isGroupExpanded,
+    toggle: toggleGroupExpand,
+    expandAll: expandAllGroups,
+    collapseAll: collapseAllGroups,
+  } = usePersistedExpandMap('stock_inquiry_groups', {});
   const [expandedRowId, setExpandedRowId] = useState<string | null>(null);
   const [showColumnPicker, setShowColumnPicker] = useState(false);
   const [savedViewNotice, setSavedViewNotice] = useState(false);
@@ -1572,11 +1579,44 @@ export const StockInquiryView: React.FC<StockInquiryViewProps> = ({
       >
         {groupBy !== 'NONE' ? (
           <div className="divide-y divide-[#d9d9d9]">
-            {groupedData.map(group => (
+            <div className="px-3 py-2 bg-[#fafafa] flex flex-wrap items-center justify-between gap-2 text-xs">
+              <span className="text-[#666666] tabular-nums">
+                نمایش <strong className="font-mono text-[#333333]">{toPersianDigits(groupedData.length)}</strong> گروه (کلیک روی سرگروه جهت مشاهده ردیف‌ها)
+              </span>
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => expandAllGroups(groupedData.map(g => g.groupKey))}
+                  className="sap-btn-standard px-2.5 py-0.5 text-[11px] cursor-pointer whitespace-nowrap"
+                >
+                  باز کردن همه گروه‌ها
+                </button>
+                <button
+                  type="button"
+                  onClick={collapseAllGroups}
+                  className="sap-btn-standard px-2.5 py-0.5 text-[11px] cursor-pointer whitespace-nowrap"
+                >
+                  بستن همه
+                </button>
+              </div>
+            </div>
+
+            {groupedData.map(group => {
+              const isOpen = isGroupExpanded(group.groupKey);
+              return (
               <div key={group.groupKey}>
-                <div className="bg-[#f5f5f5] px-3 py-2 flex flex-wrap items-center justify-between gap-2 text-xs">
+                <button
+                  type="button"
+                  onClick={() => toggleGroupExpand(group.groupKey)}
+                  className="w-full bg-[#f5f5f5] hover:bg-[#edf4fa] px-3 py-2 flex flex-wrap items-center justify-between gap-2 text-xs text-right cursor-pointer transition-colors"
+                >
                   <div className="flex items-center gap-2">
-                    <Layers className="w-3.5 h-3.5 text-[#007cc0]" />
+                    {isOpen ? (
+                      <ChevronUp className="w-3.5 h-3.5 text-[#007cc0] shrink-0" />
+                    ) : (
+                      <ChevronDown className="w-3.5 h-3.5 text-[#666666] shrink-0" />
+                    )}
+                    <Layers className="w-3.5 h-3.5 text-[#007cc0] shrink-0" />
                     <strong className="text-[#333333]">{group.groupTitle}</strong>
                     <span className="text-[#666666] font-mono">({toPersianDigits(group.items.length)} ردیف)</span>
                   </div>
@@ -1584,7 +1624,8 @@ export const StockInquiryView: React.FC<StockInquiryViewProps> = ({
                     <span className="text-[#666666]">فیزیکی: <strong>{formatWeightKg(group.totalPhysicalKg)}</strong></span>
                     <span className="text-[#107e3e]">آزاد ATP: <strong>{formatWeightKg(group.totalAvailableKg)}</strong></span>
                   </div>
-                </div>
+                </button>
+                {isOpen && (
                 <div className="overflow-x-auto">
                   <table className="sap-table-compact w-full text-right text-xs">
                     <thead className="bg-white border-b border-[#d9d9d9] text-[#333333] font-semibold">
@@ -1620,8 +1661,10 @@ export const StockInquiryView: React.FC<StockInquiryViewProps> = ({
                     </tbody>
                   </table>
                 </div>
+                )}
               </div>
-            ))}
+              );
+            })}
           </div>
         ) : (
           <>

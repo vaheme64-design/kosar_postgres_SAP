@@ -32,6 +32,7 @@ import { useErpRouter } from '../../context/RouterContext';
 import { CreateMoModal } from '../wip/CreateMoModal';
 import { OperationProductionModal } from '../wip/OperationProductionModal';
 import { MoRelationalGuideModal } from './MoRelationalGuideModal';
+import { usePersistedOpen, usePersistedExpandMap } from '../../hooks/usePersistedCollapse';
 
 interface ManufacturingOrdersManagementViewProps {
   parts: Part[];
@@ -76,7 +77,14 @@ export const ManufacturingOrdersManagementView: React.FC<ManufacturingOrdersMana
   const [loading, setLoading] = useState(false);
   const [statusFilter, setStatusFilter] = useState<'ALL' | ManufacturingOrderStatus>('ALL');
   const [searchQuery, setSearchQuery] = useState(() => router.route.docQuery || '');
-  const [showGuide, setShowGuide] = useState(false);
+  const [showGuide, , toggleGuide] = usePersistedOpen('mo_mgmt_guide_open', false);
+  const {
+    isExpanded: isMoCardExpanded,
+    toggle: toggleMoCard,
+    expandAll: expandAllMoCards,
+    collapseAll: collapseAllMoCards,
+    expandedCount: expandedMoCardsCount,
+  } = usePersistedExpandMap('mo_mgmt_cards_expanded', {});
 
   useEffect(() => {
     if (router.route.docQuery !== undefined && router.route.docQuery !== null) {
@@ -361,7 +369,7 @@ export const ManufacturingOrdersManagementView: React.FC<ManufacturingOrdersMana
             </button>
             <button
               type="button"
-              onClick={() => setShowGuide(prev => !prev)}
+              onClick={toggleGuide}
               className="text-[11px] font-semibold text-[#007cc0] flex items-center gap-1 bg-white px-2.5 py-1 rounded border border-[#b3ddf2] hover:bg-[#e5f3fa] cursor-pointer"
             >
               <span>{showGuide ? 'بستن خلاصه متنی' : 'خلاصه ۴ گام'}</span>
@@ -693,7 +701,33 @@ export const ManufacturingOrdersManagementView: React.FC<ManufacturingOrdersMana
         </div>
       ) : (
         <div className="space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2 px-3.5 py-2 bg-white border border-[#d9d9d9] rounded text-xs">
+            <span className="text-[#666666] tabular-nums">
+              کل دستورات: <strong className="font-mono text-[#333333]">{toPersianDigits(filteredOrders.length)}</strong> · بازشده:{' '}
+              <strong className="font-mono text-[#007cc0]">
+                {toPersianDigits(expandedMoCardsCount(filteredOrders.map(o => o.id)))}
+              </strong>
+            </span>
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => expandAllMoCards(filteredOrders.map(o => o.id))}
+                className="sap-btn-standard px-2.5 py-1 text-[11px] cursor-pointer whitespace-nowrap"
+              >
+                باز کردن همه
+              </button>
+              <button
+                type="button"
+                onClick={collapseAllMoCards}
+                className="sap-btn-standard px-2.5 py-1 text-[11px] cursor-pointer whitespace-nowrap"
+              >
+                بستن همه
+              </button>
+            </div>
+          </div>
+
           {filteredOrders.map(mo => {
+            const isCardExpanded = isMoCardExpanded(mo.id);
             const stMeta = STATUS_LABELS[mo.status] || {
               label: mo.status,
               badgeClass: 'bg-[#f2f2f2] text-[#333333] border-[#d9d9d9]',
@@ -701,6 +735,12 @@ export const ManufacturingOrdersManagementView: React.FC<ManufacturingOrdersMana
             const sortedOps = [...(mo.operations || [])].sort((a, b) => a.stepNumber - b.stepNumber);
             const totalOps = sortedOps.length;
             const completedOps = sortedOps.filter(o => o.status === 'COMPLETED').length;
+            const activeOp =
+              sortedOps.find(o => o.inProgressQty > 0) ||
+              sortedOps.find(o => o.waitingInputQty > 0) ||
+              sortedOps.find(o => o.readyForTransferQty > 0) ||
+              sortedOps.find(o => o.status !== 'COMPLETED');
+            const totalWaiting = sortedOps.reduce((s, o) => s + (o.waitingInputQty || 0), 0);
             const finalCompletionPct =
               mo.targetQuantity > 0
                 ? Math.min(100, Math.round(((mo.completedQuantity || 0) / mo.targetQuantity) * 100))
@@ -724,9 +764,19 @@ export const ManufacturingOrdersManagementView: React.FC<ManufacturingOrdersMana
             return (
               <div key={mo.id} className="sap-card overflow-hidden border border-[#d9d9d9]">
                 {/* MO Header */}
-                <div className="px-4 py-3 bg-[#f7f7f7] border-b border-[#d9d9d9] flex flex-col xl:flex-row xl:items-center justify-between gap-3 text-xs">
+                <div
+                  onClick={() => toggleMoCard(mo.id)}
+                  className={`px-4 py-3 bg-[#f7f7f7] flex flex-col xl:flex-row xl:items-center justify-between gap-3 text-xs cursor-pointer hover:bg-[#f0f6fb] transition-colors ${
+                    isCardExpanded ? 'border-b border-[#d9d9d9]' : ''
+                  }`}
+                >
                   <div className="space-y-1">
                     <div className="flex items-center gap-2 flex-wrap">
+                      {isCardExpanded ? (
+                        <ChevronUp className="w-4 h-4 text-[#007cc0] shrink-0" />
+                      ) : (
+                        <ChevronDown className="w-4 h-4 text-[#666666] shrink-0" />
+                      )}
                       <span className="font-mono font-bold text-sm text-[#007cc0] bg-[#e5f3fa] border border-[#b3d7ff] px-2.5 py-0.5 rounded">
                         {mo.moNumber}
                       </span>
@@ -749,6 +799,22 @@ export const ManufacturingOrdersManagementView: React.FC<ManufacturingOrdersMana
                       <span>
                         مراحل تکمیل‌شده: {toPersianDigits(completedOps)} از {toPersianDigits(totalOps)} ایستگاه
                       </span>
+                      {activeOp && (
+                        <>
+                          <span>·</span>
+                          <span className="text-[#007cc0] font-semibold">
+                            ایستگاه فعال: <span className="font-mono">{activeOp.stepCode}</span> ({activeOp.stepName})
+                          </span>
+                        </>
+                      )}
+                      {totalWaiting > 0 && (
+                        <>
+                          <span>·</span>
+                          <span className="text-[#e9730c] font-semibold font-mono tabular-nums">
+                            صف ورودی: {formatNumber(totalWaiting)}
+                          </span>
+                        </>
+                      )}
                       {mo.startDate && (
                         <>
                           <span>·</span>
@@ -765,7 +831,10 @@ export const ManufacturingOrdersManagementView: React.FC<ManufacturingOrdersMana
                   </div>
 
                   {/* Progress & Primary MO Actions */}
-                  <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+                  <div
+                    className="flex flex-col sm:flex-row sm:items-center gap-3"
+                    onClick={e => e.stopPropagation()}
+                  >
                     {/* Quantities & Progress Bar */}
                     <div className="min-w-[230px] bg-white border border-[#d9d9d9] rounded px-3 py-1.5 space-y-1">
                       <div className="flex items-center justify-between text-[11px]">
@@ -793,6 +862,14 @@ export const ManufacturingOrdersManagementView: React.FC<ManufacturingOrdersMana
 
                     {/* Action Buttons */}
                     <div className="flex items-center gap-1.5 flex-wrap">
+                      <button
+                        type="button"
+                        onClick={() => toggleMoCard(mo.id)}
+                        className="sap-btn-standard px-2.5 py-1.5 text-[11px] font-semibold flex items-center gap-1 cursor-pointer whitespace-nowrap"
+                      >
+                        <span>{isCardExpanded ? 'بستن مراحل' : 'مشاهده مراحل'}</span>
+                        {isCardExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                      </button>
                       <button
                         type="button"
                         onClick={() => {
@@ -869,6 +946,7 @@ export const ManufacturingOrdersManagementView: React.FC<ManufacturingOrdersMana
                 </div>
 
                 {/* Operations Table for this MO */}
+                {isCardExpanded && (
                 <div className="overflow-x-auto">
                   <table className="sap-table-compact w-full text-right text-xs">
                     <thead className="bg-white border-b border-[#d9d9d9] text-[#555555]">
@@ -960,6 +1038,7 @@ export const ManufacturingOrdersManagementView: React.FC<ManufacturingOrdersMana
                     </tbody>
                   </table>
                 </div>
+                )}
               </div>
             );
           })}
