@@ -797,6 +797,9 @@ const enrichPoolerParameters = (rawUrl: string): string => {
       if (!parsed.searchParams.has('connect_timeout')) {
         parsed.searchParams.set('connect_timeout', '20');
       }
+      if (!parsed.searchParams.has('sslmode')) {
+        parsed.searchParams.set('sslmode', 'require');
+      }
       return parsed.toString();
     }
     if (!isLocalhostUrl(rawUrl)) {
@@ -1672,7 +1675,31 @@ export const isMissingRelationError = (err: unknown): boolean => {
   );
 };
 
+const buildPrismaDdlUrl = (rawUrl: string): string => {
+  const enriched = enrichPoolerParameters(rawUrl);
+  try {
+    const parsed = new URL(enriched);
+    const host = parsed.hostname.toLowerCase();
+    // Prisma db push requires session-level DDL & advisory locks; Supabase Transaction Pooler (:6543 / pgbouncer=true)
+    // rejects DDL/prepared statements, so switch to Session Pooler (:5432) on the same IPv4 pooler host.
+    if (host.includes('pooler.supabase.com')) {
+      if (parsed.port === '6543' || parsed.searchParams.get('pgbouncer') === 'true') {
+        parsed.port = '5432';
+        parsed.searchParams.delete('pgbouncer');
+      }
+      parsed.searchParams.set('connection_limit', '1');
+      if (!parsed.searchParams.has('sslmode')) {
+        parsed.searchParams.set('sslmode', 'require');
+      }
+    }
+    return parsed.toString();
+  } catch {
+    return enriched;
+  }
+};
+
 async function runPrismaDbPush(dbUrl: string): Promise<{ ok: boolean; error?: string }> {
+  const ddlUrl = buildPrismaDdlUrl(dbUrl);
   const isWin = process.platform === 'win32';
   const localPrismaBin = path.resolve(
     process.cwd(),
@@ -1691,7 +1718,7 @@ async function runPrismaDbPush(dbUrl: string): Promise<{ ok: boolean; error?: st
       args,
       {
         cwd: process.cwd(),
-        env: { ...process.env, DATABASE_URL: dbUrl },
+        env: { ...process.env, DATABASE_URL: ddlUrl },
         timeout: 45_000,
         maxBuffer: 1024 * 1024 * 4,
       },
@@ -1918,7 +1945,10 @@ export async function ensureTargetSnapshotTables(client: PgClient): Promise<void
   );
 }
 
-export async function ensureTargetFullSchemaBestEffort(client: PgClient, targetUrl: string): Promise<boolean> {
+export async function ensureTargetFullSchemaBestEffort(
+  client: PgClient,
+  targetUrl: string,
+): Promise<{ ready: boolean; warning?: string }> {
   await ensureTargetSnapshotTables(client);
   try {
     const res = await client.query(
@@ -1926,16 +1956,19 @@ export async function ensureTargetFullSchemaBestEffort(client: PgClient, targetU
     );
     const row = res.rows?.[0] as { uom: string | null; parts: string | null } | undefined;
     if (row?.uom && row?.parts) {
-      return true;
+      return { ready: true };
     }
     const pushed = await runPrismaDbPush(targetUrl);
     if (pushed.ok) {
-      return true;
+      return { ready: true };
     }
-  } catch {
-    // Fallback to snapshots only
+    console.warn('[KPIMS Cloud Sync] prisma db push failed; falling back to snapshot tables only:', pushed.error);
+    return { ready: false, warning: pushed.error };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn('[KPIMS Cloud Sync] ensureTargetFullSchemaBestEffort error:', msg);
+    return { ready: false, warning: msg };
   }
-  return false;
 }
 
 export function setCloudManifestCache(

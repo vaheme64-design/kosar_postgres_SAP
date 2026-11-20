@@ -4655,7 +4655,8 @@ async function writeFullSnapshotBundleToPgUrl(
     targetUrl,
     65_000,
     async (pgClient, enrichedUrl) => {
-      const schemaReady = await ensureTargetFullSchemaBestEffort(pgClient, enrichedUrl);
+      const schemaEnsure = await ensureTargetFullSchemaBestEffort(pgClient, enrichedUrl);
+      const schemaReady = schemaEnsure.ready;
       await ensureTargetSnapshotTables(pgClient);
 
       let manifest: CloudSyncManifest;
@@ -5083,7 +5084,9 @@ async function writeFullSnapshotBundleToPgUrl(
           console.warn('[KPIMS Cloud Sync] Relational part batch sync warning:', relationalSyncWarning);
         }
       } else if (alsoSyncRelationalParts && !schemaReady) {
-        relationalSyncWarning = 'جداول رابطه‌ای PostgreSQL در پایگاه داده مقصد آماده نبود؛ اسنپ‌شات کامل ذخیره شد.';
+        relationalSyncWarning = schemaEnsure.warning
+          ? `جداول رابطه‌ای PostgreSQL ایجاد نشد (اسنپ‌شات کامل ذخیره شد): ${schemaEnsure.warning}`
+          : 'جداول رابطه‌ای PostgreSQL در پایگاه داده مقصد آماده نبود؛ اسنپ‌شات کامل ذخیره شد.';
       }
 
       return {
