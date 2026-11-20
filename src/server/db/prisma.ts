@@ -1701,35 +1701,61 @@ const buildPrismaDdlUrl = (rawUrl: string): string => {
 async function runPrismaDbPush(dbUrl: string): Promise<{ ok: boolean; error?: string }> {
   const ddlUrl = buildPrismaDdlUrl(dbUrl);
   const isWin = process.platform === 'win32';
+  const schemaPath = path.resolve(process.cwd(), 'prisma', 'schema.prisma');
+  const prismaCliJs = path.resolve(process.cwd(), 'node_modules', 'prisma', 'build', 'index.js');
   const localPrismaBin = path.resolve(
     process.cwd(),
     'node_modules',
     '.bin',
     isWin ? 'prisma.cmd' : 'prisma',
   );
-  const cmd = fs.existsSync(localPrismaBin) ? localPrismaBin : (isWin ? 'npx.cmd' : 'npx');
-  const args = fs.existsSync(localPrismaBin)
-    ? ['db', 'push', '--skip-generate', '--accept-data-loss']
-    : ['prisma', 'db', 'push', '--skip-generate', '--accept-data-loss'];
+
+  let cmd: string;
+  let args: string[];
+  let useShell = false;
+
+  if (fs.existsSync(prismaCliJs)) {
+    // Run Prisma's JS entrypoint directly via node executable to avoid Windows CVE-2024-27980 .cmd spawn EINVAL
+    cmd = process.execPath;
+    args = [prismaCliJs, 'db', 'push', '--schema', schemaPath, '--skip-generate', '--accept-data-loss'];
+  } else if (fs.existsSync(localPrismaBin)) {
+    cmd = localPrismaBin;
+    args = ['db', 'push', '--schema', schemaPath, '--skip-generate', '--accept-data-loss'];
+    useShell = isWin;
+  } else {
+    cmd = 'npx';
+    args = ['prisma', 'db', 'push', '--schema', schemaPath, '--skip-generate', '--accept-data-loss'];
+    useShell = isWin;
+  }
 
   return new Promise(resolve => {
-    execFile(
-      cmd,
-      args,
-      {
-        cwd: process.cwd(),
-        env: { ...process.env, DATABASE_URL: ddlUrl },
-        timeout: 45_000,
-        maxBuffer: 1024 * 1024 * 4,
-      },
-      (error, _stdout, stderr) => {
-        if (!error) {
-          resolve({ ok: true });
-        } else {
-          resolve({ ok: false, error: (stderr || error.message || 'prisma db push failed').slice(0, 300) });
-        }
-      },
-    );
+    try {
+      execFile(
+        cmd,
+        args,
+        {
+          cwd: process.cwd(),
+          env: { ...process.env, DATABASE_URL: ddlUrl },
+          timeout: 60_000,
+          maxBuffer: 1024 * 1024 * 4,
+          shell: useShell,
+          windowsHide: true,
+        },
+        (error, stdout, stderr) => {
+          if (!error) {
+            resolve({ ok: true });
+          } else {
+            const detail = (stderr || stdout || error.message || 'prisma db push failed').trim();
+            resolve({ ok: false, error: detail.slice(0, 350) });
+          }
+        },
+      );
+    } catch (syncErr) {
+      resolve({
+        ok: false,
+        error: (syncErr instanceof Error ? syncErr.message : String(syncErr)).slice(0, 350),
+      });
+    }
   });
 }
 

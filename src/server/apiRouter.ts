@@ -4653,7 +4653,7 @@ async function writeFullSnapshotBundleToPgUrl(
   const started = Date.now();
   return withNodePgClient(
     targetUrl,
-    65_000,
+    95_000,
     async (pgClient, enrichedUrl) => {
       const schemaEnsure = await ensureTargetFullSchemaBestEffort(pgClient, enrichedUrl);
       const schemaReady = schemaEnsure.ready;
